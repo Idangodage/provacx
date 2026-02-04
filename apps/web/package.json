@@ -11,6 +11,7 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
+    "@prisma/client": "^5.14.0",
     "@auth/prisma-adapter": "^2.0.0",
     "@hookform/resolvers": "^3.3.4",
     "@provacx/api": "workspace:*",
