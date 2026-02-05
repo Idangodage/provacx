@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { signIn } from "next-auth/react";
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -29,17 +29,6 @@ export default function LoginPage() {
     resolver: zodResolver(loginSchema),
   });
 
-  // Listen for OAuth callback messages from popup
-  useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      if (event.data?.type === "oauth-callback" && event.data?.success) {
-        router.push("/dashboard");
-      }
-    };
-    window.addEventListener("message", handleMessage);
-    return () => window.removeEventListener("message", handleMessage);
-  }, [router]);
-
   const onSubmit = async (data: LoginFormData) => {
     setIsLoading(true);
     setError(null);
@@ -63,39 +52,15 @@ export default function LoginPage() {
     }
   };
 
-  const handleGoogleSignIn = () => {
+  const handleGoogleSignIn = async () => {
     setIsGoogleLoading(true);
-
-    // Calculate popup position (center of screen)
-    const width = 500;
-    const height = 600;
-    const left = window.screenX + (window.outerWidth - width) / 2;
-    const top = window.screenY + (window.outerHeight - height) / 2;
-
-    // Open popup window
-    const popup = window.open(
-      `/api/auth/signin/google?callbackUrl=${encodeURIComponent("/dashboard")}`,
-      "google-signin",
-      `width=${width},height=${height},left=${left},top=${top},popup=1`
-    );
-
-    // Check if popup was blocked
-    if (!popup) {
+    try {
+      // Use direct redirect to Google OAuth
+      await signIn("google", { callbackUrl: "/dashboard" });
+    } catch {
+      setError("Failed to sign in with Google. Please try again.");
       setIsGoogleLoading(false);
-      // Fallback to redirect if popup blocked
-      signIn("google", { callbackUrl: "/dashboard" });
-      return;
     }
-
-    // Monitor popup closure
-    const checkClosed = setInterval(() => {
-      if (popup.closed) {
-        clearInterval(checkClosed);
-        setIsGoogleLoading(false);
-        // Check if user is now logged in
-        window.location.reload();
-      }
-    }, 500);
   };
 
   return (

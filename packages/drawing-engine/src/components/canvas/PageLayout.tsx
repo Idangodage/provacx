@@ -1,18 +1,13 @@
 'use client';
 
-import React from 'react';
-import type { Point2D } from '../../types';
-
 export interface PageLayoutProps {
   pageWidth: number;
   pageHeight: number;
   zoom: number;
-  panOffset: Point2D;
   showPage?: boolean;
   backgroundColor?: string;
   borderColor?: string;
   shadow?: string;
-  originOffset?: Point2D;
 }
 
 /**
@@ -23,17 +18,15 @@ export const PageLayout: React.FC<PageLayoutProps> = ({
   pageWidth,
   pageHeight,
   zoom,
-  panOffset,
   showPage = true,
   backgroundColor = '#fefcf7',
   borderColor = 'rgba(217, 177, 117, 0.9)',
   shadow = '0 20px 45px rgba(15, 23, 42, 0.15)',
-  originOffset = { x: 0, y: 0 },
 }) => {
   if (!showPage || pageWidth <= 0 || pageHeight <= 0) return null;
 
-  const pageLeft = originOffset.x + (-panOffset.x) * zoom;
-  const pageTop = originOffset.y + (-panOffset.y) * zoom;
+  // Page is always at origin (0,0) within host container
+  // The host container handles positioning, Fabric.js handles zoom/pan
   const pageWidthPx = pageWidth * zoom;
   const pageHeightPx = pageHeight * zoom;
 
@@ -41,8 +34,8 @@ export const PageLayout: React.FC<PageLayoutProps> = ({
     <div
       style={{
         position: 'absolute',
-        left: pageLeft,
-        top: pageTop,
+        left: 0,
+        top: 0,
         width: pageWidthPx,
         height: pageHeightPx,
         backgroundColor,

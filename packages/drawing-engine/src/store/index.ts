@@ -657,7 +657,8 @@ export const useDrawingStore = create<DrawingState>()(
       setActiveTool: (tool) => set({ activeTool: tool }),
 
       // View Actions
-      setZoom: (zoom) => set({ zoom: Math.max(0.1, Math.min(10, zoom)) }),
+      // Extended zoom range: 0.1 (10%) to 32 (3200%) for precision work
+      setZoom: (zoom) => set({ zoom: Math.max(0.1, Math.min(32, zoom)) }),
       setPanOffset: (offset) => set({ panOffset: offset }),
       setGridSize: (size) => set({ gridSize: size }),
       setSnapToGrid: (snap) => set({ snapToGrid: snap }),

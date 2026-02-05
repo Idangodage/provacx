@@ -1,169 +1,248 @@
 'use client';
 
-'use client';
+import React, { useEffect, useRef, useCallback } from 'react';
 
-import React, { useMemo } from 'react';
-import type { Point2D } from '../../types';
+// =============================================================================
+// Types
+// =============================================================================
 
-interface GridProps {
-  pageWidth: number;
-  pageHeight: number;
+export interface GridProps {
+  /** Canvas width in pixels */
+  width: number;
+  /** Canvas height in pixels */
+  height: number;
+  /** Current zoom level (1.0 = 100%) */
   zoom: number;
-  panOffset: Point2D;
-  showGrid?: boolean;
-  originOffset?: Point2D;
-  minorLineColor?: string;
-  majorLineColor?: string;
+  /** Pan offset X in screen pixels */
+  panX: number;
+  /** Pan offset Y in screen pixels */
+  panY: number;
+  /** Document/page width in canvas units */
+  pageWidth: number;
+  /** Document/page height in canvas units */
+  pageHeight: number;
+  /** Major grid size in canvas units (default: 100) */
+  majorGridSize?: number;
+  /** Minor grid size in canvas units (default: 10) */
+  minorGridSize?: number;
+  /** Sub-minor grid size in canvas units (optional) */
+  subMinorGridSize?: number;
+  /** Whether to show the grid */
+  visible?: boolean;
+  /** Whether to show center guidelines */
+  showGuidelines?: boolean;
+  /** Major grid color */
+  majorGridColor?: string;
+  /** Minor grid color */
+  minorGridColor?: string;
+  /** Sub-minor grid color */
+  subMinorGridColor?: string;
+  /** Pixel grid color (legacy, currently unused) */
+  pixelGridColor?: string;
+  /** Guideline color */
+  guidelineColor?: string;
+  /** Background color outside document */
+  backgroundColor?: string;
+  /** Document background color */
+  documentColor?: string;
+  /** Document border color */
+  documentBorderColor?: string;
 }
 
-const DEFAULT_MINOR_COLOR = 'rgba(148, 163, 184, 0.25)';
-const DEFAULT_MAJOR_COLOR = 'rgba(100, 116, 139, 0.4)';
+// =============================================================================
+// Grid Component
+// =============================================================================
 
-const PX_PER_INCH = 96;
-const MM_PER_INCH = 25.4;
-const PX_TO_MM = MM_PER_INCH / PX_PER_INCH;
-const MM_TO_PX = PX_PER_INCH / MM_PER_INCH;
-
-const getMajorStepMm = (scale: number) => {
-  if (scale < 1.25) return 20;
-  if (scale < 2.5) return 10;
-  if (scale < 4.5) return 5;
-  return 1;
-};
-
-const getMinorStepMm = (scale: number, majorStepMm: number) => {
-  const mmPx = MM_TO_PX * scale;
-  const candidates = [1, 2, 5];
-  for (const step of candidates) {
-    if (majorStepMm % step !== 0) continue;
-    if (step * mmPx >= 1.5) return step;
-  }
-  return majorStepMm;
-};
-
+/**
+ * High-performance canvas-based grid renderer with adaptive visibility.
+ * 
+ * Features:
+ * - Major grid lines (every 100 units by default)
+ * - Minor grid lines (every 10 units by default)
+ * - Optional sub-minor grid at high zoom
+ * - Center guidelines
+ * - Automatic visibility based on zoom level
+ * - Renders only visible area for performance
+ */
 export const Grid: React.FC<GridProps> = ({
+  width,
+  height,
+  zoom,
+  panX,
+  panY,
   pageWidth,
   pageHeight,
-  zoom,
-  panOffset,
-  showGrid = true,
-  originOffset = { x: 0, y: 0 },
-  minorLineColor = DEFAULT_MINOR_COLOR,
-  majorLineColor = DEFAULT_MAJOR_COLOR,
+  majorGridSize = 100,
+  minorGridSize = 10,
+  subMinorGridSize,
+  visible = true,
+  showGuidelines = true,
+  majorGridColor = 'rgba(150, 150, 150, 0.5)',
+  minorGridColor = 'rgba(200, 200, 200, 0.3)',
+  subMinorGridColor = 'rgba(220, 220, 220, 0.35)',
+  pixelGridColor: _pixelGridColor = 'rgba(180, 180, 180, 0.2)',
+  guidelineColor = 'rgba(0, 150, 255, 0.5)',
+  backgroundColor = '#2a2a2a',
+  documentColor = '#ffffff',
+  documentBorderColor = '#333333',
 }) => {
-  if (!showGrid || pageWidth <= 0 || pageHeight <= 0) return null;
+  const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const scale = Math.max(zoom, 0.01);
-  const majorStepMm = getMajorStepMm(scale);
-  const minorStepMm = getMinorStepMm(scale, majorStepMm);
-  const pageWidthMm = pageWidth * PX_TO_MM;
-  const pageHeightMm = pageHeight * PX_TO_MM;
+  // Convert screen coordinates to canvas (document) coordinates
+  const screenToCanvas = useCallback(
+    (screenX: number, screenY: number) => ({
+      x: (screenX - panX) / zoom,
+      y: (screenY - panY) / zoom,
+    }),
+    [panX, panY, zoom]
+  );
 
-  const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
-  const snapPx = (value: number) => Math.round(value * dpr) / dpr;
+  // Get visible canvas area in document coordinates
+  const getVisibleCanvasArea = useCallback(() => {
+    const topLeft = screenToCanvas(0, 0);
+    const bottomRight = screenToCanvas(width, height);
 
-  const gridLines = useMemo(() => {
-    const majorX: number[] = [];
-    const majorY: number[] = [];
-    const minorX: number[] = [];
-    const minorY: number[] = [];
-    const maxLines = 6000;
+    return {
+      left: Math.max(0, topLeft.x),
+      top: Math.max(0, topLeft.y),
+      right: Math.min(pageWidth, bottomRight.x),
+      bottom: Math.min(pageHeight, bottomRight.y),
+    };
+  }, [screenToCanvas, width, height, pageWidth, pageHeight]);
 
-    for (let value = 0; value <= pageWidthMm && majorX.length < maxLines; value += majorStepMm) {
-      majorX.push(value);
-    }
-    for (let value = 0; value <= pageHeightMm && majorY.length < maxLines; value += majorStepMm) {
-      majorY.push(value);
-    }
+  // Draw grid lines for a given spacing
+  const drawGridLines = useCallback(
+    (
+      ctx: CanvasRenderingContext2D,
+      spacing: number,
+      viewport: ReturnType<typeof getVisibleCanvasArea>
+    ) => {
+      ctx.beginPath();
 
-    if (minorStepMm !== majorStepMm) {
-      for (let value = 0; value <= pageWidthMm && minorX.length < maxLines; value += minorStepMm) {
-        if (Math.abs(value % majorStepMm) < 0.0001) continue;
-        minorX.push(value);
+      // Vertical lines
+      const startX = Math.floor(viewport.left / spacing) * spacing;
+      for (let x = startX; x <= viewport.right; x += spacing) {
+        ctx.moveTo(x, viewport.top);
+        ctx.lineTo(x, viewport.bottom);
       }
-      for (let value = 0; value <= pageHeightMm && minorY.length < maxLines; value += minorStepMm) {
-        if (Math.abs(value % majorStepMm) < 0.0001) continue;
-        minorY.push(value);
+
+      // Horizontal lines
+      const startY = Math.floor(viewport.top / spacing) * spacing;
+      for (let y = startY; y <= viewport.bottom; y += spacing) {
+        ctx.moveTo(viewport.left, y);
+        ctx.lineTo(viewport.right, y);
       }
+
+      ctx.stroke();
+    },
+    []
+  );
+
+  // Main render function
+  const render = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // Clear canvas
+    ctx.clearRect(0, 0, width, height);
+
+    // Draw outer background
+    ctx.fillStyle = backgroundColor;
+    ctx.fillRect(0, 0, width, height);
+
+    // Save context and apply transform
+    ctx.save();
+    ctx.translate(panX, panY);
+    ctx.scale(zoom, zoom);
+
+    // Draw document background
+    ctx.fillStyle = documentColor;
+    ctx.fillRect(0, 0, pageWidth, pageHeight);
+
+    // Draw document border
+    ctx.strokeStyle = documentBorderColor;
+    ctx.lineWidth = 2 / zoom;
+    ctx.strokeRect(0, 0, pageWidth, pageHeight);
+
+    // Draw grids if visible
+    if (visible) {
+      const viewport = getVisibleCanvasArea();
+      const subMinorSpacing = (subMinorGridSize ?? 0) * zoom;
+      const minorSpacing = minorGridSize * zoom;
+      const majorSpacing = majorGridSize * zoom;
+
+      // Sub-minor grid (only when spacing is reasonable)
+      if (subMinorGridSize && subMinorSpacing >= 4) {
+        ctx.strokeStyle = subMinorGridColor;
+        ctx.lineWidth = 1 / zoom;
+        drawGridLines(ctx, subMinorGridSize, viewport);
+      }
+
+      // Minor grid - only show when spacing is reasonable (4-200 screen pixels)
+      if (minorSpacing >= 4 && minorSpacing <= 200) {
+        ctx.strokeStyle = minorGridColor;
+        ctx.lineWidth = 1 / zoom;
+        drawGridLines(ctx, minorGridSize, viewport);
+      }
+
+      // Major grid - show when spacing >= 4 screen pixels
+      if (majorSpacing >= 4) {
+        ctx.strokeStyle = majorGridColor;
+        ctx.lineWidth = 1 / zoom;
+        drawGridLines(ctx, majorGridSize, viewport);
+      }
+
+      // Pixel grid disabled to avoid double sub-grids when aligned to ruler ticks
     }
 
-    return { majorX, majorY, minorX, minorY, majorStepMm };
-  }, [pageWidthMm, pageHeightMm, majorStepMm, minorStepMm]);
+    // Center guidelines removed
 
-  const pageLeft = originOffset.x + (-panOffset.x) * scale;
-  const pageTop = originOffset.y + (-panOffset.y) * scale;
-  const pageWidthPx = pageWidth * scale;
-  const pageHeightPx = pageHeight * scale;
+    ctx.restore();
+  }, [
+    width,
+    height,
+    zoom,
+    panX,
+    panY,
+    pageWidth,
+    pageHeight,
+    majorGridSize,
+    minorGridSize,
+    subMinorGridSize,
+    visible,
+    showGuidelines,
+    majorGridColor,
+    minorGridColor,
+    subMinorGridColor,
+    guidelineColor,
+    backgroundColor,
+    documentColor,
+    documentBorderColor,
+    getVisibleCanvasArea,
+    drawGridLines,
+  ]);
+
+  // Re-render when dependencies change
+  useEffect(() => {
+    render();
+  }, [render]);
 
   return (
-    <div
+    <canvas
+      ref={canvasRef}
+      width={width}
+      height={height}
       style={{
         position: 'absolute',
-        left: pageLeft,
-        top: pageTop,
-        width: pageWidthPx,
-        height: pageHeightPx,
+        left: 0,
+        top: 0,
         pointerEvents: 'none',
-        zIndex: 1,
-        overflow: 'hidden',
+        zIndex: 0,
       }}
-    >
-      {gridLines.minorX.map((value) => (
-        <div
-          key={`grid-minor-x-${value}`}
-          style={{
-            position: 'absolute',
-            top: 0,
-            left: snapPx((value / PX_TO_MM) * scale),
-            width: 1,
-            height: '100%',
-            backgroundColor: minorLineColor,
-          }}
-        />
-      ))}
-
-      {gridLines.minorY.map((value) => (
-        <div
-          key={`grid-minor-y-${value}`}
-          style={{
-            position: 'absolute',
-            left: 0,
-            top: snapPx((value / PX_TO_MM) * scale),
-            height: 1,
-            width: '100%',
-            backgroundColor: minorLineColor,
-          }}
-        />
-      ))}
-
-      {gridLines.majorX.map((value) => (
-        <div
-          key={`grid-major-x-${value}`}
-          style={{
-            position: 'absolute',
-            top: 0,
-            left: snapPx((value / PX_TO_MM) * scale),
-            width: 1,
-            height: '100%',
-            backgroundColor: majorLineColor,
-          }}
-        />
-      ))}
-
-      {gridLines.majorY.map((value) => (
-        <div
-          key={`grid-major-y-${value}`}
-          style={{
-            position: 'absolute',
-            left: 0,
-            top: snapPx((value / PX_TO_MM) * scale),
-            height: 1,
-            width: '100%',
-            backgroundColor: majorLineColor,
-          }}
-        />
-      ))}
-    </div>
+    />
   );
 };
 

@@ -5,7 +5,7 @@
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import bcrypt from "bcryptjs";
 import NextAuth from "next-auth";
-import type { NextAuthConfig } from "next-auth";
+import type { NextAuthConfig, NextAuthResult } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import Google from "next-auth/providers/google";
 import { z } from "zod";
@@ -33,6 +33,12 @@ export const authConfig: NextAuthConfig = {
       clientId: process.env.GOOGLE_CLIENT_ID!,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
       allowDangerousEmailAccountLinking: true,
+      authorization: {
+        params: {
+          prompt: "select_account",  // Always show account picker
+          access_type: "offline",     // Get refresh token
+        },
+      },
     }),
     Credentials({
       name: "credentials",
@@ -73,27 +79,44 @@ export const authConfig: NextAuthConfig = {
     }),
   ],
   callbacks: {
-    async jwt({ token, user }) {
+    async jwt({ token, user, account, profile }) {
+      // Initial sign in
       if (user) {
         token.id = user.id;
+        token.email = user.email;
+        token.name = user.name;
+        token.image = user.image;
       }
+      
+      // Google OAuth - ensure we have the profile data
+      if (account?.provider === "google" && profile) {
+        token.email = profile.email;
+        token.name = profile.name;
+        token.image = profile.picture;
+      }
+      
       return token;
     },
     async session({ session, token }) {
       if (token && session.user) {
         session.user.id = token.id as string;
+        session.user.email = token.email as string;
+        session.user.name = token.name as string;
+        session.user.image = token.image as string;
       }
       return session;
     },
   },
 };
 
-export const {
-  handlers: { GET, POST },
-  auth,
-  signIn,
-  signOut,
-} = NextAuth(authConfig);
+const nextAuth: NextAuthResult = NextAuth(authConfig);
+
+export const handlers: NextAuthResult["handlers"] = nextAuth.handlers;
+export const auth: NextAuthResult["auth"] = nextAuth.auth;
+export const signIn: NextAuthResult["signIn"] = nextAuth.signIn;
+export const signOut: NextAuthResult["signOut"] = nextAuth.signOut;
+
+export const { GET, POST } = handlers;
 
 /**
  * Get session on server side

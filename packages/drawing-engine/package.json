@@ -33,9 +33,9 @@
   "dependencies": {
     "@provacx/shared": "workspace:*",
     "fabric": "^6.0.0",
-    "konva": "^10.2.0",
+    "konva": "^9.3.6",
     "lucide-react": "^0.378.0",
-    "react-konva": "^19.2.1",
+    "react-konva": "^18.2.10",
     "zustand": "^4.5.2"
   },
   "devDependencies": {

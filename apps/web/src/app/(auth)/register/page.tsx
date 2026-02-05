@@ -22,24 +22,42 @@ const registerSchema = z.object({
 
 type RegisterFormData = z.infer<typeof registerSchema>;
 
+type RegistrationState = "form" | "success" | "redirecting";
+
 export default function RegisterPage() {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isGoogleLoading, setIsGoogleLoading] = useState(false);
+  const [registrationState, setRegistrationState] = useState<RegistrationState>("form");
+  const [userName, setUserName] = useState("");
+  const [countdown, setCountdown] = useState(3);
 
   const checkEmail = trpc.user.checkEmail.useMutation();
 
-  // Listen for OAuth callback messages from popup
+  // Countdown and redirect after successful registration
   useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      if (event.data?.type === "oauth-callback" && event.data?.success) {
-        router.push("/onboarding");
-      }
-    };
-    window.addEventListener("message", handleMessage);
-    return () => window.removeEventListener("message", handleMessage);
-  }, [router]);
+    if (registrationState === "success") {
+      const timer = setInterval(() => {
+        setCountdown((prev) => {
+          if (prev <= 1) {
+            clearInterval(timer);
+            setRegistrationState("redirecting");
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+      return () => clearInterval(timer);
+    }
+  }, [registrationState]);
+
+  // Redirect after countdown
+  useEffect(() => {
+    if (registrationState === "redirecting") {
+      router.push("/onboarding/organization");
+    }
+  }, [registrationState, router]);
 
   const {
     register,
@@ -78,12 +96,20 @@ export default function RegisterPage() {
         throw new Error("Registration failed");
       }
 
-      // Sign in
-      await signIn("credentials", {
+      // Sign in silently (redirect: false)
+      const signInResult = await signIn("credentials", {
         email: data.email,
         password: data.password,
-        callbackUrl: "/onboarding",
+        redirect: false,
       });
+
+      if (signInResult?.error) {
+        throw new Error("Sign in failed");
+      }
+
+      // Show success state
+      setUserName(data.name.split(" ")[0] ?? ""); // First name only
+      setRegistrationState("success");
     } catch {
       setError("Registration failed. Please try again.");
     } finally {
@@ -91,41 +117,104 @@ export default function RegisterPage() {
     }
   };
 
-  const handleGoogleSignIn = () => {
+  const handleGoogleSignIn = async () => {
     setIsGoogleLoading(true);
-
-    // Calculate popup position (center of screen)
-    const width = 500;
-    const height = 600;
-    const left = window.screenX + (window.outerWidth - width) / 2;
-    const top = window.screenY + (window.outerHeight - height) / 2;
-
-    // Open popup window
-    const popup = window.open(
-      `/api/auth/signin/google?callbackUrl=${encodeURIComponent("/onboarding")}`,
-      "google-signin",
-      `width=${width},height=${height},left=${left},top=${top},popup=1`
-    );
-
-    // Check if popup was blocked
-    if (!popup) {
+    try {
+      await signIn("google", { callbackUrl: "/onboarding/organization" });
+    } catch {
+      setError("Failed to sign in with Google. Please try again.");
       setIsGoogleLoading(false);
-      // Fallback to redirect if popup blocked
-      signIn("google", { callbackUrl: "/onboarding" });
-      return;
     }
-
-    // Monitor popup closure
-    const checkClosed = setInterval(() => {
-      if (popup.closed) {
-        clearInterval(checkClosed);
-        setIsGoogleLoading(false);
-        // Check if user is now logged in
-        window.location.reload();
-      }
-    }, 500);
   };
 
+  // Success Screen
+  if (registrationState === "success" || registrationState === "redirecting") {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-gray-50">
+        <div className="w-full max-w-md space-y-8 rounded-xl bg-white p-8 shadow-lg text-center">
+          {/* Success Icon */}
+          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-green-100">
+            <svg
+              className="h-8 w-8 text-green-600"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M5 13l4 4L19 7"
+              />
+            </svg>
+          </div>
+
+          {/* Welcome Message */}
+          <div>
+            <h2 className="text-2xl font-bold text-gray-900">
+              Welcome to ProvacX{userName ? `, ${userName}` : ""}! 🎉
+            </h2>
+            <p className="mt-2 text-gray-600">
+              Your account has been created successfully.
+            </p>
+          </div>
+
+          {/* Progress Indicator */}
+          <div className="space-y-4">
+            <p className="text-sm text-gray-500">
+              {registrationState === "redirecting" 
+                ? "Redirecting you now..." 
+                : `Setting up your workspace in ${countdown}...`}
+            </p>
+            
+            {/* Loading Animation */}
+            <div className="flex justify-center">
+              <div className="flex space-x-2">
+                <div className="h-2 w-2 animate-bounce rounded-full bg-blue-600" style={{ animationDelay: "0ms" }} />
+                <div className="h-2 w-2 animate-bounce rounded-full bg-blue-600" style={{ animationDelay: "150ms" }} />
+                <div className="h-2 w-2 animate-bounce rounded-full bg-blue-600" style={{ animationDelay: "300ms" }} />
+              </div>
+            </div>
+
+            {/* Skip Button */}
+            <button
+              onClick={() => router.push("/onboarding/organization")}
+              className="text-sm text-blue-600 hover:underline"
+            >
+              Continue now →
+            </button>
+          </div>
+
+          {/* What's Next */}
+          <div className="rounded-lg bg-blue-50 p-4 text-left">
+            <h3 className="text-sm font-medium text-blue-900">What&apos;s next?</h3>
+            <ul className="mt-2 space-y-1 text-sm text-blue-700">
+              <li className="flex items-center gap-2">
+                <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                </svg>
+                Set up your organization
+              </li>
+              <li className="flex items-center gap-2">
+                <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                </svg>
+                Create your first project
+              </li>
+              <li className="flex items-center gap-2">
+                <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                </svg>
+                Invite your team members
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Registration Form
   return (
     <div className="flex min-h-screen items-center justify-center bg-gray-50">
       <div className="w-full max-w-md space-y-8 rounded-xl bg-white p-8 shadow-lg">
