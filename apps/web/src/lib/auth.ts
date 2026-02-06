@@ -19,6 +19,7 @@ const credentialsSchema = z.object({
 
 export const authConfig: NextAuthConfig = {
   adapter: PrismaAdapter(prisma),
+  debug: process.env.NODE_ENV === "development",
   session: {
     strategy: "jwt",
   },
@@ -73,15 +74,47 @@ export const authConfig: NextAuthConfig = {
     }),
   ],
   callbacks: {
-    async jwt({ token, user }) {
-      if (user) {
+    async signIn({ user, account, profile }) {
+      try {
+        // Log sign-in attempts for debugging
+        console.log("SignIn callback:", {
+          email: user?.email,
+          provider: account?.provider,
+          hasProfile: !!profile
+        });
+
+        // For OAuth providers, check if we can connect to database
+        if (account?.provider === "google") {
+          console.log("Google OAuth sign-in attempt for:", user?.email);
+
+          // Test database connection
+          const dbTest = await prisma.$queryRaw`SELECT 1 as test`;
+          console.log("Database connection test:", dbTest);
+        }
+
+        return true;
+      } catch (error) {
+        console.error("SignIn callback error:", error);
+        return false;
+      }
+    },
+    async jwt({ token, user, account }) {
+      // Initial sign in - user object is only available on first call
+      if (account && user) {
+        console.log("JWT callback - initial sign in:", { email: user.email });
         token.id = user.id;
+        token.email = user.email;
+        token.name = user.name;
+        token.picture = user.image;
       }
       return token;
     },
     async session({ session, token }) {
       if (token && session.user) {
         session.user.id = token.id as string;
+        session.user.email = token.email as string;
+        session.user.name = token.name as string;
+        session.user.image = token.picture as string;
       }
       return session;
     },
