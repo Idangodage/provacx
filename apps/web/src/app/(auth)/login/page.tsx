@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { getProviders, signIn, useSession } from "next-auth/react";
 import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
@@ -36,7 +36,6 @@ function getAuthErrorMessage(error: string) {
 
 export default function LoginPage() {
   const router = useRouter();
-  const searchParams = useSearchParams();
   const { status } = useSession();
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -59,10 +58,10 @@ export default function LoginPage() {
   }, [router, status]);
 
   useEffect(() => {
-    const errorParam = searchParams.get("error");
+    const errorParam = new URLSearchParams(window.location.search).get("error");
     if (!errorParam) return;
     setError(getAuthErrorMessage(errorParam));
-  }, [searchParams]);
+  }, []);
 
   useEffect(() => {
     getProviders()
