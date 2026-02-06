@@ -1,490 +1,294 @@
 'use client';
 
-import React, { useEffect, useRef, useCallback } from 'react';
+import React, { useMemo } from 'react';
+import type { Point2D } from '../../types';
 
-// =============================================================================
-// Constants
-// =============================================================================
+interface RulerTick {
+  value: number;
+  pos: number;
+}
+
+interface RulerTickData {
+  major: RulerTick[];
+  minor: RulerTick[];
+  majorStep: number;
+}
+
+export interface RulersProps {
+  pageWidth: number;
+  pageHeight: number;
+  zoom: number;
+  panOffset: Point2D;
+  viewportWidth: number;
+  viewportHeight: number;
+  showRulers?: boolean;
+  rulerSize?: number;
+  originOffset?: Point2D;
+}
+
+const DEFAULT_RULER_BG = '#fff2d6';
+const DEFAULT_RULER_BORDER = 'rgba(217, 177, 117, 0.9)';
+const DEFAULT_RULER_TEXT = '#6b7280';
+const DEFAULT_TICK_MAJOR = '#7f7f7f';
+const DEFAULT_TICK_MINOR = '#b5b5b5';
 
 const PX_PER_INCH = 96;
 const MM_PER_INCH = 25.4;
-const MM_PER_CANVAS_UNIT = MM_PER_INCH / PX_PER_INCH;
-const MIN_LABEL_SPACING_PX = 45;
-const MIN_MAJOR_TICK_PX = 40;
-const MIN_SUB_TICK_PX = 3;
-const TICK_SUBDIVISIONS = 10;
+const PX_TO_MM = MM_PER_INCH / PX_PER_INCH;
+const MM_TO_PX = PX_PER_INCH / MM_PER_INCH;
 
-// =============================================================================
-// Types
-// =============================================================================
+const getMajorStepMm = (scale: number) => {
+  if (scale < 1.25) return 20;
+  if (scale < 2.5) return 10;
+  if (scale < 4.5) return 5;
+  return 1;
+};
 
-export interface RulersProps {
-  /** Canvas width in pixels */
-  width: number;
-  /** Canvas height in pixels */
-  height: number;
-  /** Current zoom level (1.0 = 100%) */
-  zoom: number;
-  /** Pan offset X in screen pixels */
-  panX: number;
-  /** Pan offset Y in screen pixels */
-  panY: number;
-  /** Document/page width in canvas units */
-  pageWidth: number;
-  /** Document/page height in canvas units */
-  pageHeight: number;
-  /** Major tick spacing in mm (optional, overrides adaptive spacing) */
-  majorTickMm?: number;
-  /** Sub-division count between major ticks */
-  tickSubdivisions?: number;
-  /** Ruler thickness in screen pixels (default: 30) */
-  rulerSize?: number;
-  /** Whether to show rulers */
-  visible?: boolean;
-  /** Current mouse position in screen coordinates (for crosshair) */
-  mousePosition?: { x: number; y: number } | null;
-  /** Whether to show crosshair lines */
-  showCrosshair?: boolean;
-  /** Ruler background color */
-  backgroundColor?: string;
-  /** Ruler tick color */
-  tickColor?: string;
-  /** Ruler text color */
-  textColor?: string;
-  /** Crosshair color */
-  crosshairColor?: string;
-  /** Corner background color */
-  cornerColor?: string;
-}
+const getMinorStepMm = (scale: number, majorStepMm: number) => {
+  const mmPx = MM_TO_PX * scale;
+  const candidates = [1, 2, 5];
+  for (const step of candidates) {
+    if (majorStepMm % step !== 0) continue;
+    if (step * mmPx >= 1.5) return step;
+  }
+  return majorStepMm;
+};
 
-// =============================================================================
-// Rulers Component
-// =============================================================================
+const formatLabel = (valueMm: number, majorStepMm: number) => {
+  const cm = valueMm / 10;
+  if (majorStepMm >= 10) {
+    const rounded = Math.round(cm);
+    return rounded === 0 ? '0' : rounded.toString();
+  }
+  if (Math.abs(cm) < 0.0001) return '0';
+  return cm.toFixed(1);
+};
 
-/**
- * Canvas-based rulers with adaptive tick spacing.
- * 
- * Features:
- * - Horizontal and vertical rulers
- * - Adaptive tick density based on zoom level
- * - Crosshair following mouse cursor
- * - Numbers show canvas coordinates
- * - Fixed UI size (doesn't scale with zoom)
- */
 export const Rulers: React.FC<RulersProps> = ({
-  width,
-  height,
-  zoom,
-  panX,
-  panY,
   pageWidth,
   pageHeight,
-  majorTickMm: majorTickMmProp,
-  tickSubdivisions = TICK_SUBDIVISIONS,
-  rulerSize = 30,
-  visible = true,
-  mousePosition = null,
-  showCrosshair = true,
-  backgroundColor = '#e5e5e5',
-  tickColor = '#666666',
-  textColor = '#333333',
-  crosshairColor = 'rgba(255, 100, 100, 0.5)',
-  cornerColor = '#e5e5e5',
+  zoom,
+  panOffset,
+  viewportWidth,
+  viewportHeight,
+  showRulers = true,
+  rulerSize = 24,
+  originOffset = { x: 0, y: 0 },
 }) => {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  if (!showRulers || viewportWidth <= 0 || viewportHeight <= 0) return null;
 
-  // Convert canvas coordinates to screen position
-  const canvasToScreen = useCallback(
-    (canvasX: number, canvasY: number) => ({
-      x: canvasX * zoom + panX,
-      y: canvasY * zoom + panY,
+  const leftRulerWidth = Math.round(rulerSize * 1.2);
+  const scale = Math.max(zoom, 0.01);
+
+  const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+  const snapPx = (value: number) => Math.round(value * dpr) / dpr;
+
+  const getTicks = (axis: 'x' | 'y'): RulerTickData => {
+    const viewport = axis === 'x' ? viewportWidth : viewportHeight;
+    const pageSizePx = axis === 'x' ? pageWidth : pageHeight;
+    const pan = axis === 'x' ? panOffset.x : panOffset.y;
+
+    if (pageSizePx <= 0 || viewport <= 0) {
+      return { major: [], minor: [], majorStep: 10 };
+    }
+
+    const majorStepMm = getMajorStepMm(scale);
+    const minorStepMm = getMinorStepMm(scale, majorStepMm);
+    const minorStepPx = minorStepMm * MM_TO_PX * scale;
+    const showMinor = minorStepPx >= 1;
+
+    const viewStartPx = Math.max(0, pan);
+    const viewEndPx = Math.min(pageSizePx, pan + viewport / scale);
+    const viewStartMm = viewStartPx * PX_TO_MM;
+    const viewEndMm = viewEndPx * PX_TO_MM;
+
+    if (viewEndMm <= viewStartMm) {
+      return { major: [], minor: [], majorStep: majorStepMm };
+    }
+
+    const firstMajor = Math.floor(viewStartMm / majorStepMm) * majorStepMm;
+    const lastMajor = Math.ceil(viewEndMm / majorStepMm) * majorStepMm;
+
+    const major: RulerTick[] = [];
+    const minor: RulerTick[] = [];
+
+    const maxMajorTicks = 500;
+    let count = 0;
+    for (let value = firstMajor; value <= lastMajor && count < maxMajorTicks; value += majorStepMm, count++) {
+      if (value < 0 || value > pageSizePx * PX_TO_MM) continue;
+      const valuePx = value / PX_TO_MM;
+      const pos = (valuePx - pan) * scale;
+      major.push({ value, pos });
+
+      if (showMinor && minorStepMm < majorStepMm) {
+        const stepsPerMajor = Math.round(majorStepMm / minorStepMm);
+        for (let i = 1; i < stepsPerMajor; i++) {
+          const minorValue = value + i * minorStepMm;
+          if (minorValue < viewStartMm || minorValue > viewEndMm) continue;
+          if (minorValue < 0 || minorValue > pageSizePx * PX_TO_MM) continue;
+          const minorValuePx = minorValue / PX_TO_MM;
+          const minorPos = (minorValuePx - pan) * scale;
+          minor.push({ value: minorValue, pos: minorPos });
+        }
+      }
+    }
+
+    return { major, minor, majorStep: majorStepMm };
+  };
+
+  const rulerData = useMemo(
+    () => ({
+      x: getTicks('x'),
+      y: getTicks('y'),
     }),
-    [zoom, panX, panY]
+    [pageWidth, pageHeight, viewportWidth, viewportHeight, panOffset.x, panOffset.y, scale]
   );
 
-  // Convert screen coordinates to canvas coordinates
-  const screenToCanvas = useCallback(
-    (screenX: number, screenY: number) => ({
-      x: (screenX - panX) / zoom,
-      y: (screenY - panY) / zoom,
-    }),
-    [zoom, panX, panY]
-  );
-
-  // Convert canvas units to ruler units (mm)
-  const canvasToUnits = useCallback((value: number) => value * MM_PER_CANVAS_UNIT, []);
-
-  // Convert ruler units (mm) to canvas units
-  const unitsToCanvas = useCallback((value: number) => value / MM_PER_CANVAS_UNIT, []);
-
-  // Get page bounds in screen coordinates
-  const getPageBounds = useCallback(() => {
-    const left = panX;
-    const top = panY;
-    const right = panX + pageWidth * zoom;
-    const bottom = panY + pageHeight * zoom;
-
-    return { left, top, right, bottom };
-  }, [panX, panY, pageWidth, pageHeight, zoom]);
-
-  // Get ruler bounds, clamped to canvas edges when page goes out of view
-  const getRulerBounds = useCallback(() => {
-    const { left: pageLeft, top: pageTop, right: pageRight, bottom: pageBottom } = getPageBounds();
-    const maxRulerTop = Math.max(0, height - rulerSize);
-    const maxRulerLeft = Math.max(0, width - rulerSize);
-    const rulerTop = Math.min(Math.max(pageTop - rulerSize, 0), maxRulerTop);
-    const rulerLeft = Math.min(Math.max(pageLeft - rulerSize, 0), maxRulerLeft);
-    const rulerBottom = rulerTop + rulerSize;
-    const rulerRight = rulerLeft + rulerSize;
-
-    return {
-      pageLeft,
-      pageTop,
-      pageRight,
-      pageBottom,
-      rulerTop,
-      rulerBottom,
-      rulerLeft,
-      rulerRight,
-    };
-  }, [getPageBounds, width, height, rulerSize]);
-
-  // Get visible canvas area in document coordinates
-  const getVisibleCanvasArea = useCallback(() => {
-    const topLeft = screenToCanvas(0, 0);
-    const bottomRight = screenToCanvas(width, height);
-
-    return {
-      left: Math.max(0, topLeft.x),
-      top: Math.max(0, topLeft.y),
-      right: Math.min(pageWidth, bottomRight.x),
-      bottom: Math.min(pageHeight, bottomRight.y),
-    };
-  }, [screenToCanvas, width, height, pageWidth, pageHeight]);
-
-  // Calculate adaptive major tick spacing based on zoom
-  const getAdaptiveTickSpacing = useCallback(() => {
-    if (majorTickMmProp && majorTickMmProp > 0) {
-      return majorTickMmProp;
-    }
-    const spacings = [5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000]; // mm
-
-    for (const spacing of spacings) {
-      const screenSpacing = unitsToCanvas(spacing) * zoom;
-      if (screenSpacing >= MIN_MAJOR_TICK_PX) {
-        return spacing;
-      }
-    }
-
-    return 5000;
-  }, [majorTickMmProp, zoom, unitsToCanvas]);
-
-  const isMultiple = useCallback((value: number, interval: number) => {
-    if (interval === 0) return false;
-    const ratio = value / interval;
-    return Math.abs(ratio - Math.round(ratio)) < 1e-6;
-  }, []);
-
-  const formatLabel = useCallback((value: number) => {
-    const rounded = Math.round(value);
-    if (Math.abs(value - rounded) < 1e-6) {
-      return rounded.toString();
-    }
-
-    const oneDecimal = Math.round(value * 10) / 10;
-    if (Math.abs(value - oneDecimal) < 1e-6) {
-      return oneDecimal.toFixed(1);
-    }
-
-    return value.toFixed(2).replace(/\.?0+$/, '');
-  }, []);
-
-  // Draw horizontal ruler (top)
-  const drawHorizontalRuler = useCallback(
-    (ctx: CanvasRenderingContext2D) => {
-      const viewport = getVisibleCanvasArea();
-      const majorTickMm = getAdaptiveTickSpacing();
-      const subTickMm = majorTickMm / Math.max(1, tickSubdivisions);
-      const midTickMm = majorTickMm / 2;
-      const majorSpacingPx = unitsToCanvas(majorTickMm) * zoom;
-      const showSubTicks = unitsToCanvas(subTickMm) * zoom >= MIN_SUB_TICK_PX;
-      const showMidLabels = showSubTicks && majorSpacingPx >= MIN_LABEL_SPACING_PX * 2;
-      const { pageLeft, pageRight, rulerTop, rulerBottom } = getRulerBounds();
-
-      ctx.fillStyle = textColor;
-      ctx.strokeStyle = tickColor;
-      ctx.font = '11px Arial';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'top';
-
-      const viewportLeft = canvasToUnits(viewport.left);
-      const viewportRight = canvasToUnits(viewport.right);
-      // Sub-ticks
-      if (showSubTicks) {
-        const startSub = Math.floor(viewportLeft / subTickMm) * subTickMm;
-        for (let value = startSub; value <= viewportRight; value += subTickMm) {
-          if (isMultiple(value, majorTickMm)) continue;
-
-          const canvasX = unitsToCanvas(value);
-          const x = canvasToScreen(canvasX, 0).x;
-
-          if (x < pageLeft || x > pageRight) continue;
-
-          const isMid = isMultiple(value, midTickMm);
-          const tickHeight = isMid ? 8 : 4;
-
-          ctx.beginPath();
-          ctx.moveTo(x, rulerBottom - tickHeight);
-          ctx.lineTo(x, rulerBottom);
-          ctx.stroke();
-
-          if (isMid && showMidLabels) {
-            ctx.fillText(formatLabel(value), x, rulerTop + 2);
-          }
-        }
-      }
-
-      // Major ticks + labels
-      let lastLabelX = -Infinity;
-      const startMajor = Math.floor(viewportLeft / majorTickMm) * majorTickMm;
-      for (let value = startMajor; value <= viewportRight; value += majorTickMm) {
-        const canvasX = unitsToCanvas(value);
-        const x = canvasToScreen(canvasX, 0).x;
-
-        if (x < pageLeft || x > pageRight) continue;
-
-        ctx.beginPath();
-        ctx.moveTo(x, rulerBottom - 15);
-        ctx.lineTo(x, rulerBottom);
-        ctx.stroke();
-
-        if (x - lastLabelX >= MIN_LABEL_SPACING_PX) {
-          ctx.fillText(formatLabel(value), x, rulerTop + 2);
-          lastLabelX = x;
-        }
-      }
-    },
-    [getVisibleCanvasArea, getAdaptiveTickSpacing, getRulerBounds, canvasToUnits, unitsToCanvas, canvasToScreen, isMultiple, formatLabel, textColor, tickColor, tickSubdivisions, zoom]
-  );
-
-  // Draw vertical ruler (left)
-  const drawVerticalRuler = useCallback(
-    (ctx: CanvasRenderingContext2D) => {
-      const viewport = getVisibleCanvasArea();
-      const majorTickMm = getAdaptiveTickSpacing();
-      const subTickMm = majorTickMm / Math.max(1, tickSubdivisions);
-      const midTickMm = majorTickMm / 2;
-      const majorSpacingPx = unitsToCanvas(majorTickMm) * zoom;
-      const showSubTicks = unitsToCanvas(subTickMm) * zoom >= MIN_SUB_TICK_PX;
-      const showMidLabels = showSubTicks && majorSpacingPx >= MIN_LABEL_SPACING_PX * 2;
-      const { pageTop, pageBottom, rulerRight } = getRulerBounds();
-
-      ctx.fillStyle = textColor;
-      ctx.strokeStyle = tickColor;
-      ctx.font = '11px Arial';
-      ctx.textAlign = 'right';
-      ctx.textBaseline = 'middle';
-
-      const viewportTop = canvasToUnits(viewport.top);
-      const viewportBottom = canvasToUnits(viewport.bottom);
-      // Sub-ticks
-      if (showSubTicks) {
-        const startSub = Math.floor(viewportTop / subTickMm) * subTickMm;
-        for (let value = startSub; value <= viewportBottom; value += subTickMm) {
-          if (isMultiple(value, majorTickMm)) continue;
-
-          const canvasY = unitsToCanvas(value);
-          const y = canvasToScreen(0, canvasY).y;
-
-          if (y < pageTop || y > pageBottom) continue;
-
-          const isMid = isMultiple(value, midTickMm);
-          const tickWidth = isMid ? 8 : 4;
-
-          ctx.beginPath();
-          ctx.moveTo(rulerRight - tickWidth, y);
-          ctx.lineTo(rulerRight, y);
-          ctx.stroke();
-
-          if (isMid && showMidLabels) {
-            ctx.save();
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'bottom';
-            ctx.fillText(formatLabel(value), rulerRight - rulerSize / 2, y - 2);
-            ctx.restore();
-          }
-        }
-      }
-
-      // Major ticks + labels
-      let lastLabelY = -Infinity;
-      const startMajor = Math.floor(viewportTop / majorTickMm) * majorTickMm;
-      for (let value = startMajor; value <= viewportBottom; value += majorTickMm) {
-        const canvasY = unitsToCanvas(value);
-        const y = canvasToScreen(0, canvasY).y;
-
-        if (y < pageTop || y > pageBottom) continue;
-
-        ctx.beginPath();
-        ctx.moveTo(rulerRight - 15, y);
-        ctx.lineTo(rulerRight, y);
-        ctx.stroke();
-
-        if (y - lastLabelY >= MIN_LABEL_SPACING_PX) {
-          ctx.save();
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'bottom';
-          ctx.fillText(formatLabel(value), rulerRight - rulerSize / 2, y - 2);
-          ctx.restore();
-          lastLabelY = y;
-        }
-      }
-    },
-    [getVisibleCanvasArea, getAdaptiveTickSpacing, getRulerBounds, canvasToUnits, unitsToCanvas, canvasToScreen, isMultiple, formatLabel, textColor, tickColor, tickSubdivisions, zoom, rulerSize]
-  );
-
-  // Draw crosshair lines following mouse
-  const drawCrosshair = useCallback(
-    (ctx: CanvasRenderingContext2D) => {
-      if (!mousePosition || mousePosition.x < 0 || mousePosition.y < 0) return;
-
-      const { x, y } = mousePosition;
-      const {
-        pageLeft,
-        pageTop,
-        pageRight,
-        pageBottom,
-        rulerTop,
-        rulerBottom,
-        rulerLeft,
-        rulerRight,
-      } = getRulerBounds();
-
-      if (x < pageLeft || x > pageRight || y < pageTop || y > pageBottom) return;
-
-      ctx.strokeStyle = crosshairColor;
-      ctx.lineWidth = 1;
-      ctx.setLineDash([5, 5]);
-
-      // Vertical line
-      ctx.beginPath();
-      ctx.moveTo(x, pageTop);
-      ctx.lineTo(x, pageBottom);
-      ctx.stroke();
-
-      // Horizontal line
-      ctx.beginPath();
-      ctx.moveTo(pageLeft, y);
-      ctx.lineTo(pageRight, y);
-      ctx.stroke();
-
-      ctx.setLineDash([]);
-
-      // Draw position indicators on rulers
-      const canvasPos = screenToCanvas(x, y);
-      const unitPos = {
-        x: canvasToUnits(canvasPos.x),
-        y: canvasToUnits(canvasPos.y),
-      };
-
-      // Highlight on horizontal ruler
-      ctx.fillStyle = 'rgba(255, 100, 100, 0.3)';
-      ctx.fillRect(x - 1, rulerTop, 2, rulerSize);
-
-      // Highlight on vertical ruler
-      ctx.fillRect(rulerLeft, y - 1, rulerSize, 2);
-
-      // Show coordinates on ruler corners
-      ctx.fillStyle = textColor;
-      ctx.font = 'bold 9px Arial';
-
-      // X coordinate on horizontal ruler
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'bottom';
-      ctx.fillText(formatLabel(unitPos.x), x, rulerBottom - 2);
-
-      // Y coordinate on vertical ruler
-      ctx.save();
-      ctx.translate(rulerRight - 2, y);
-      ctx.rotate(-Math.PI / 2);
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'bottom';
-      ctx.fillText(formatLabel(unitPos.y), 0, 0);
-      ctx.restore();
-    },
-    [mousePosition, crosshairColor, rulerSize, screenToCanvas, canvasToUnits, formatLabel, textColor, getRulerBounds]
-  );
-
-  // Main render function
-  const render = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !visible) return;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    // Clear canvas
-    ctx.clearRect(0, 0, width, height);
-
-    const { pageLeft, pageTop, pageRight, pageBottom, rulerTop, rulerBottom, rulerLeft, rulerRight } = getRulerBounds();
-    const rulerWidth = pageRight - pageLeft;
-    const rulerHeight = pageBottom - pageTop;
-
-    // Draw ruler backgrounds
-    // Top ruler
-    ctx.fillStyle = backgroundColor;
-    ctx.fillRect(pageLeft, rulerTop, rulerWidth, rulerSize);
-
-    // Left ruler
-    ctx.fillRect(rulerLeft, pageTop, rulerSize, rulerHeight);
-
-    // Corner
-    ctx.fillStyle = cornerColor;
-    ctx.fillRect(rulerLeft, rulerTop, rulerSize, rulerSize);
-
-    // Draw ticks and numbers
-    drawHorizontalRuler(ctx);
-    drawVerticalRuler(ctx);
-
-    // Draw crosshair
-    if (showCrosshair) {
-      drawCrosshair(ctx);
-    }
-  }, [
-    width,
-    height,
-    visible,
-    rulerSize,
-    backgroundColor,
-    cornerColor,
-    tickColor,
-    showCrosshair,
-    drawHorizontalRuler,
-    drawVerticalRuler,
-    drawCrosshair,
-    getRulerBounds,
-  ]);
-
-  // Re-render when dependencies change
-  useEffect(() => {
-    render();
-  }, [render]);
-
-  if (!visible) return null;
+  const topRulerTop = originOffset.y - rulerSize;
+  const topRulerLeft = originOffset.x;
+  const leftRulerTop = originOffset.y;
+  const leftRulerLeft = originOffset.x - leftRulerWidth;
 
   return (
-    <canvas
-      ref={canvasRef}
-      width={width}
-      height={height}
-      style={{
-        position: 'absolute',
-        left: 0,
-        top: 0,
-        pointerEvents: 'none',
-        zIndex: 100,
-      }}
-    />
+    <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 5 }}>
+      {/* Corner */}
+      <div
+        style={{
+          position: 'absolute',
+          top: snapPx(topRulerTop),
+          left: snapPx(leftRulerLeft),
+          width: leftRulerWidth,
+          height: rulerSize,
+          backgroundColor: DEFAULT_RULER_BG,
+          borderRight: `1px solid ${DEFAULT_RULER_BORDER}`,
+          borderBottom: `1px solid ${DEFAULT_RULER_BORDER}`,
+        }}
+      />
+
+      {/* Horizontal Ruler */}
+      <div
+        style={{
+          position: 'absolute',
+          top: snapPx(topRulerTop),
+          left: snapPx(topRulerLeft),
+          width: viewportWidth,
+          height: rulerSize,
+          backgroundColor: DEFAULT_RULER_BG,
+          borderBottom: `1px solid ${DEFAULT_RULER_BORDER}`,
+          borderRight: `1px solid ${DEFAULT_RULER_BORDER}`,
+          overflow: 'hidden',
+        }}
+      >
+        {rulerData.x.minor.map((tick) => {
+          const midStep = rulerData.x.majorStep / 2;
+          const isMid = midStep > 0 && Math.abs((tick.value % rulerData.x.majorStep) - midStep) < 0.001;
+          return (
+            <div
+              key={`x-minor-${tick.value}-${tick.pos}`}
+              style={{
+                position: 'absolute',
+                left: snapPx(tick.pos),
+                bottom: 0,
+                width: 1,
+                height: isMid ? 9 : 6,
+                backgroundColor: DEFAULT_TICK_MINOR,
+              }}
+            />
+          );
+        })}
+
+        {rulerData.x.major.map((tick) => (
+          <React.Fragment key={`x-major-${tick.value}-${tick.pos}`}>
+            <div
+              style={{
+                position: 'absolute',
+                left: snapPx(tick.pos),
+                bottom: 0,
+                width: 1,
+                height: 12,
+                backgroundColor: DEFAULT_TICK_MAJOR,
+              }}
+            />
+            <div
+              style={{
+                position: 'absolute',
+                left: snapPx(tick.pos + 3),
+                top: 2,
+                fontSize: 9,
+                color: DEFAULT_RULER_TEXT,
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {formatLabel(tick.value, rulerData.x.majorStep)}
+            </div>
+          </React.Fragment>
+        ))}
+      </div>
+
+      {/* Vertical Ruler */}
+      <div
+        style={{
+          position: 'absolute',
+          top: snapPx(leftRulerTop),
+          left: snapPx(leftRulerLeft),
+          height: viewportHeight,
+          width: leftRulerWidth,
+          backgroundColor: DEFAULT_RULER_BG,
+          borderRight: `1px solid ${DEFAULT_RULER_BORDER}`,
+          borderBottom: `1px solid ${DEFAULT_RULER_BORDER}`,
+          overflow: 'hidden',
+        }}
+      >
+        {rulerData.y.minor.map((tick) => {
+          const midStep = rulerData.y.majorStep / 2;
+          const isMid = midStep > 0 && Math.abs((tick.value % rulerData.y.majorStep) - midStep) < 0.001;
+          return (
+            <div
+              key={`y-minor-${tick.value}-${tick.pos}`}
+              style={{
+                position: 'absolute',
+                top: snapPx(tick.pos),
+                right: 0,
+                height: 1,
+                width: isMid ? 9 : 6,
+                backgroundColor: DEFAULT_TICK_MINOR,
+              }}
+            />
+          );
+        })}
+
+        {rulerData.y.major.map((tick) => (
+          <React.Fragment key={`y-major-${tick.value}-${tick.pos}`}>
+            <div
+              style={{
+                position: 'absolute',
+                top: snapPx(tick.pos),
+                right: 0,
+                height: 1,
+                width: 12,
+                backgroundColor: DEFAULT_TICK_MAJOR,
+              }}
+            />
+            <div
+              style={{
+                position: 'absolute',
+                top: Math.max(2, snapPx(tick.pos) - 6),
+                right: 14,
+                fontSize: 9,
+                color: DEFAULT_RULER_TEXT,
+                lineHeight: 1,
+                writingMode: 'horizontal-tb',
+                textOrientation: 'upright',
+                transform: 'translate(0, -50%)',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {formatLabel(tick.value, rulerData.y.majorStep)}
+            </div>
+          </React.Fragment>
+        ))}
+      </div>
+    </div>
   );
 };
 

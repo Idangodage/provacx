@@ -3,7 +3,6 @@
  */
 
 export { DrawingCanvas, type DrawingCanvasProps } from './DrawingCanvas';
-export { KonvaDrawingCanvas, type KonvaDrawingCanvasProps } from './KonvaDrawingCanvas';
 export { Toolbar, ZoomIndicator, CoordinatesDisplay, type ToolbarProps } from './Toolbar';
 export { PropertiesPanel, type PropertiesPanelProps } from './PropertiesPanel';
 export { SymbolPalette, type SymbolPaletteProps } from './SymbolPalette';
