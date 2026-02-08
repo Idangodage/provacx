@@ -35,8 +35,28 @@ const DEFAULT_RULER_BORDER = 'rgba(217, 177, 117, 0.9)';
 const DEFAULT_RULER_TEXT = '#6b7280';
 const DEFAULT_TICK_MAJOR = '#7f7f7f';
 const DEFAULT_TICK_MINOR = '#b5b5b5';
-
 const CURSOR_INDICATOR_COLOR = '#4CAF50';
+const PAGE_EXTENT_FILL = 'rgba(76, 175, 80, 0.12)';
+const PAGE_EDGE_COLOR = 'rgba(76, 175, 80, 0.7)';
+const MIN_VISIBLE_RULER_PX = 72;
+
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+const positiveModulo = (value: number, mod: number) => (mod > 0 ? ((value % mod) + mod) % mod : 0);
+
+function clampKeepVisible(
+  start: number,
+  size: number,
+  minBound: number,
+  maxBound: number,
+  minVisiblePx = MIN_VISIBLE_RULER_PX
+): number {
+  if (!Number.isFinite(start) || !Number.isFinite(size) || size <= 0) return minBound;
+  const span = Math.max(1, maxBound - minBound);
+  const visible = clamp(Math.min(size, minVisiblePx), 1, span);
+  const minStart = minBound - (size - visible);
+  const maxStart = maxBound - visible;
+  return clamp(start, minStart, maxStart);
+}
 
 export const Rulers: React.FC<RulersProps> = ({
   pageWidth,
@@ -59,11 +79,38 @@ export const Rulers: React.FC<RulersProps> = ({
   const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
   const snapPx = (value: number) => Math.round(value * dpr) / dpr;
 
+  const canvasLeft = originOffset.x;
+  const canvasTop = originOffset.y;
+  const canvasRight = canvasLeft + viewportWidth;
+  const canvasBottom = canvasTop + viewportHeight;
+
+  const pageLeft = canvasLeft + (-panOffset.x) * scale;
+  const pageTop = canvasTop + (-panOffset.y) * scale;
+  const pageWidthPx = Math.max(1, pageWidth * scale);
+  const pageHeightPx = Math.max(1, pageHeight * scale);
+
+  // Page-attached by default, clamped only when leaving viewport to keep always visible.
+  const topRulerLeft = clampKeepVisible(pageLeft, pageWidthPx, canvasLeft, canvasRight);
+  const topRulerTop = clamp(pageTop - rulerSize, 0, Math.max(0, canvasBottom - rulerSize));
+  const leftRulerTop = clampKeepVisible(pageTop, pageHeightPx, canvasTop, canvasBottom);
+  const leftRulerLeft = clamp(
+    pageLeft - leftRulerWidth,
+    0,
+    Math.max(0, canvasRight - leftRulerWidth)
+  );
+
+  const horizontalRulerWidth = pageWidthPx;
+  const verticalRulerHeight = pageHeightPx;
+
+  // Compensate tick coordinate mapping when rulers are clamped.
+  const sceneOffsetX = (topRulerLeft - pageLeft) / scale;
+  const sceneOffsetY = (leftRulerTop - pageTop) / scale;
+
   const getTicks = (axis: 'x' | 'y'): RulerTickData => {
-    const viewport = axis === 'x' ? viewportWidth : viewportHeight;
-    const pan = axis === 'x' ? panOffset.x : panOffset.y;
     const pageSizeScenePx = axis === 'x' ? pageWidth : pageHeight;
-    if (pageSizeScenePx <= 0 || viewport <= 0) {
+    const sceneOffset = axis === 'x' ? sceneOffsetX : sceneOffsetY;
+    const rulerSpanPx = axis === 'x' ? horizontalRulerWidth : verticalRulerHeight;
+    if (pageSizeScenePx <= 0 || rulerSpanPx <= 0) {
       return {
         major: [],
         minor: [],
@@ -73,14 +120,20 @@ export const Rulers: React.FC<RulersProps> = ({
 
     const majorStepScenePx = steps.majorStepScenePx;
     const minorStepScenePx = steps.minorStepScenePx;
+    if (majorStepScenePx <= 0 || minorStepScenePx <= 0) {
+      return {
+        major: [],
+        minor: [],
+        majorStepMm: steps.majorStepMm,
+      };
+    }
+
     const major: RulerTick[] = [];
     const minor: RulerTick[] = [];
 
-    const viewStartScenePx = pan;
-    const viewEndScenePx = pan + viewport / scale;
-    const visibleStartScenePx = Math.max(0, viewStartScenePx);
-    const visibleEndScenePx = Math.min(pageSizeScenePx, viewEndScenePx);
-
+    const spanScene = rulerSpanPx / scale;
+    const visibleStartScenePx = clamp(sceneOffset, 0, pageSizeScenePx);
+    const visibleEndScenePx = clamp(sceneOffset + spanScene, 0, pageSizeScenePx);
     if (visibleEndScenePx <= visibleStartScenePx) {
       return {
         major: [],
@@ -89,10 +142,8 @@ export const Rulers: React.FC<RulersProps> = ({
       };
     }
 
-    const firstMajor =
-      Math.floor(visibleStartScenePx / majorStepScenePx) * majorStepScenePx;
-    const lastMajor =
-      Math.ceil(visibleEndScenePx / majorStepScenePx) * majorStepScenePx;
+    const firstMajor = Math.floor(visibleStartScenePx / majorStepScenePx) * majorStepScenePx;
+    const lastMajor = Math.ceil(visibleEndScenePx / majorStepScenePx) * majorStepScenePx;
 
     const maxMajorTicks = 500;
     let count = 0;
@@ -101,9 +152,9 @@ export const Rulers: React.FC<RulersProps> = ({
       valueScenePx <= lastMajor && count < maxMajorTicks;
       valueScenePx += majorStepScenePx, count++
     ) {
-      if (valueScenePx < 0 || valueScenePx > pageSizeScenePx) continue;
-      const majorPos = (valueScenePx - pan) * scale;
-      if (majorPos < -1 || majorPos > viewport + 1) continue;
+      if (valueScenePx < 0 || valueScenePx > pageSizeScenePx + 0.001) continue;
+      const majorPos = (valueScenePx - sceneOffset) * scale;
+      if (majorPos < -1 || majorPos > rulerSpanPx + 1) continue;
 
       major.push({
         valueMm: valueScenePx * PX_TO_MM,
@@ -111,18 +162,20 @@ export const Rulers: React.FC<RulersProps> = ({
       });
 
       if (steps.showMinor && minorStepScenePx < majorStepScenePx) {
-        const stepsPerMajor = Math.round(majorStepScenePx / minorStepScenePx);
+        const stepsPerMajor = Math.max(1, Math.round(majorStepScenePx / minorStepScenePx));
         for (let i = 1; i < stepsPerMajor; i++) {
           const minorValueScenePx = valueScenePx + i * minorStepScenePx;
           if (
             minorValueScenePx < visibleStartScenePx ||
-            minorValueScenePx > visibleEndScenePx
+            minorValueScenePx > visibleEndScenePx ||
+            minorValueScenePx < 0 ||
+            minorValueScenePx > pageSizeScenePx + 0.001
           ) {
             continue;
           }
-          if (minorValueScenePx < 0 || minorValueScenePx > pageSizeScenePx) continue;
-          const minorPos = (minorValueScenePx - pan) * scale;
-          if (minorPos < -1 || minorPos > viewport + 1) continue;
+
+          const minorPos = (minorValueScenePx - sceneOffset) * scale;
+          if (minorPos < -1 || minorPos > rulerSpanPx + 1) continue;
 
           minor.push({
             valueMm: minorValueScenePx * PX_TO_MM,
@@ -144,19 +197,32 @@ export const Rulers: React.FC<RulersProps> = ({
       x: getTicks('x'),
       y: getTicks('y'),
     }),
-    [pageWidth, pageHeight, panOffset.x, panOffset.y, scale, steps, viewportWidth, viewportHeight]
+    [
+      pageWidth,
+      pageHeight,
+      scale,
+      steps,
+      sceneOffsetX,
+      sceneOffsetY,
+      horizontalRulerWidth,
+      verticalRulerHeight,
+    ]
   );
 
-  const topRulerTop = originOffset.y - rulerSize;
-  const topRulerLeft = originOffset.x;
-  const leftRulerTop = originOffset.y;
-  const leftRulerLeft = originOffset.x - leftRulerWidth;
-  const cursorX = mousePosition ? (mousePosition.x - panOffset.x) * scale : null;
-  const cursorY = mousePosition ? (mousePosition.y - panOffset.y) * scale : null;
+  const pageStartX = (-sceneOffsetX) * scale;
+  const pageEndX = (pageWidth - sceneOffsetX) * scale;
+  const pageStartY = (-sceneOffsetY) * scale;
+  const pageEndY = (pageHeight - sceneOffsetY) * scale;
+  const visiblePageXStart = clamp(pageStartX, 0, horizontalRulerWidth);
+  const visiblePageXEnd = clamp(pageEndX, 0, horizontalRulerWidth);
+  const visiblePageYStart = clamp(pageStartY, 0, verticalRulerHeight);
+  const visiblePageYEnd = clamp(pageEndY, 0, verticalRulerHeight);
+
+  const cursorX = mousePosition ? (mousePosition.x - sceneOffsetX) * scale : null;
+  const cursorY = mousePosition ? (mousePosition.y - sceneOffsetY) * scale : null;
 
   return (
     <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 5 }}>
-      {/* Corner */}
       <div
         style={{
           position: 'absolute',
@@ -184,13 +250,12 @@ export const Rulers: React.FC<RulersProps> = ({
         </span>
       </div>
 
-      {/* Horizontal Ruler */}
       <div
         style={{
           position: 'absolute',
           top: snapPx(topRulerTop),
           left: snapPx(topRulerLeft),
-          width: viewportWidth,
+          width: horizontalRulerWidth,
           height: rulerSize,
           backgroundColor: DEFAULT_RULER_BG,
           borderBottom: `1px solid ${DEFAULT_RULER_BORDER}`,
@@ -198,11 +263,47 @@ export const Rulers: React.FC<RulersProps> = ({
           overflow: 'hidden',
         }}
       >
+        {visiblePageXEnd > visiblePageXStart && (
+          <div
+            style={{
+              position: 'absolute',
+              left: snapPx(visiblePageXStart),
+              top: 0,
+              width: snapPx(visiblePageXEnd - visiblePageXStart),
+              height: '100%',
+              backgroundColor: PAGE_EXTENT_FILL,
+            }}
+          />
+        )}
+        {pageStartX >= 0 && pageStartX <= horizontalRulerWidth && (
+          <div
+            style={{
+              position: 'absolute',
+              left: snapPx(pageStartX),
+              top: 0,
+              width: 1,
+              height: '100%',
+              backgroundColor: PAGE_EDGE_COLOR,
+            }}
+          />
+        )}
+        {pageEndX >= 0 && pageEndX <= horizontalRulerWidth && (
+          <div
+            style={{
+              position: 'absolute',
+              left: snapPx(pageEndX),
+              top: 0,
+              width: 1,
+              height: '100%',
+              backgroundColor: PAGE_EDGE_COLOR,
+            }}
+          />
+        )}
+
         {rulerData.x.minor.map((tick) => {
           const midStep = rulerData.x.majorStepMm / 2;
-          const isMid =
-            midStep > 0 &&
-            Math.abs((tick.valueMm % rulerData.x.majorStepMm) - midStep) < 0.001;
+          const majorMod = positiveModulo(tick.valueMm, rulerData.x.majorStepMm);
+          const isMid = midStep > 0 && Math.abs(majorMod - midStep) < 0.001;
           return (
             <div
               key={`x-minor-${tick.valueMm}-${tick.pos}`}
@@ -245,8 +346,7 @@ export const Rulers: React.FC<RulersProps> = ({
           </React.Fragment>
         ))}
 
-        {/* Cursor Position Indicator */}
-        {cursorX !== null && cursorX >= 0 && cursorX <= viewportWidth && (
+        {cursorX !== null && cursorX >= 0 && cursorX <= horizontalRulerWidth && (
           <div
             style={{
               position: 'absolute',
@@ -262,13 +362,12 @@ export const Rulers: React.FC<RulersProps> = ({
         )}
       </div>
 
-      {/* Vertical Ruler */}
       <div
         style={{
           position: 'absolute',
           top: snapPx(leftRulerTop),
           left: snapPx(leftRulerLeft),
-          height: viewportHeight,
+          height: verticalRulerHeight,
           width: leftRulerWidth,
           backgroundColor: DEFAULT_RULER_BG,
           borderRight: `1px solid ${DEFAULT_RULER_BORDER}`,
@@ -276,11 +375,47 @@ export const Rulers: React.FC<RulersProps> = ({
           overflow: 'hidden',
         }}
       >
+        {visiblePageYEnd > visiblePageYStart && (
+          <div
+            style={{
+              position: 'absolute',
+              top: snapPx(visiblePageYStart),
+              left: 0,
+              height: snapPx(visiblePageYEnd - visiblePageYStart),
+              width: '100%',
+              backgroundColor: PAGE_EXTENT_FILL,
+            }}
+          />
+        )}
+        {pageStartY >= 0 && pageStartY <= verticalRulerHeight && (
+          <div
+            style={{
+              position: 'absolute',
+              top: snapPx(pageStartY),
+              left: 0,
+              height: 1,
+              width: '100%',
+              backgroundColor: PAGE_EDGE_COLOR,
+            }}
+          />
+        )}
+        {pageEndY >= 0 && pageEndY <= verticalRulerHeight && (
+          <div
+            style={{
+              position: 'absolute',
+              top: snapPx(pageEndY),
+              left: 0,
+              height: 1,
+              width: '100%',
+              backgroundColor: PAGE_EDGE_COLOR,
+            }}
+          />
+        )}
+
         {rulerData.y.minor.map((tick) => {
           const midStep = rulerData.y.majorStepMm / 2;
-          const isMid =
-            midStep > 0 &&
-            Math.abs((tick.valueMm % rulerData.y.majorStepMm) - midStep) < 0.001;
+          const majorMod = positiveModulo(tick.valueMm, rulerData.y.majorStepMm);
+          const isMid = midStep > 0 && Math.abs(majorMod - midStep) < 0.001;
           return (
             <div
               key={`y-minor-${tick.valueMm}-${tick.pos}`}
@@ -327,8 +462,7 @@ export const Rulers: React.FC<RulersProps> = ({
           </React.Fragment>
         ))}
 
-        {/* Cursor Position Indicator */}
-        {cursorY !== null && cursorY >= 0 && cursorY <= viewportHeight && (
+        {cursorY !== null && cursorY >= 0 && cursorY <= verticalRulerHeight && (
           <div
             style={{
               position: 'absolute',

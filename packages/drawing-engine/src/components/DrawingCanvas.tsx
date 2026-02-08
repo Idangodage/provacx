@@ -253,13 +253,13 @@ export function DrawingCanvas({
         : { x: scenePoint.x, y: scenePoint.y };
       setMousePosition({ x: scenePoint.x, y: scenePoint.y });
 
-      // Check for middle mouse button (pan)
       const mouseEvent = e.e as MouseEvent;
-      const isMiddleButton = 'button' in mouseEvent && mouseEvent.button === 1;
-      const shouldPan = tool === 'pan' || isMiddleButton || isSpacePressed;
-      if (isMiddleButton) {
+      // Middle-button panning is handled by dedicated DOM listeners.
+      if ('button' in mouseEvent && mouseEvent.button === 1) {
         mouseEvent.preventDefault();
+        return;
       }
+      const shouldPan = tool === 'pan' || isSpacePressed;
 
       if (shouldPan) {
         const nextState: CanvasState = {
@@ -410,6 +410,18 @@ export function DrawingCanvas({
     window.addEventListener('mouseup', handleMouseUp);
 
     const upperCanvasEl = canvas.upperCanvasEl;
+    const stopMiddlePan = () => {
+      if (!middlePanRef.current.active) return;
+      middlePanRef.current.active = false;
+      const nextState: CanvasState = {
+        ...canvasStateRef.current,
+        isPanning: false,
+        lastPanPoint: null,
+      };
+      canvasStateRef.current = nextState;
+      setCanvasState(nextState);
+    };
+
     const handleMiddleMouseDown = (event: MouseEvent) => {
       if (event.button !== 1) return;
       event.preventDefault();
@@ -435,6 +447,10 @@ export function DrawingCanvas({
 
     const handleMiddleMouseMove = (event: MouseEvent) => {
       if (!middlePanRef.current.active) return;
+      if ((event.buttons & 4) !== 4) {
+        stopMiddlePan();
+        return;
+      }
       event.preventDefault();
 
       const dx = event.clientX - middlePanRef.current.lastX;
@@ -453,13 +469,15 @@ export function DrawingCanvas({
 
     const handleMiddleMouseUp = (event: MouseEvent) => {
       if (event.button !== 1 && !middlePanRef.current.active) return;
-      middlePanRef.current.active = false;
+      stopMiddlePan();
     };
+    const handleWindowBlur = () => stopMiddlePan();
 
     upperCanvasEl?.addEventListener('mousedown', handleMiddleMouseDown);
     upperCanvasEl?.addEventListener('auxclick', preventMiddleAuxClick);
     window.addEventListener('mousemove', handleMiddleMouseMove, { passive: false });
     window.addEventListener('mouseup', handleMiddleMouseUp);
+    window.addEventListener('blur', handleWindowBlur);
 
     return () => {
       canvas.off('mouse:down', handleMouseDown);
@@ -471,6 +489,7 @@ export function DrawingCanvas({
       upperCanvasEl?.removeEventListener('auxclick', preventMiddleAuxClick);
       window.removeEventListener('mousemove', handleMiddleMouseMove);
       window.removeEventListener('mouseup', handleMiddleMouseUp);
+      window.removeEventListener('blur', handleWindowBlur);
     };
   }, [handleMouseDown, handleMouseMove, handleMouseUp, handleWheel, setPanOffset]);
 
