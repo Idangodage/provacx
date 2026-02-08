@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { signIn } from "next-auth/react";
-import { useState } from "react";
+import { getProviders, signIn, useSession } from "next-auth/react";
+import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -15,11 +15,33 @@ const loginSchema = z.object({
 
 type LoginFormData = z.infer<typeof loginSchema>;
 
+function getAuthErrorMessage(error: string) {
+  switch (error) {
+    case "Configuration":
+      return "Authentication is misconfigured. Please try again later.";
+    case "AccessDenied":
+      return "Access denied. Please try a different account.";
+    case "OAuthAccountNotLinked":
+      return "This email is already linked to another sign-in method.";
+    case "OAuthCallback":
+    case "OAuthCreateAccount":
+    case "OAuthSignin":
+      return "Google sign-in failed. Please try again.";
+    case "CredentialsSignin":
+      return "Invalid email or password.";
+    default:
+      return "Sign-in failed. Please try again.";
+  }
+}
+
 export default function LoginPage() {
   const router = useRouter();
+  const { status } = useSession();
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isGoogleLoading, setIsGoogleLoading] = useState(false);
+  const [googleEnabled, setGoogleEnabled] = useState(false);
+  const [providersLoaded, setProvidersLoaded] = useState(false);
 
   const {
     register,
@@ -28,6 +50,39 @@ export default function LoginPage() {
   } = useForm<LoginFormData>({
     resolver: zodResolver(loginSchema),
   });
+
+  useEffect(() => {
+    if (status === "authenticated") {
+      router.replace("/dashboard");
+    }
+  }, [router, status]);
+
+  useEffect(() => {
+    const errorParam = new URLSearchParams(window.location.search).get("error");
+    if (!errorParam) return;
+    setError(getAuthErrorMessage(errorParam));
+  }, []);
+
+  useEffect(() => {
+    getProviders()
+      .then((providers) => {
+        setGoogleEnabled(Boolean(providers?.google));
+      })
+      .finally(() => {
+        setProvidersLoaded(true);
+      });
+  }, []);
+
+  // Listen for OAuth callback messages from popup
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data?.type === "oauth-callback" && event.data?.success) {
+        router.push("/dashboard");
+      }
+    };
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, [router]);
 
   const onSubmit = async (data: LoginFormData) => {
     setIsLoading(true);
