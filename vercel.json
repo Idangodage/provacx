@@ -2,7 +2,7 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "version": 2,
   "framework": "nextjs",
-  "buildCommand": "cd packages/database && pnpm prisma generate && cd ../.. && mkdir -p apps/web/node_modules/.prisma/client && cp -r node_modules/.pnpm/@prisma+client@*/node_modules/.prisma/client/* apps/web/node_modules/.prisma/client/ && pnpm --filter @provacx/web build",
+  "buildCommand": "cd apps/web && pnpm prisma generate --schema=../../packages/database/prisma/schema.prisma && pnpm next build",
   "installCommand": "corepack enable && pnpm install --no-frozen-lockfile",
   "outputDirectory": "apps/web/.next"
 }
