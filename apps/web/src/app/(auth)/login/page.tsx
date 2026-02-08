@@ -10,7 +10,7 @@ import { z } from "zod";
 
 const loginSchema = z.object({
   email: z.string().email("Invalid email address"),
-  password: z.string().min(8, "Password must be at least 8 characters"),
+  password: z.string().min(1, "Password is required"),
 });
 
 type LoginFormData = z.infer<typeof loginSchema>;
@@ -73,9 +73,11 @@ export default function LoginPage() {
       });
   }, []);
 
-  // Listen for OAuth callback messages from popup
+  // Listen for OAuth callback messages from popup (with origin check)
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
+      // Only accept messages from same origin to prevent cross-origin attacks
+      if (event.origin !== window.location.origin) return;
       if (event.data?.type === "oauth-callback" && event.data?.success) {
         router.push("/dashboard");
       }
@@ -221,12 +223,19 @@ export default function LoginPage() {
           </button>
         </form>
 
-        <p className="text-center text-sm text-gray-600">
-          Don&apos;t have an account?{" "}
-          <Link href="/register" className="text-blue-600 hover:underline">
-            Sign up
-          </Link>
-        </p>
+        <div className="text-center space-y-2">
+          <p className="text-sm text-gray-600">
+            <Link href="/forgot-password" className="text-blue-600 hover:underline">
+              Forgot your password?
+            </Link>
+          </p>
+          <p className="text-sm text-gray-600">
+            Don&apos;t have an account?{" "}
+            <Link href="/register" className="text-blue-600 hover:underline">
+              Sign up
+            </Link>
+          </p>
+        </div>
       </div>
     </div>
   );

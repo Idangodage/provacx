@@ -8,12 +8,10 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 
-import { trpc } from "@/lib/trpc";
-
 const registerSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
   email: z.string().email("Invalid email address"),
-  password: z.string().min(8, "Password must be at least 8 characters"),
+  password: z.string().min(12, "Password must be at least 12 characters"),
   confirmPassword: z.string(),
 }).refine((data) => data.password === data.confirmPassword, {
   message: "Passwords don't match",
@@ -34,7 +32,12 @@ export default function RegisterPage() {
   const [userName, setUserName] = useState("");
   const [countdown, setCountdown] = useState(3);
 
-  const checkEmail = trpc.user.checkEmail.useMutation();
+  // Redirect if already authenticated
+  useEffect(() => {
+    if (status === "authenticated") {
+      router.replace("/dashboard");
+    }
+  }, [router, status]);
 
   // Countdown and redirect after successful registration
   useEffect(() => {
@@ -73,16 +76,7 @@ export default function RegisterPage() {
     setError(null);
 
     try {
-      // Check if email exists
-      const result = await checkEmail.mutateAsync({ email: data.email });
-
-      if (result.exists) {
-        setError("An account with this email already exists");
-        setIsLoading(false);
-        return;
-      }
-
-      // Create user via API (password hashed on server)
+      // Create user via API (validates + hashes password on server)
       const response = await fetch("/api/auth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -93,8 +87,22 @@ export default function RegisterPage() {
         }),
       });
 
+      if (response.status === 429) {
+        setError("Too many attempts. Please try again later.");
+        setIsLoading(false);
+        return;
+      }
+
       if (!response.ok) {
-        throw new Error("Registration failed");
+        const body = await response.json().catch(() => null);
+        const message = body?.error ?? "Registration failed";
+        if (message === "User already exists") {
+          setError("An account with this email already exists.");
+        } else {
+          setError(message);
+        }
+        setIsLoading(false);
+        return;
       }
 
       // Sign in silently (redirect: false)
@@ -153,7 +161,7 @@ export default function RegisterPage() {
           {/* Welcome Message */}
           <div>
             <h2 className="text-2xl font-bold text-gray-900">
-              Welcome to ProvacX{userName ? `, ${userName}` : ""}! 🎉
+              Welcome to ProvacX{userName ? `, ${userName}` : ""}!
             </h2>
             <p className="mt-2 text-gray-600">
               Your account has been created successfully.
@@ -163,11 +171,11 @@ export default function RegisterPage() {
           {/* Progress Indicator */}
           <div className="space-y-4">
             <p className="text-sm text-gray-500">
-              {registrationState === "redirecting" 
-                ? "Redirecting you now..." 
+              {registrationState === "redirecting"
+                ? "Redirecting you now..."
                 : `Setting up your workspace in ${countdown}...`}
             </p>
-            
+
             {/* Loading Animation */}
             <div className="flex justify-center">
               <div className="flex space-x-2">
@@ -182,7 +190,7 @@ export default function RegisterPage() {
               onClick={() => router.push("/onboarding/organization")}
               className="text-sm text-blue-600 hover:underline"
             >
-              Continue now →
+              Continue now
             </button>
           </div>
 
@@ -274,8 +282,11 @@ export default function RegisterPage() {
                 {...register("password")}
                 type="password"
                 className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                placeholder="••••••••"
+                placeholder="••••••••••••"
               />
+              <p className="mt-1 text-xs text-gray-500">
+                Use 12+ characters. A long passphrase is recommended.
+              </p>
               {errors.password && (
                 <p className="mt-1 text-sm text-red-600">{errors.password.message}</p>
               )}
@@ -289,7 +300,7 @@ export default function RegisterPage() {
                 {...register("confirmPassword")}
                 type="password"
                 className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                placeholder="••••••••"
+                placeholder="••••••••••••"
               />
               {errors.confirmPassword && (
                 <p className="mt-1 text-sm text-red-600">{errors.confirmPassword.message}</p>

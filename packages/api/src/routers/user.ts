@@ -7,7 +7,6 @@ import { z } from "zod";
 
 import {
   createTRPCRouter,
-  publicProcedure,
   protectedProcedure,
 } from "../trpc";
 
@@ -25,8 +24,13 @@ export const userRouter = createTRPCRouter({
   updateProfile: protectedProcedure
     .input(
       z.object({
-        name: z.string().min(1).max(100).optional(),
-        image: z.string().url().optional(),
+        name: z
+          .string()
+          .min(1)
+          .max(100)
+          .transform((v) => v.trim().replace(/<[^>]*>/g, ""))
+          .optional(),
+        image: z.string().url().max(2048).optional(),
       })
     )
     .mutation(async ({ ctx, input }) => {
@@ -85,19 +89,4 @@ export const userRouter = createTRPCRouter({
       isComplete: profileComplete && orgComplete && firstProjectComplete,
     };
   }),
-
-  /**
-   * Check if email exists (for registration)
-   * Using mutation because httpBatchLink sends POST requests
-   */
-  checkEmail: publicProcedure
-    .input(z.object({ email: z.string().email() }))
-    .mutation(async ({ ctx, input }) => {
-      const user = await ctx.prisma.user.findUnique({
-        where: { email: input.email },
-        select: { id: true },
-      });
-
-      return { exists: !!user };
-    }),
 });

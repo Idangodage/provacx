@@ -2,6 +2,7 @@
  * NextAuth Configuration
  */
 
+import { PrismaAdapter } from "@auth/prisma-adapter";
 import bcrypt from "bcryptjs";
 import NextAuth from "next-auth";
 import type { NextAuthConfig, NextAuthResult } from "next-auth";
@@ -13,7 +14,7 @@ import { prisma } from "@provacx/database";
 
 const credentialsSchema = z.object({
   email: z.string().email(),
-  password: z.string().min(8),
+  password: z.string().min(1),
 });
 
 const authDebug =
@@ -40,13 +41,13 @@ if (authDebug && !googleEnabled) {
 }
 
 export const authConfig: NextAuthConfig = {
-  // Temporarily disable adapter to test OAuth without database
-  // adapter: PrismaAdapter(prisma),
+  adapter: PrismaAdapter(prisma),
   debug: authDebug,
-  trustHost: true,
+  trustHost: process.env.NODE_ENV === "development",
   secret: authSecret,
   session: {
     strategy: "jwt",
+    maxAge: 30 * 24 * 60 * 60, // 30 days
   },
   pages: {
     signIn: "/login",
@@ -55,17 +56,20 @@ export const authConfig: NextAuthConfig = {
     newUser: "/onboarding/organization",
   },
   providers: [
-    Google({
-      clientId: process.env.GOOGLE_CLIENT_ID!,
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
-      allowDangerousEmailAccountLinking: true,
-      authorization: {
-        params: {
-          prompt: "select_account",  // Always show account picker
-          access_type: "offline",     // Get refresh token
-        },
-      },
-    }),
+    ...(googleEnabled
+      ? [
+          Google({
+            clientId: googleClientId!,
+            clientSecret: googleClientSecret!,
+            authorization: {
+              params: {
+                prompt: "select_account",
+                access_type: "offline",
+              },
+            },
+          }),
+        ]
+      : []),
     Credentials({
       name: "credentials",
       credentials: {
@@ -82,7 +86,7 @@ export const authConfig: NextAuthConfig = {
         const { email, password } = parsed.data;
 
         const user = await prisma.user.findUnique({
-          where: { email },
+          where: { email: email.toLowerCase() },
         });
 
         if (!user || !user.password) {
@@ -113,22 +117,33 @@ export const authConfig: NextAuthConfig = {
         token.name = user.name;
         token.image = user.image;
       }
-      
+
       // Google OAuth - ensure we have the profile data
       if (account?.provider === "google" && profile) {
         token.email = profile.email;
         token.name = profile.name;
         token.image = profile.picture;
+
+        // Look up the DB user created by PrismaAdapter so we have the correct id
+        if (profile.email) {
+          const dbUser = await prisma.user.findUnique({
+            where: { email: profile.email as string },
+            select: { id: true },
+          });
+          if (dbUser) {
+            token.id = dbUser.id;
+          }
+        }
       }
-      
+
       return token;
     },
     async session({ session, token }) {
       if (token && session.user) {
         session.user.id = token.id as string;
         session.user.email = token.email as string;
-        session.user.name = token.name as string;
-        session.user.image = token.image as string;
+        session.user.name = (token.name as string) ?? null;
+        session.user.image = (token.image as string) ?? null;
       }
       return session;
     },

@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 import Link from "next/link";
 
-import { auth } from "@/lib/auth";
+import { auth, signOut } from "@/lib/auth";
 import AppRibbon from "@/components/navigation/AppRibbon";
 
 export default async function DashboardLayout({
@@ -25,12 +25,19 @@ export default async function DashboardLayout({
           </Link>
           <div className="flex items-center gap-4">
             <span className="text-sm text-gray-600">{session.user.email}</span>
-            <Link
-              href="/api/auth/signout"
-              className="text-sm text-gray-500 hover:text-gray-700"
+            <form
+              action={async () => {
+                "use server";
+                await signOut({ redirectTo: "/" });
+              }}
             >
-              Sign out
-            </Link>
+              <button
+                type="submit"
+                className="text-sm text-gray-500 hover:text-gray-700"
+              >
+                Sign out
+              </button>
+            </form>
           </div>
         </div>
       </nav>
