@@ -7,7 +7,7 @@
 
 'use client';
 
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import * as fabric from 'fabric';
 import {
   DrawingCanvas,
@@ -15,6 +15,7 @@ import {
   PropertiesPanel,
   SymbolPalette,
   LayersPanel,
+  RoomHierarchyPanel,
   ZoomIndicator,
   CoordinatesDisplay,
 } from './components';
@@ -298,14 +299,24 @@ function EditorRibbon({
 function EditorFooter({
   mousePosition,
   elementCount,
+  areaSummary,
 }: {
   mousePosition: Point2D;
   elementCount: number;
+  areaSummary: {
+    totalFloorArea: number;
+    usableArea: number;
+    circulationArea: number;
+  };
 }) {
   return (
     <div className="flex items-center justify-between h-8 px-4 bg-[#fffaf0] border-t border-amber-200/70 text-xs text-slate-600">
       <div className="flex items-center gap-4">
         <span>Elements: {elementCount}</span>
+        <span>|</span>
+        <span>
+          Total Floor Area: {areaSummary.totalFloorArea.toFixed(1)} m² | Usable: {areaSummary.usableArea.toFixed(1)} m² | Circulation: {areaSummary.circulationArea.toFixed(1)} m²
+        </span>
         <span>|</span>
         <CoordinatesDisplay
           x={mousePosition.x}
@@ -393,6 +404,23 @@ export function SmartDrawingEditor({
     (layout?.indoorUnits?.length || 0) +
     (layout?.ductSegments?.length || 0);
 
+  const areaSummary = useMemo(() => {
+    const topLevelRooms = rooms.filter((room) => !room.parentRoomId);
+    const totalFloorArea = topLevelRooms.reduce((sum, room) => {
+      const grossArea = Number.isFinite(room.grossArea) ? room.grossArea : room.area;
+      return sum + Math.max(grossArea, 0);
+    }, 0);
+    const circulationPattern = /corridor|hall|lobby|passage|circulation|foyer/i;
+    const circulationArea = topLevelRooms.reduce((sum, room) => {
+      const label = `${room.name} ${room.spaceType}`;
+      if (!circulationPattern.test(label)) return sum;
+      const roomArea = Number.isFinite(room.netArea) ? room.netArea : room.area;
+      return sum + Math.max(roomArea, 0);
+    }, 0);
+    const usableArea = Math.max(totalFloorArea - circulationArea, 0);
+    return { totalFloorArea, usableArea, circulationArea };
+  }, [rooms]);
+
   // Load initial data
   useEffect(() => {
     if (initialData) {
@@ -412,6 +440,23 @@ export function SmartDrawingEditor({
     if (!onSave || saveState === 'saving' || saveState === 'idle') return;
     setSaveState('idle');
   }, [walls, rooms, sketches, hvacLayout, onSave, saveState]);
+
+  useEffect(() => {
+    const handleOpenRoomProperties = () => {
+      setShowRightPanel(true);
+    };
+
+    window.addEventListener(
+      'smart-drawing:open-room-properties',
+      handleOpenRoomProperties as EventListener
+    );
+    return () => {
+      window.removeEventListener(
+        'smart-drawing:open-room-properties',
+        handleOpenRoomProperties as EventListener
+      );
+    };
+  }, []);
 
   useEffect(() => {
     const updateBounds = () => {
@@ -791,6 +836,9 @@ export function SmartDrawingEditor({
             <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain scrollbar-thin scrollbar-thumb-amber-300">
               <PropertiesPanel className="!w-full !border-l-0" />
               <div className="p-3">
+                <RoomHierarchyPanel />
+              </div>
+              <div className="p-3">
                 <LayersPanel className="h-64" />
               </div>
             </div>
@@ -798,7 +846,11 @@ export function SmartDrawingEditor({
         )}
       </div>
 
-      <EditorFooter mousePosition={mousePosition} elementCount={elementCount} />
+      <EditorFooter
+        mousePosition={mousePosition}
+        elementCount={elementCount}
+        areaSummary={areaSummary}
+      />
     </div>
   );
 }

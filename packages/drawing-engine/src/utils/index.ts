@@ -55,4 +55,8 @@ export {
 } from './duct-plan';
 
 // Room detection utilities
-export { detectRoomsFromWallGraph } from './room-detection';
+export {
+  detectRoomsFromWallGraph,
+  applyNestedRoomHierarchy,
+  validateNestedRooms,
+} from './room-detection';

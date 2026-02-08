@@ -14,7 +14,7 @@ import type { Point2D, DrawingTool, Wall2D, WallType, Room2D, DisplayUnit } from
 import { Grid, PageLayout, Rulers } from './canvas';
 import { MM_TO_PX, PX_TO_MM } from './canvas/scale';
 import { generateId } from '../utils/geometry';
-import { detectRoomsFromWallGraph } from '../utils/room-detection';
+import { detectRoomsFromWallGraph, validateNestedRooms } from '../utils/room-detection';
 
 // =============================================================================
 // Types
@@ -106,6 +106,7 @@ export function DrawingCanvas({
     wallId: string;
     handleType: 'start' | 'end' | 'mid';
     originalWalls: Wall2D[];
+    originalRooms: Room2D[];
     originalStart: Point2D;
     originalEnd: Point2D;
   } | null>(null);
@@ -120,6 +121,14 @@ export function DrawingCanvas({
   const [mousePosition, setMousePosition] = useState<Point2D>({ x: 0, y: 0 });
   const [isSpacePressed, setIsSpacePressed] = useState(false);
   const [roomDrawMode, setRoomDrawMode] = useState<RoomDrawMode>('rectangle');
+  const [hoveredRoomInfo, setHoveredRoomInfo] = useState<{
+    id: string;
+    name: string;
+    area: number;
+    perimeter: number;
+    screenX: number;
+    screenY: number;
+  } | null>(null);
 
   const [canvasState, setCanvasState] = useState<CanvasState>({
     isPanning: false,
@@ -145,6 +154,7 @@ export function DrawingCanvas({
     setPanOffset,
     setViewTransform,
     setSelectedIds,
+    setHoveredElement,
     setWalls,
     addSketch,
     deleteSelected,
@@ -263,6 +273,24 @@ export function DrawingCanvas({
     roomsRef.current = rooms;
   }, [rooms]);
 
+  const notifyRoomValidation = useCallback(
+    (messages: string[], title: string, blocking = false) => {
+      if (messages.length === 0) return;
+      const formatted = `${title}\n${messages.slice(0, 3).join('\n')}`;
+      console.warn(formatted);
+      if (typeof window !== 'undefined') {
+        window.alert(formatted);
+      }
+      if (blocking) {
+        const canvas = fabricRef.current;
+        if (canvas) {
+          clearDrawingPreview(canvas, false);
+        }
+      }
+    },
+    []
+  );
+
   const clearWallTransientOverlays = useCallback(() => {
     const canvas = fabricRef.current;
     if (!canvas) return;
@@ -318,16 +346,29 @@ export function DrawingCanvas({
         processedSplitWallIds.add(snapTarget.wallId);
       });
 
-      const newWall = createWallSegment(startPoint, endPoint, {
-        layer: activeLayerId ?? 'default',
-      });
-      nextWalls.push(newWall);
+      nextWalls = addEdgeWithWallReuse(
+        nextWalls,
+        startPoint,
+        endPoint,
+        activeLayerId ?? 'default',
+        ROOM_EDGE_OVERLAP_TOLERANCE
+      );
       nextWalls = rebuildWallAdjacency(nextWalls, WALL_ENDPOINT_TOLERANCE);
+
+      const nextRooms = detectRoomsFromWallGraph(nextWalls, roomsRef.current);
+      const validation = validateNestedRooms(nextRooms);
+      if (validation.errors.length > 0) {
+        notifyRoomValidation(validation.errors, 'Cannot create this wall segment:', true);
+        return;
+      }
+      if (validation.warnings.length > 0) {
+        notifyRoomValidation(validation.warnings, 'Room warning:');
+      }
 
       wallsRef.current = nextWalls;
       setWalls(nextWalls, 'Draw wall');
     },
-    [activeLayerId, setWalls]
+    [activeLayerId, setWalls, notifyRoomValidation]
   );
 
   const commitRoomFromVertices = useCallback(
@@ -350,10 +391,19 @@ export function DrawingCanvas({
       });
 
       nextWalls = rebuildWallAdjacency(nextWalls, WALL_ENDPOINT_TOLERANCE);
+      const nextRooms = detectRoomsFromWallGraph(nextWalls, roomsRef.current);
+      const validation = validateNestedRooms(nextRooms);
+      if (validation.errors.length > 0) {
+        notifyRoomValidation(validation.errors, 'Cannot create this room:', true);
+        return;
+      }
+      if (validation.warnings.length > 0) {
+        notifyRoomValidation(validation.warnings, 'Room warning:');
+      }
       wallsRef.current = nextWalls;
       setWalls(nextWalls, 'Draw room');
     },
-    [activeLayerId, setWalls]
+    [activeLayerId, setWalls, notifyRoomValidation]
   );
 
   const applyTransientWallGraph = useCallback((nextWalls: Wall2D[]) => {
@@ -431,27 +481,46 @@ export function DrawingCanvas({
     if (!canvas) return;
     const allowSelection = (isSpacePressed ? 'pan' : tool) === 'select';
     const selectedRoomId = rooms.find((room) => selectedIds.includes(room.id))?.id ?? null;
+    const hoveredRoomId = hoveredRoomInfo?.id ?? null;
+    const roomById = new Map(rooms.map((room) => [room.id, room]));
     const visibleRooms = rooms.filter(
       (room) => selectedRoomId === room.id || roomIntersectsBounds(room, visibleSceneBounds)
     );
+    const orderedRooms = [...visibleRooms].sort((a, b) => {
+      const depthDelta = getRoomHierarchyDepth(a, roomById) - getRoomHierarchyDepth(b, roomById);
+      if (depthDelta !== 0) return depthDelta;
+      return (b.grossArea ?? b.area) - (a.grossArea ?? a.area);
+    });
+    const occupiedTagBounds: TagBounds[] = [];
 
     clearRenderedRooms(canvas);
-    visibleRooms.forEach((room) => {
-      const { roomFill, roomTag } = createRoomRenderObjects(room, zoom, displayUnit, {
-        selected: selectedRoomId === room.id,
-      });
+    orderedRooms.forEach((room) => {
+      const { roomFill, roomTag, tagBounds } = createRoomRenderObjects(
+        room,
+        zoom,
+        displayUnit,
+        roomById,
+        occupiedTagBounds,
+        {
+          selected: selectedRoomId === room.id,
+          hovered: hoveredRoomId === room.id,
+        }
+      );
       roomFill.selectable = allowSelection;
       roomFill.evented = allowSelection;
       canvas.add(roomFill);
       canvas.sendObjectToBack(roomFill);
-      roomTag.selectable = false;
-      roomTag.evented = false;
-      canvas.add(roomTag);
+      if (roomTag && tagBounds) {
+        roomTag.selectable = false;
+        roomTag.evented = false;
+        canvas.add(roomTag);
+        occupiedTagBounds.push(tagBounds);
+      }
     });
 
     bringTransientOverlaysToFront(canvas);
     canvas.requestRenderAll();
-  }, [rooms, selectedIds, zoom, displayUnit, tool, isSpacePressed, visibleSceneBounds]);
+  }, [rooms, selectedIds, hoveredRoomInfo?.id, zoom, displayUnit, tool, isSpacePressed, visibleSceneBounds]);
 
   useEffect(() => {
     const canvas = fabricRef.current;
@@ -488,6 +557,12 @@ export function DrawingCanvas({
       clearRoomPolygonState();
     }
   }, [tool, endWallChain, clearRoomPolygonState]);
+
+  useEffect(() => {
+    if (tool === 'select' && !isSpacePressed) return;
+    setHoveredRoomInfo(null);
+    setHoveredElement(null);
+  }, [tool, isSpacePressed, setHoveredElement]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -785,6 +860,40 @@ export function DrawingCanvas({
         return;
       }
 
+      const shouldTrackRoomHover =
+        tool === 'select' && !isSpacePressed && !currentState.isDrawing;
+      if (shouldTrackRoomHover) {
+        const hoveredRoom = pickSmallestRoomAtPoint(point, roomsRef.current);
+        if (hoveredRoom) {
+          const nextInfo = {
+            id: hoveredRoom.id,
+            name: hoveredRoom.name,
+            area: Number.isFinite(hoveredRoom.netArea) ? hoveredRoom.netArea : hoveredRoom.area,
+            perimeter: hoveredRoom.perimeter,
+            screenX: viewportPoint.x + originOffset.x + 14,
+            screenY: viewportPoint.y + originOffset.y + 14,
+          };
+          setHoveredRoomInfo((previous) => {
+            if (
+              previous &&
+              previous.id === nextInfo.id &&
+              Math.abs(previous.screenX - nextInfo.screenX) < 0.5 &&
+              Math.abs(previous.screenY - nextInfo.screenY) < 0.5
+            ) {
+              return previous;
+            }
+            return nextInfo;
+          });
+          setHoveredElement(hoveredRoom.id);
+        } else {
+          setHoveredRoomInfo(null);
+          setHoveredElement(null);
+        }
+      } else {
+        setHoveredRoomInfo(null);
+        setHoveredElement(null);
+      }
+
       if (tool === 'room') {
         const snapThresholdScene = WALL_SNAP_THRESHOLD_PX / Math.max(zoomRef.current, 0.01);
         const snapTarget = findWallSnapTarget(point, wallsRef.current, snapThresholdScene);
@@ -873,7 +982,18 @@ export function DrawingCanvas({
       setCanvasState(nextState);
       renderDrawingPreview(canvas, nextPoints, tool);
     },
-    [tool, roomDrawMode, resolvedSnapToGrid, resolvedGridSize, setPanOffset, displayUnit]
+    [
+      tool,
+      roomDrawMode,
+      resolvedSnapToGrid,
+      resolvedGridSize,
+      setPanOffset,
+      displayUnit,
+      isSpacePressed,
+      originOffset.x,
+      originOffset.y,
+      setHoveredElement,
+    ]
   );
 
   const handleMouseUp = useCallback(
@@ -1002,10 +1122,27 @@ export function DrawingCanvas({
       }
     };
 
-    const handleWallDoubleClick = (event: MouseEvent) => {
-      if (tool !== 'wall') return;
+    const handleCanvasDoubleClick = (event: MouseEvent) => {
+      if (tool === 'wall') {
+        event.preventDefault();
+        endWallChain();
+        return;
+      }
+      if (tool !== 'select') return;
+
+      const scenePoint = getScenePointFromMouseEvent(canvas, event);
+      const room = pickSmallestRoomAtPoint(scenePoint, roomsRef.current);
+      if (!room) return;
+
       event.preventDefault();
-      endWallChain();
+      setSelectedIds([room.id]);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('smart-drawing:open-room-properties', {
+            detail: { roomId: room.id },
+          })
+        );
+      }
     };
 
     const getTargetMeta = (
@@ -1066,6 +1203,24 @@ export function DrawingCanvas({
 
     const handleCanvasMouseDown = (event: fabric.CanvasEvents['mouse:down']) => {
       if (tool !== 'select') return;
+      const meta = getTargetMeta(event.target ?? null);
+      if (meta.name === 'wall-render' || meta.name === 'wall-handle') {
+        updateSelectionFromTarget(event.target ?? null);
+        return;
+      }
+
+      if (event.e) {
+        const scenePoint = canvas.getScenePoint(event.e);
+        const roomAtPoint = pickSmallestRoomAtPoint(
+          { x: scenePoint.x, y: scenePoint.y },
+          roomsRef.current
+        );
+        if (roomAtPoint) {
+          setSelectedIds([roomAtPoint.id]);
+          return;
+        }
+      }
+
       updateSelectionFromTarget(event.target ?? null);
     };
 
@@ -1102,6 +1257,12 @@ export function DrawingCanvas({
             ...item,
             start: { ...item.start },
             end: { ...item.end },
+          })),
+          originalRooms: roomsRef.current.map((room) => ({
+            ...room,
+            vertices: room.vertices.map((vertex) => ({ ...vertex })),
+            wallIds: [...room.wallIds],
+            childRoomIds: [...room.childRoomIds],
           })),
           originalStart: { ...wall.start },
           originalEnd: { ...wall.end },
@@ -1165,9 +1326,39 @@ export function DrawingCanvas({
     };
 
     const finalizeHandleDrag = () => {
-      if (wallHandleDragRef.current) {
-        useSmartDrawingStore.getState().saveToHistory('Edit wall');
+      const dragSession = wallHandleDragRef.current;
+      if (!dragSession) {
+        isWallHandleDraggingRef.current = false;
+        return;
       }
+
+      const currentRooms = roomsRef.current;
+      const validation = validateNestedRooms(currentRooms);
+      if (validation.errors.length > 0) {
+        notifyRoomValidation(validation.errors, 'Invalid room edit. Reverting changes:', true);
+        wallsRef.current = dragSession.originalWalls;
+        roomsRef.current = dragSession.originalRooms;
+        useSmartDrawingStore.setState({
+          walls: dragSession.originalWalls,
+          rooms: dragSession.originalRooms,
+          selectedElementIds: [dragSession.wallId],
+          selectedIds: [dragSession.wallId],
+        });
+        wallHandleDragRef.current = null;
+        isWallHandleDraggingRef.current = false;
+        return;
+      }
+
+      const relationWarnings = deriveNestedRelationWarnings(
+        dragSession.originalRooms,
+        currentRooms
+      );
+      const warningMessages = [...validation.warnings, ...relationWarnings];
+      if (warningMessages.length > 0) {
+        notifyRoomValidation(warningMessages, 'Room warning:');
+      }
+
+      useSmartDrawingStore.getState().saveToHistory('Edit wall');
       wallHandleDragRef.current = null;
       isWallHandleDraggingRef.current = false;
     };
@@ -1212,6 +1403,11 @@ export function DrawingCanvas({
       finalizeHandleDrag();
     };
 
+    const handleCanvasMouseLeave = () => {
+      setHoveredRoomInfo(null);
+      setHoveredElement(null);
+    };
+
     canvas.on('mouse:down', handleMouseDown);
     canvas.on('mouse:move', handleMouseMove);
     canvas.on('mouse:up', handleMouseUp);
@@ -1226,7 +1422,8 @@ export function DrawingCanvas({
 
     upperCanvasEl?.addEventListener('mousedown', handleMiddleMouseDown);
     upperCanvasEl?.addEventListener('auxclick', preventMiddleAuxClick);
-    upperCanvasEl?.addEventListener('dblclick', handleWallDoubleClick);
+    upperCanvasEl?.addEventListener('dblclick', handleCanvasDoubleClick);
+    upperCanvasEl?.addEventListener('mouseleave', handleCanvasMouseLeave);
     window.addEventListener('mousemove', handleMiddleMouseMove, { passive: false });
     window.addEventListener('mouseup', handleMiddleMouseUp);
     window.addEventListener('blur', handleWindowBlur);
@@ -1245,7 +1442,8 @@ export function DrawingCanvas({
       window.removeEventListener('mouseup', handleMouseUp);
       upperCanvasEl?.removeEventListener('mousedown', handleMiddleMouseDown);
       upperCanvasEl?.removeEventListener('auxclick', preventMiddleAuxClick);
-      upperCanvasEl?.removeEventListener('dblclick', handleWallDoubleClick);
+      upperCanvasEl?.removeEventListener('dblclick', handleCanvasDoubleClick);
+      upperCanvasEl?.removeEventListener('mouseleave', handleCanvasMouseLeave);
       window.removeEventListener('mousemove', handleMiddleMouseMove);
       window.removeEventListener('mouseup', handleMiddleMouseUp);
       window.removeEventListener('blur', handleWindowBlur);
@@ -1263,6 +1461,7 @@ export function DrawingCanvas({
     applyTransientWallGraph,
     resolvedSnapToGrid,
     resolvedGridSize,
+    notifyRoomValidation,
   ]);
 
   // ---------------------------------------------------------------------------
@@ -1357,6 +1556,24 @@ export function DrawingCanvas({
         </div>
       )}
 
+      {hoveredRoomInfo && tool === 'select' && !isSpacePressed && (
+        <div
+          className="pointer-events-none absolute z-[35] rounded-md border border-slate-300/90 bg-white/95 px-2 py-1.5 shadow-md"
+          style={{
+            left: hoveredRoomInfo.screenX,
+            top: hoveredRoomInfo.screenY,
+          }}
+        >
+          <div className="text-[11px] font-semibold text-slate-800">{hoveredRoomInfo.name}</div>
+          <div className="text-[10px] text-slate-600">
+            Area: {formatRoomArea(hoveredRoomInfo.area, displayUnit)}
+          </div>
+          <div className="text-[10px] text-slate-600">
+            Perim: {formatRoomPerimeter(hoveredRoomInfo.perimeter, displayUnit)}
+          </div>
+        </div>
+      )}
+
       <Rulers
         pageWidth={pageConfig.width}
         pageHeight={pageConfig.height}
@@ -1425,6 +1642,11 @@ function isDrawingTool(tool: DrawingTool): boolean {
 
 function distanceBetween(a: Point2D, b: Point2D): number {
   return Math.hypot(b.x - a.x, b.y - a.y);
+}
+
+function getScenePointFromMouseEvent(canvas: fabric.Canvas, event: MouseEvent): Point2D {
+  const point = canvas.getScenePoint(event as unknown as fabric.TPointerEvent);
+  return { x: point.x, y: point.y };
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -1785,19 +2007,36 @@ function createWallHandleCircle(
 
 interface RoomRenderOptions {
   selected?: boolean;
+  hovered?: boolean;
+}
+
+interface TagBounds {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
 }
 
 function createRoomRenderObjects(
   room: Room2D,
   zoom: number,
   unit: DisplayUnit,
+  roomById: Map<string, Room2D>,
+  occupiedTagBounds: TagBounds[],
   options: RoomRenderOptions = {}
-): { roomFill: fabric.Object; roomTag: fabric.Group } {
+): {
+  roomFill: fabric.Object;
+  roomTag: fabric.Group | null;
+  tagBounds: TagBounds | null;
+} {
   const isSelected = options.selected === true;
+  const isHovered = options.hovered === true;
+  const fillStyle = getRoomVisualStyle(room, isSelected, isHovered);
   const roomFill = new fabric.Polygon(room.vertices, {
-    fill: room.color ? withAlpha(room.color, isSelected ? 0.22 : 0.14) : isSelected ? 'rgba(37,99,235,0.14)' : 'rgba(148,163,184,0.06)',
-    stroke: isSelected ? '#2563eb' : 'rgba(100,116,139,0.25)',
-    strokeWidth: isSelected ? 1.5 : 1,
+    fill: fillStyle.fill,
+    stroke: fillStyle.stroke,
+    strokeWidth: fillStyle.strokeWidth,
+    strokeDashArray: fillStyle.strokeDashArray,
     selectable: true,
     evented: true,
     objectCaching: false,
@@ -1805,70 +2044,99 @@ function createRoomRenderObjects(
   (roomFill as unknown as { name?: string }).name = 'room-region';
   (roomFill as unknown as { roomId?: string }).roomId = room.id;
 
-  const roomTag = createRoomTagObject(room, zoom, unit, { selected: isSelected });
-  return { roomFill, roomTag };
+  if (room.showTag === false) {
+    return { roomFill, roomTag: null, tagBounds: null };
+  }
+
+  const preferredAnchor = getPreferredRoomTagAnchor(room, roomById);
+  const roomTag = createRoomTagObject(room, zoom, unit, preferredAnchor, {
+    selected: isSelected,
+  });
+  const tagBounds = resolveRoomTagPlacement(roomTag, room, roomById, occupiedTagBounds, zoom);
+  return { roomFill, roomTag, tagBounds };
 }
 
 function createRoomTagObject(
   room: Room2D,
   zoom: number,
   unit: DisplayUnit,
+  anchor: Point2D,
   options: RoomRenderOptions = {}
 ): fabric.Group {
-  const centroid = calculatePolygonCentroid(room.vertices);
-  const areaText = formatRoomArea(room.area, unit);
+  const netAreaText = formatRoomArea(room.netArea ?? room.area, unit);
+  const grossAreaText = formatRoomArea(room.grossArea ?? room.area, unit);
   const perimeterText = formatRoomPerimeter(room.perimeter, unit);
   const isSelected = options.selected === true;
+  const hasChildren = room.childRoomIds.length > 0;
+  const textLines = [
+    {
+      text: room.name,
+      fontSize: 13,
+      fontWeight: '700',
+      fill: '#f8fafc',
+    },
+    {
+      text: hasChildren ? `Net: ${netAreaText}` : `Area: ${netAreaText}`,
+      fontSize: 11,
+      fontWeight: '500',
+      fill: '#e2e8f0',
+    },
+    {
+      text: `Perim: ${perimeterText}`,
+      fontSize: 11,
+      fontWeight: '500',
+      fill: '#cbd5e1',
+    },
+  ];
+  if (hasChildren) {
+    textLines.push({
+      text: `Gross: ${grossAreaText}`,
+      fontSize: 10,
+      fontWeight: '400',
+      fill: '#cbd5e1',
+    });
+    textLines.push({
+      text: `Contains ${room.childRoomIds.length} sub-room${
+        room.childRoomIds.length === 1 ? '' : 's'
+      }`,
+      fontSize: 10,
+      fontWeight: '600',
+      fill: '#a7f3d0',
+    });
+  }
 
-  const title = new fabric.Text(room.name, {
-    fontFamily: 'Segoe UI',
-    fontSize: 13,
-    fontWeight: '700',
-    fill: '#f8fafc',
-    originX: 'left',
-    originY: 'top',
-    selectable: false,
-    evented: false,
-  });
-  const area = new fabric.Text(areaText, {
-    fontFamily: 'Segoe UI',
-    fontSize: 11,
-    fill: '#e2e8f0',
-    originX: 'left',
-    originY: 'top',
-    selectable: false,
-    evented: false,
-  });
-  const perimeter = new fabric.Text(perimeterText, {
-    fontFamily: 'Segoe UI',
-    fontSize: 11,
-    fill: '#cbd5e1',
-    originX: 'left',
-    originY: 'top',
-    selectable: false,
-    evented: false,
-  });
+  const textObjects = textLines.map(
+    (line) =>
+      new fabric.Text(line.text, {
+        fontFamily: 'Segoe UI',
+        fontSize: line.fontSize,
+        fontWeight: line.fontWeight,
+        fill: line.fill,
+        originX: 'left',
+        originY: 'top',
+        selectable: false,
+        evented: false,
+      })
+  );
 
-  const contentWidth = Math.max(title.width ?? 0, area.width ?? 0, perimeter.width ?? 0);
-  const titleHeight = title.height ?? 0;
-  const areaHeight = area.height ?? 0;
-  const perimeterHeight = perimeter.height ?? 0;
+  const contentWidth = textObjects.reduce((max, text) => Math.max(max, text.width ?? 0), 0);
+  const lineHeights = textObjects.map((text) => text.height ?? 0);
+  const contentHeight = lineHeights.reduce((sum, height) => sum + height, 0);
   const lineGap = 3;
   const paddingX = 10;
   const paddingY = 8;
   const boxWidth = Math.max(contentWidth + paddingX * 2, 116);
-  const boxHeight = titleHeight + areaHeight + perimeterHeight + paddingY * 2 + lineGap * 2;
+  const boxHeight =
+    contentHeight + paddingY * 2 + lineGap * Math.max(0, textObjects.length - 1);
   const boxLeft = -boxWidth / 2;
   const boxTop = -boxHeight / 2;
 
   const textLeft = boxLeft + paddingX;
-  const titleTop = boxTop + paddingY;
-  const areaTop = titleTop + titleHeight + lineGap;
-  const perimeterTop = areaTop + areaHeight + lineGap;
-
-  title.set({ left: textLeft, top: titleTop });
-  area.set({ left: textLeft, top: areaTop });
-  perimeter.set({ left: textLeft, top: perimeterTop });
+  let cursorTop = boxTop + paddingY;
+  textObjects.forEach((textObject, index) => {
+    textObject.set({ left: textLeft, top: cursorTop });
+    cursorTop += (lineHeights[index] ?? 0) + lineGap;
+  });
 
   const background = new fabric.Rect({
     left: boxLeft,
@@ -1887,9 +2155,9 @@ function createRoomTagObject(
 
   const safeZoom = Math.max(zoom, 0.01);
   const inverseZoom = (isSelected ? 1.08 : 1) / safeZoom;
-  const group = new fabric.Group([background, title, area, perimeter], {
-    left: centroid.x,
-    top: centroid.y,
+  const group = new fabric.Group([background, ...textObjects], {
+    left: anchor.x,
+    top: anchor.y,
     originX: 'center',
     originY: 'center',
     selectable: false,
@@ -1997,6 +2265,400 @@ function calculatePolygonCentroid(vertices: Point2D[]): Point2D {
     x: cx * factor,
     y: cy * factor,
   };
+}
+
+function getRoomHierarchyDepth(room: Room2D, roomById: Map<string, Room2D>): number {
+  let depth = 0;
+  let cursor = room.parentRoomId ? roomById.get(room.parentRoomId) ?? null : null;
+  let guard = 0;
+  while (cursor && guard < 32) {
+    depth += 1;
+    cursor = cursor.parentRoomId ? roomById.get(cursor.parentRoomId) ?? null : null;
+    guard += 1;
+  }
+  return depth;
+}
+
+function pickSmallestRoomAtPoint(point: Point2D, rooms: Room2D[]): Room2D | null {
+  if (rooms.length === 0) return null;
+  const roomById = new Map(rooms.map((room) => [room.id, room]));
+  const containingRooms = rooms.filter((room) => isPointInsidePolygon(point, room.vertices));
+  if (containingRooms.length === 0) return null;
+
+  containingRooms.sort((a, b) => {
+    const areaA = Number.isFinite(a.grossArea) ? a.grossArea : a.area;
+    const areaB = Number.isFinite(b.grossArea) ? b.grossArea : b.area;
+    if (Math.abs(areaA - areaB) > 1e-6) return areaA - areaB;
+
+    const depthA = getRoomHierarchyDepth(a, roomById);
+    const depthB = getRoomHierarchyDepth(b, roomById);
+    if (depthA !== depthB) return depthB - depthA;
+
+    return a.name.localeCompare(b.name);
+  });
+
+  return containingRooms[0] ?? null;
+}
+
+function deriveNestedRelationWarnings(previousRooms: Room2D[], nextRooms: Room2D[]): string[] {
+  const warnings: string[] = [];
+  const previousById = new Map(previousRooms.map((room) => [room.id, room]));
+  const nextById = new Map(nextRooms.map((room) => [room.id, room]));
+
+  nextById.forEach((nextRoom) => {
+    const previousRoom = previousById.get(nextRoom.id);
+    if (!previousRoom) return;
+
+    if (previousRoom.parentRoomId && !nextRoom.parentRoomId) {
+      warnings.push(
+        `"${nextRoom.name}" moved outside its parent and is now treated as an adjacent/top-level room.`
+      );
+      return;
+    }
+
+    if (previousRoom.parentRoomId && nextRoom.parentRoomId && previousRoom.parentRoomId !== nextRoom.parentRoomId) {
+      warnings.push(`"${nextRoom.name}" changed parent room relationship.`);
+    }
+  });
+
+  return warnings;
+}
+
+function getRoomVisualStyle(
+  room: Room2D,
+  isSelected: boolean,
+  isHovered: boolean
+): {
+  fill: string;
+  stroke: string;
+  strokeWidth: number;
+  strokeDashArray?: number[];
+} {
+  const isChild = Boolean(room.parentRoomId);
+  const hasChildren = room.childRoomIds.length > 0;
+  const usage = inferRoomUsageCategory(room);
+
+  if (isSelected) {
+    return {
+      fill: 'rgba(37, 99, 235, 0.16)',
+      stroke: '#2563eb',
+      strokeWidth: 1.75,
+    };
+  }
+
+  if (isHovered) {
+    return {
+      fill: 'rgba(59, 130, 246, 0.14)',
+      stroke: 'rgba(37, 99, 235, 0.9)',
+      strokeWidth: 1.45,
+      strokeDashArray: isChild ? [6, 4] : undefined,
+    };
+  }
+
+  if (room.color) {
+    return {
+      fill: withAlpha(room.color, hasChildren ? 0.2 : 0.14),
+      stroke: hasChildren ? withAlpha(room.color, 0.75) : withAlpha(room.color, 0.55),
+      strokeWidth: 1.2,
+      strokeDashArray:
+        usage === 'storage'
+          ? [4, 3]
+          : usage === 'bathroom'
+          ? [8, 3]
+          : isChild
+          ? [6, 4]
+          : undefined,
+    };
+  }
+
+  if (hasChildren && !isChild) {
+    return {
+      fill: 'rgba(245, 158, 11, 0.11)',
+      stroke: 'rgba(180, 83, 9, 0.6)',
+      strokeWidth: 1.1,
+    };
+  }
+
+  if (isChild) {
+    const childFill =
+      usage === 'storage'
+        ? 'rgba(20, 184, 166, 0.14)'
+        : usage === 'bathroom'
+        ? 'rgba(56, 189, 248, 0.14)'
+        : 'rgba(56, 189, 248, 0.12)';
+    return {
+      fill: childFill,
+      stroke: 'rgba(14, 116, 144, 0.55)',
+      strokeWidth: 1.05,
+      strokeDashArray: usage === 'storage' ? [4, 3] : [6, 4],
+    };
+  }
+
+  if (usage === 'circulation') {
+    return {
+      fill: 'rgba(245, 158, 11, 0.14)',
+      stroke: 'rgba(180, 83, 9, 0.5)',
+      strokeWidth: 1.1,
+      strokeDashArray: [10, 3],
+    };
+  }
+
+  if (usage === 'bathroom') {
+    return {
+      fill: 'rgba(125, 211, 252, 0.16)',
+      stroke: 'rgba(14, 116, 144, 0.5)',
+      strokeWidth: 1.1,
+      strokeDashArray: [8, 3],
+    };
+  }
+
+  if (usage === 'storage') {
+    return {
+      fill: 'rgba(94, 234, 212, 0.12)',
+      stroke: 'rgba(15, 118, 110, 0.5)',
+      strokeWidth: 1.1,
+      strokeDashArray: [4, 3],
+    };
+  }
+
+  return {
+    fill: 'rgba(148,163,184,0.08)',
+    stroke: 'rgba(100,116,139,0.3)',
+    strokeWidth: 1,
+  };
+}
+
+function inferRoomUsageCategory(room: Room2D): 'circulation' | 'storage' | 'bathroom' | 'utility' | 'general' {
+  const text = `${room.name} ${room.spaceType}`.toLowerCase();
+  if (/corridor|hall|lobby|passage|circulation|foyer/.test(text)) {
+    return 'circulation';
+  }
+  if (/storage|closet|pantry|shaft/.test(text)) {
+    return 'storage';
+  }
+  if (/bath|wc|toilet|wash/.test(text)) {
+    return 'bathroom';
+  }
+  if (/utility|service|laundry|mechanical/.test(text)) {
+    return 'utility';
+  }
+  return 'general';
+}
+
+function resolveRoomTagPlacement(
+  roomTag: fabric.Group,
+  room: Room2D,
+  roomById: Map<string, Room2D>,
+  occupiedTagBounds: TagBounds[],
+  zoom: number
+): TagBounds {
+  const baseAnchor = {
+    x: roomTag.left ?? 0,
+    y: roomTag.top ?? 0,
+  };
+  const candidateAnchors = buildTagPlacementCandidates(baseAnchor, zoom);
+
+  for (const candidate of candidateAnchors) {
+    if (!isValidRoomTagPoint(candidate, room, roomById)) continue;
+
+    roomTag.set({ left: candidate.x, top: candidate.y });
+    roomTag.setCoords();
+    const bounds = getTagBounds(roomTag);
+    if (!occupiedTagBounds.some((occupied) => tagBoundsOverlap(bounds, occupied))) {
+      return bounds;
+    }
+  }
+
+  roomTag.set({ left: baseAnchor.x, top: baseAnchor.y });
+  roomTag.setCoords();
+  return getTagBounds(roomTag);
+}
+
+function buildTagPlacementCandidates(anchor: Point2D, zoom: number): Point2D[] {
+  const candidates: Point2D[] = [{ x: anchor.x, y: anchor.y }];
+  const step = Math.max(20 / Math.max(zoom, 0.01), 8);
+  const rings = 6;
+  const sectors = 12;
+
+  for (let ring = 1; ring <= rings; ring++) {
+    const radius = step * ring;
+    for (let i = 0; i < sectors; i++) {
+      const angle = (Math.PI * 2 * i) / sectors;
+      candidates.push({
+        x: anchor.x + Math.cos(angle) * radius,
+        y: anchor.y + Math.sin(angle) * radius,
+      });
+    }
+  }
+
+  return candidates;
+}
+
+function getTagBounds(tag: fabric.Group): TagBounds {
+  const width = tag.getScaledWidth();
+  const height = tag.getScaledHeight();
+  const cx = tag.left ?? 0;
+  const cy = tag.top ?? 0;
+  return {
+    left: cx - width / 2,
+    top: cy - height / 2,
+    right: cx + width / 2,
+    bottom: cy + height / 2,
+  };
+}
+
+function tagBoundsOverlap(a: TagBounds, b: TagBounds): boolean {
+  return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+}
+
+function getPreferredRoomTagAnchor(room: Room2D, roomById: Map<string, Room2D>): Point2D {
+  const centroid = calculatePolygonCentroid(room.vertices);
+  if (room.childRoomIds.length === 0) return centroid;
+
+  const childPolygons = room.childRoomIds
+    .map((childId) => roomById.get(childId)?.vertices)
+    .filter((vertices): vertices is Point2D[] => Boolean(vertices && vertices.length >= 3));
+  if (childPolygons.length === 0) return centroid;
+
+  if (!childPolygons.some((polygon) => isPointInsidePolygon(centroid, polygon))) {
+    return centroid;
+  }
+
+  return findBestOpenTagPoint(room.vertices, childPolygons) ?? centroid;
+}
+
+function findBestOpenTagPoint(
+  parentPolygon: Point2D[],
+  childPolygons: Point2D[][]
+): Point2D | null {
+  const bounds = calculatePolygonBounds(parentPolygon);
+  const width = Math.max(bounds.right - bounds.left, 1);
+  const height = Math.max(bounds.bottom - bounds.top, 1);
+  const sampleCols = 26;
+  const sampleRows = 26;
+  const stepX = width / Math.max(sampleCols - 1, 1);
+  const stepY = height / Math.max(sampleRows - 1, 1);
+  let bestPoint: Point2D | null = null;
+  let bestScore = Number.NEGATIVE_INFINITY;
+
+  for (let row = 0; row < sampleRows; row++) {
+    const y = bounds.top + row * stepY;
+    for (let col = 0; col < sampleCols; col++) {
+      const x = bounds.left + col * stepX;
+      const point = { x, y };
+      if (!isPointInsidePolygon(point, parentPolygon)) continue;
+      if (childPolygons.some((polygon) => isPointInsidePolygon(point, polygon))) continue;
+
+      const nearestChildDistance = childPolygons.reduce((minDistance, polygon) => {
+        return Math.min(minDistance, distancePointToPolygonEdges(point, polygon));
+      }, Number.POSITIVE_INFINITY);
+      const parentBoundaryDistance = distancePointToPolygonEdges(point, parentPolygon);
+      const score = nearestChildDistance + parentBoundaryDistance * 0.25;
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestPoint = point;
+      }
+    }
+  }
+
+  return bestPoint;
+}
+
+function isValidRoomTagPoint(
+  point: Point2D,
+  room: Room2D,
+  roomById: Map<string, Room2D>
+): boolean {
+  if (!isPointInsidePolygon(point, room.vertices)) return false;
+  if (room.childRoomIds.length === 0) return true;
+
+  for (const childId of room.childRoomIds) {
+    const child = roomById.get(childId);
+    if (!child) continue;
+    if (isPointInsidePolygon(point, child.vertices)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isPointInsidePolygon(point: Point2D, polygon: Point2D[]): boolean {
+  if (polygon.length < 3) return false;
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const pi = polygon[i];
+    const pj = polygon[j];
+    if (!pi || !pj) continue;
+
+    const onSegment =
+      distancePointToSegment(point, pj, pi) <= 1e-6 &&
+      point.x >= Math.min(pi.x, pj.x) - 1e-6 &&
+      point.x <= Math.max(pi.x, pj.x) + 1e-6 &&
+      point.y >= Math.min(pi.y, pj.y) - 1e-6 &&
+      point.y <= Math.max(pi.y, pj.y) + 1e-6;
+    if (onSegment) return true;
+
+    const intersects =
+      (pi.y > point.y) !== (pj.y > point.y) &&
+      point.x < ((pj.x - pi.x) * (point.y - pi.y)) / (pj.y - pi.y + Number.EPSILON) + pi.x;
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+function calculatePolygonBounds(vertices: Point2D[]): {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+} {
+  if (vertices.length === 0) {
+    return { left: 0, top: 0, right: 0, bottom: 0 };
+  }
+
+  let left = Number.POSITIVE_INFINITY;
+  let top = Number.POSITIVE_INFINITY;
+  let right = Number.NEGATIVE_INFINITY;
+  let bottom = Number.NEGATIVE_INFINITY;
+
+  vertices.forEach((vertex) => {
+    left = Math.min(left, vertex.x);
+    top = Math.min(top, vertex.y);
+    right = Math.max(right, vertex.x);
+    bottom = Math.max(bottom, vertex.y);
+  });
+
+  return { left, top, right, bottom };
+}
+
+function distancePointToPolygonEdges(point: Point2D, polygon: Point2D[]): number {
+  if (polygon.length < 2) return Number.POSITIVE_INFINITY;
+  let minDistance = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < polygon.length; i++) {
+    const start = polygon[i];
+    const end = polygon[(i + 1) % polygon.length];
+    if (!start || !end) continue;
+    minDistance = Math.min(minDistance, distancePointToSegment(point, start, end));
+  }
+  return minDistance;
+}
+
+function distancePointToSegment(point: Point2D, start: Point2D, end: Point2D): number {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq <= 1e-12) return Math.hypot(point.x - start.x, point.y - start.y);
+
+  const t = clamp(
+    ((point.x - start.x) * dx + (point.y - start.y) * dy) / lenSq,
+    0,
+    1
+  );
+  const projectionX = start.x + t * dx;
+  const projectionY = start.y + t * dy;
+  return Math.hypot(point.x - projectionX, point.y - projectionY);
 }
 
 function bringTransientOverlaysToFront(canvas: fabric.Canvas): void {
@@ -2373,6 +3035,9 @@ function addEdgeWithWallReuse(
   if (distanceBetween(start, end) <= 0.001) return sourceWalls;
 
   let walls = [...sourceWalls];
+  walls = splitWallsAtPoint(walls, start, layerId, tolerance);
+  walls = splitWallsAtPoint(walls, end, layerId, tolerance);
+
   const lineVector = { x: end.x - start.x, y: end.y - start.y };
   const lineLength = Math.hypot(lineVector.x, lineVector.y);
   if (lineLength <= 0.001) return walls;
@@ -2409,6 +3074,37 @@ function addEdgeWithWallReuse(
       })
     );
   });
+
+  return walls;
+}
+
+function splitWallsAtPoint(
+  sourceWalls: Wall2D[],
+  splitPoint: Point2D,
+  fallbackLayer: string,
+  tolerance: number
+): Wall2D[] {
+  let walls = [...sourceWalls];
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+    for (let i = 0; i < walls.length; i++) {
+      const wall = walls[i];
+      if (!wall) continue;
+      if (arePointsClose(wall.start, splitPoint, tolerance) || arePointsClose(wall.end, splitPoint, tolerance)) {
+        continue;
+      }
+      if (!isPointOnSegment(splitPoint, wall.start, wall.end, tolerance)) continue;
+
+      const splitResult = splitWallAtPoint(wall, splitPoint, fallbackLayer);
+      if (!splitResult) continue;
+
+      walls.splice(i, 1, splitResult.first, splitResult.second);
+      changed = true;
+      break;
+    }
+  }
 
   return walls;
 }

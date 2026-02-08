@@ -30,7 +30,7 @@ import type {
 } from '../types';
 import { DEFAULT_SPLINE_SETTINGS } from '../utils/spline';
 import { generateId } from '../utils/geometry';
-import { detectRoomsFromWallGraph } from '../utils/room-detection';
+import { applyNestedRoomHierarchy, detectRoomsFromWallGraph } from '../utils/room-detection';
 
 // =============================================================================
 // Default Settings
@@ -177,7 +177,7 @@ function detectRoomsIncremental(
   });
 
   if (changedWallIds.size === 0) {
-    return previousRooms;
+    return sortRoomsForDisplay(applyNestedRoomHierarchy(previousRooms));
   }
 
   const previousAdjacency = buildWallAdjacencyMap(previousWalls, WALL_NODE_TOLERANCE_PX);
@@ -206,7 +206,7 @@ function detectRoomsIncremental(
   }
 
   if (affectedWallIds.size === 0) {
-    return detectRoomsFromWallGraph(nextWalls, previousRooms);
+    return sortRoomsForDisplay(detectRoomsFromWallGraph(nextWalls, previousRooms));
   }
 
   const nextWallIdSet = new Set(nextWalls.map((wall) => wall.id));
@@ -216,7 +216,7 @@ function detectRoomsIncremental(
   const affectedWalls = nextWalls.filter((wall) => affectedWallIds.has(wall.id));
   const recalculatedRooms = detectRoomsFromWallGraph(affectedWalls, previousRooms);
 
-  return sortRoomsForDisplay([...unaffectedRooms, ...recalculatedRooms]);
+  return sortRoomsForDisplay(applyNestedRoomHierarchy([...unaffectedRooms, ...recalculatedRooms]));
 }
 
 function withRebuiltAdjacency(walls: Wall2D[]): Wall2D[] {
@@ -346,8 +346,21 @@ export interface DrawingState {
   deleteOpening: (wallId: string, openingId: string) => void;
   
   // Actions - Rooms
-  addRoom: (room: Omit<Room2D, 'id' | 'area' | 'perimeter'>) => string;
+  addRoom: (
+    room: Omit<
+      Room2D,
+      | 'id'
+      | 'area'
+      | 'perimeter'
+      | 'grossArea'
+      | 'netArea'
+      | 'parentRoomId'
+      | 'childRoomIds'
+      | 'roomType'
+    >
+  ) => string;
   updateRoom: (id: string, data: Partial<Room2D>) => void;
+  reparentRoom: (roomId: string, parentRoomId: string | null) => boolean;
   deleteRoom: (id: string) => void;
   detectRoomsFromWalls: () => void;
   
@@ -663,15 +676,72 @@ export const useDrawingStore = create<DrawingState>()(
       },
       
       updateRoom: (id, data) => {
-        const { vertices: _ignoredVertices, wallIds: _ignoredWallIds, area: _ignoredArea, perimeter: _ignoredPerimeter, ...allowed } = data;
+        const {
+          vertices: _ignoredVertices,
+          wallIds: _ignoredWallIds,
+          area: _ignoredArea,
+          perimeter: _ignoredPerimeter,
+          grossArea: _ignoredGrossArea,
+          netArea: _ignoredNetArea,
+          parentRoomId: _ignoredParentRoomId,
+          childRoomIds: _ignoredChildRoomIds,
+          roomType: _ignoredRoomType,
+          ...allowed
+        } = data;
         void _ignoredVertices;
         void _ignoredWallIds;
         void _ignoredArea;
         void _ignoredPerimeter;
-        set((state) => ({
-          rooms: state.rooms.map((r) => (r.id === id ? { ...r, ...allowed } : r)),
-        }));
+        void _ignoredGrossArea;
+        void _ignoredNetArea;
+        void _ignoredParentRoomId;
+        void _ignoredChildRoomIds;
+        void _ignoredRoomType;
+        set((state) => {
+          const updatedRooms = state.rooms.map((room) =>
+            room.id === id ? { ...room, ...allowed } : room
+          );
+          return {
+            rooms: sortRoomsForDisplay(applyNestedRoomHierarchy(updatedRooms)),
+          };
+        });
         get().saveToHistory('Update room');
+      },
+
+      reparentRoom: (roomId, parentRoomId) => {
+        let applied = false;
+        set((state) => {
+          const roomById = new Map(state.rooms.map((room) => [room.id, room]));
+          const targetRoom = roomById.get(roomId);
+          if (!targetRoom) return state;
+          if (parentRoomId === roomId) return state;
+          if (parentRoomId !== null && !roomById.has(parentRoomId)) return state;
+
+          const nextRooms = state.rooms.map((room) =>
+            room.id === roomId ? { ...room, manualParentRoomId: parentRoomId } : room
+          );
+          const nestedRooms = sortRoomsForDisplay(applyNestedRoomHierarchy(nextRooms));
+          const nextTarget = nestedRooms.find((room) => room.id === roomId);
+          if (!nextTarget) return state;
+
+          const expectedParentId = parentRoomId ?? null;
+          if (nextTarget.parentRoomId !== expectedParentId) {
+            return state;
+          }
+
+          applied = true;
+          return {
+            rooms: nestedRooms,
+            selectedElementIds: [roomId],
+            selectedIds: [roomId],
+          };
+        });
+
+        if (applied) {
+          get().saveToHistory('Reparent room');
+        }
+
+        return applied;
       },
       
       deleteRoom: (id) => {
@@ -807,8 +877,44 @@ export const useDrawingStore = create<DrawingState>()(
       
       deleteSelectedElements: () => {
         const { selectedElementIds, walls, rooms, dimensions, annotations, sketches, symbols } = get();
+        const wallIdSet = new Set(walls.map((wall) => wall.id));
+        const roomById = new Map(rooms.map((room) => [room.id, room]));
+        const wallUsageCount = new Map<string, number>();
+
+        rooms.forEach((room) => {
+          room.wallIds.forEach((wallId) => {
+            wallUsageCount.set(wallId, (wallUsageCount.get(wallId) ?? 0) + 1);
+          });
+        });
+
+        const explicitlySelectedWallIds = new Set(
+          selectedElementIds.filter((id) => wallIdSet.has(id))
+        );
+        const selectedRoomIds = selectedElementIds.filter((id) => roomById.has(id));
+        const roomDerivedWallIds = new Set<string>();
+
+        selectedRoomIds.forEach((roomId) => {
+          const room = roomById.get(roomId);
+          if (!room) return;
+
+          room.wallIds.forEach((wallId) => {
+            if (explicitlySelectedWallIds.has(wallId)) {
+              roomDerivedWallIds.add(wallId);
+              return;
+            }
+            const usageCount = wallUsageCount.get(wallId) ?? 0;
+            if (usageCount <= 1) {
+              roomDerivedWallIds.add(wallId);
+            }
+          });
+        });
+
+        const wallIdsToDelete = new Set<string>([
+          ...explicitlySelectedWallIds,
+          ...roomDerivedWallIds,
+        ]);
         const nextWalls = withRebuiltAdjacency(
-          walls.filter((w) => !selectedElementIds.includes(w.id))
+          walls.filter((wall) => !wallIdsToDelete.has(wall.id))
         );
         const nextRooms = detectRoomsIncremental(walls, nextWalls, rooms);
         set({

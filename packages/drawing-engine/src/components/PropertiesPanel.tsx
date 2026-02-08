@@ -148,6 +148,28 @@ function formatArea(areaSqm: number, unit: DisplayUnit): string {
   }
 }
 
+function suggestRoomUsage(room: Room2D): string {
+  const text = `${room.name} ${room.spaceType}`.toLowerCase();
+  if (/corridor|hall|lobby|passage|circulation|foyer/.test(text)) {
+    return 'Circulation';
+  }
+  if (/storage|closet|pantry|shaft/.test(text)) {
+    return 'Storage';
+  }
+  if (/bath|wc|toilet|wash/.test(text)) {
+    return 'Bathroom';
+  }
+  if (/utility|service|laundry|mechanical/.test(text)) {
+    return 'Utility';
+  }
+
+  const area = Number.isFinite(room.netArea) ? room.netArea : room.area;
+  if (room.parentRoomId && area < 8) return 'Storage';
+  if (area < 8) return 'Bathroom';
+  if (area < 15) return 'Utility';
+  return 'General';
+}
+
 function UnitSelector() {
   const { displayUnit, setDisplayUnit } = useSmartDrawingStore();
   return (
@@ -269,9 +291,13 @@ function WallProperties({ wall }: { wall: Wall2D }) {
 
 function RoomProperties({ room }: { room: Room2D }) {
   const { updateRoom, displayUnit } = useSmartDrawingStore();
-  const area = room.area ?? 0;
+  const netArea = room.netArea ?? room.area ?? 0;
+  const grossArea = room.grossArea ?? room.area ?? 0;
   const perimeter = room.perimeter ?? 0;
   const boundaryWalls = room.wallIds?.length ?? 0;
+  const parentRoom = room.parentRoomId ?? 'None';
+  const childCount = room.childRoomIds?.length ?? 0;
+  const usageSuggestion = suggestRoomUsage(room);
 
   return (
     <div className="space-y-1">
@@ -298,11 +324,54 @@ function RoomProperties({ room }: { room: Room2D }) {
       </PropertyRow>
 
       <PropertyRow label="Area">
-        <span className="text-sm font-mono">{formatArea(area, displayUnit)}</span>
+        <span className="text-sm font-mono">{formatArea(netArea, displayUnit)}</span>
+      </PropertyRow>
+
+      <PropertyRow label="Gross Area">
+        <span className="text-sm font-mono">{formatArea(grossArea, displayUnit)}</span>
+      </PropertyRow>
+
+      <PropertyRow label="Net Area">
+        <span className="text-sm font-mono">{formatArea(netArea, displayUnit)}</span>
       </PropertyRow>
 
       <PropertyRow label="Perimeter">
         <span className="text-sm font-mono">{formatDistance(perimeter * 1000, displayUnit)}</span>
+      </PropertyRow>
+
+      <PropertyRow label="Room Type">
+        <span className="text-sm font-mono">{room.roomType}</span>
+      </PropertyRow>
+
+      <PropertyRow label="Usage Type">
+        <input
+          type="text"
+          value={room.spaceType || usageSuggestion}
+          onChange={(e) => updateRoom(room.id, { spaceType: e.target.value })}
+          placeholder={usageSuggestion}
+          className="w-32 px-2 py-1 text-sm border border-amber-200/80 rounded focus:outline-none focus:ring-1 focus:ring-amber-400"
+        />
+      </PropertyRow>
+
+      <PropertyRow label="Suggested">
+        <span className="text-sm font-mono">{usageSuggestion}</span>
+      </PropertyRow>
+
+      <PropertyRow label="Tag Visible">
+        <input
+          type="checkbox"
+          checked={room.showTag !== false}
+          onChange={(event) => updateRoom(room.id, { showTag: event.target.checked })}
+          className="h-4 w-4 rounded border-amber-300 text-amber-600 focus:ring-amber-400"
+        />
+      </PropertyRow>
+
+      <PropertyRow label="Parent Room">
+        <span className="text-sm font-mono">{parentRoom}</span>
+      </PropertyRow>
+
+      <PropertyRow label="Child Rooms">
+        <span className="text-sm font-mono">{childCount}</span>
       </PropertyRow>
 
       <PropertyRow label="Vertices">

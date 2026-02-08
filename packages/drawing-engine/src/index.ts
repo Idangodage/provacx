@@ -16,6 +16,7 @@ export {
   PropertiesPanel,
   SymbolPalette,
   LayersPanel,
+  RoomHierarchyPanel,
   DrawingGrid,
   DrawingRulers,
   DrawingPageLayout,
@@ -26,6 +27,7 @@ export {
   type PropertiesPanelProps,
   type SymbolPaletteProps,
   type LayersPanelProps,
+  type RoomHierarchyPanelProps,
   type DrawingGridProps,
   type DrawingRulersProps,
   type DrawingPageLayoutProps,
@@ -101,6 +103,8 @@ export {
   buildDuctPlan,
   generateBoqSummary,
   detectRoomsFromWallGraph,
+  applyNestedRoomHierarchy,
+  validateNestedRooms,
   type DuctDefaults,
 } from './utils';
 

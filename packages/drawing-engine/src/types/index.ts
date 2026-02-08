@@ -146,12 +146,19 @@ export interface Room2D {
   name: string;
   wallIds: string[];
   vertices: Point2D[];
+  manualParentRoomId?: string | null;
+  parentRoomId: string | null;
+  childRoomIds: string[];
+  grossArea: number;
+  netArea: number;
+  roomType: 'enclosed-space' | 'remaining-area' | 'surrounding-area';
   area: number;
   perimeter: number;
   spaceType: string;
   floorHeight: number;
   ceilingHeight: number;
   color?: string;
+  showTag?: boolean;
 }
 
 export interface Dimension2D {

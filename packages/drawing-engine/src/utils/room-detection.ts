@@ -12,6 +12,19 @@ const NODE_SNAP_TOLERANCE_PX = 0.5;
 const MIN_ROOM_AREA_PX2 = 4;
 const PX_TO_MM = 25.4 / 96;
 const PX_TO_M = PX_TO_MM / 1000;
+const AUTO_SPACE_TYPES = new Set([
+  'detected',
+  'enclosed-space',
+  'remaining-area',
+  'surrounding-area',
+  'sub room',
+  'storage',
+  'utility',
+  'bathroom',
+  'shaft',
+  'net area',
+  'general',
+]);
 
 interface GraphNodeAccumulator {
   id: string;
@@ -52,6 +65,11 @@ interface DetectedFace {
 interface GraphBuildResult {
   nodes: GraphNode[];
   edges: GraphEdge[];
+}
+
+export interface NestedRoomValidationResult {
+  errors: string[];
+  warnings: string[];
 }
 
 export function detectRoomsFromWallGraph(walls: Wall2D[], previousRooms: Room2D[] = []): Room2D[] {
@@ -147,7 +165,8 @@ export function detectRoomsFromWallGraph(walls: Wall2D[], previousRooms: Room2D[
     return a.centroid.x - b.centroid.x;
   });
 
-  return mapFacesToRooms(dedupedFaces, previousRooms);
+  const baseRooms = mapFacesToRooms(dedupedFaces, previousRooms);
+  return applyNestedRoomHierarchy(baseRooms);
 }
 
 function buildWallGraph(walls: Wall2D[], snapTolerancePx: number): GraphBuildResult {
@@ -386,19 +405,437 @@ function mapFacesToRooms(faces: DetectedFace[], previousRooms: Room2D[]): Room2D
     previousByBoundary.set(boundaryKey, previousBucket);
 
     const roomName = previousRoom?.name ?? `Room ${nextRoomNumber++}`;
+    const grossArea = face.areaM2;
     return {
       id: previousRoom?.id ?? generateId(),
       name: roomName,
       wallIds: [...face.wallIdsOrdered],
       vertices: [...face.vertices],
-      area: face.areaM2,
+      manualParentRoomId: previousRoom?.manualParentRoomId ?? null,
+      parentRoomId: null,
+      childRoomIds: [] as string[],
+      grossArea,
+      netArea: grossArea,
+      roomType: 'enclosed-space',
+      area: grossArea,
       perimeter: face.perimeterM,
       spaceType: previousRoom?.spaceType ?? 'detected',
       floorHeight: previousRoom?.floorHeight ?? 0,
       ceilingHeight: previousRoom?.ceilingHeight ?? 3,
       color: previousRoom?.color,
+      showTag: previousRoom?.showTag !== false,
     };
   });
+}
+
+export function applyNestedRoomHierarchy(sourceRooms: Room2D[]): Room2D[] {
+  if (sourceRooms.length === 0) return [];
+
+  const rooms = sourceRooms.map((room) => {
+    const grossArea = Number.isFinite(room.grossArea) ? room.grossArea : room.area;
+    return {
+      ...room,
+      manualParentRoomId: room.manualParentRoomId ?? null,
+      parentRoomId: room.parentRoomId ?? null,
+      childRoomIds: [] as string[],
+      grossArea,
+      netArea: Number.isFinite(room.netArea) ? room.netArea : grossArea,
+      roomType: room.roomType ?? 'enclosed-space',
+      area: room.area ?? grossArea,
+      showTag: room.showTag !== false,
+    };
+  });
+
+  const roomById = new Map(rooms.map((room) => [room.id, room]));
+  const boundsByRoomId = new Map(rooms.map((room) => [room.id, calculatePolygonBounds(room.vertices)]));
+
+  rooms.forEach((child) => {
+    const childBounds = boundsByRoomId.get(child.id);
+    if (!childBounds) return;
+
+    let bestParent: Room2D | null = null;
+    for (const candidate of rooms) {
+      if (!isValidParentContainment(child, childBounds, candidate, boundsByRoomId)) continue;
+
+      if (!bestParent || candidate.grossArea < bestParent.grossArea) {
+        bestParent = candidate;
+      }
+    }
+
+    const preferredParent = child.manualParentRoomId
+      ? roomById.get(child.manualParentRoomId) ?? null
+      : null;
+    const preferredParentValid =
+      preferredParent !== null &&
+      isValidParentContainment(child, childBounds, preferredParent, boundsByRoomId);
+
+    child.parentRoomId = preferredParentValid
+      ? preferredParent.id
+      : bestParent?.id ?? null;
+    child.manualParentRoomId = child.parentRoomId;
+  });
+
+  rooms.forEach((room) => {
+    room.childRoomIds = [];
+  });
+
+  rooms.forEach((room) => {
+    if (!room.parentRoomId) return;
+    const parent = roomById.get(room.parentRoomId);
+    if (!parent) return;
+    parent.childRoomIds.push(room.id);
+  });
+
+  assignNestedChildAutoNames(rooms, roomById);
+
+  rooms.forEach((room) => {
+    const childrenGrossArea = room.childRoomIds.reduce((sum, childId) => {
+      const child = roomById.get(childId);
+      return sum + (child?.grossArea ?? 0);
+    }, 0);
+
+    room.netArea = Math.max(0, room.grossArea - childrenGrossArea);
+    room.area = room.netArea;
+    room.roomType = classifyRoomType(room);
+    room.spaceType = resolveRoomSpaceType(
+      room.spaceType,
+      suggestRoomSpaceType(room)
+    );
+  });
+
+  return rooms;
+}
+
+function isValidParentContainment(
+  child: Room2D,
+  childBounds: { left: number; top: number; right: number; bottom: number },
+  candidate: Room2D,
+  boundsByRoomId: Map<string, { left: number; top: number; right: number; bottom: number }>
+): boolean {
+  if (candidate.id === child.id) return false;
+  const candidateBounds = boundsByRoomId.get(candidate.id);
+  if (!candidateBounds) return false;
+  if (!boundsContains(candidateBounds, childBounds)) return false;
+
+  const allInsideOrBoundary = child.vertices.every((vertex) =>
+    isPointInsidePolygonInclusive(vertex, candidate.vertices)
+  );
+  if (!allInsideOrBoundary) return false;
+  if (child.grossArea >= candidate.grossArea - 1e-8) return false;
+
+  return true;
+}
+
+function classifyRoomType(room: Pick<Room2D, 'parentRoomId' | 'childRoomIds'>): Room2D['roomType'] {
+  if (room.childRoomIds.length === 0) {
+    return 'enclosed-space';
+  }
+  if (room.parentRoomId) {
+    return 'remaining-area';
+  }
+  return 'surrounding-area';
+}
+
+function suggestRoomSpaceType(room: Pick<Room2D, 'parentRoomId' | 'childRoomIds' | 'netArea' | 'grossArea' | 'area'>): string {
+  const effectiveArea = Math.max(
+    Number.isFinite(room.netArea) ? room.netArea : Number.isFinite(room.area) ? room.area : 0,
+    0
+  );
+
+  if (room.parentRoomId) {
+    if (effectiveArea < 1.5) return 'Shaft';
+    if (effectiveArea < 4) return 'Storage';
+    if (effectiveArea < 8) return 'Closet';
+    return 'Sub Room';
+  }
+
+  if (room.childRoomIds.length > 0) {
+    return 'Net Area';
+  }
+
+  if (effectiveArea < 3) return 'Storage';
+  if (effectiveArea < 8) return 'Bathroom';
+  if (effectiveArea < 15) return 'Utility';
+  return 'General';
+}
+
+function resolveRoomSpaceType(currentSpaceType: string | undefined, suggested: string): string {
+  const normalized = (currentSpaceType ?? '').trim().toLowerCase();
+  if (!normalized) return suggested;
+  if (AUTO_SPACE_TYPES.has(normalized)) return suggested;
+  return currentSpaceType ?? suggested;
+}
+
+function assignNestedChildAutoNames(rooms: Room2D[], roomById: Map<string, Room2D>): void {
+  const parents = rooms
+    .filter((room) => room.childRoomIds.length > 0)
+    .sort((a, b) => getHierarchyDepth(a, roomById) - getHierarchyDepth(b, roomById));
+
+  parents.forEach((parent) => {
+    const children = parent.childRoomIds
+      .map((childId) => roomById.get(childId))
+      .filter((child): child is Room2D => Boolean(child))
+      .sort((a, b) => {
+        const ac = calculatePolygonCentroid(a.vertices);
+        const bc = calculatePolygonCentroid(b.vertices);
+        if (Math.abs(ac.y - bc.y) > 1e-6) return ac.y - bc.y;
+        return ac.x - bc.x;
+      });
+
+    let autoIndex = 1;
+    children.forEach((child) => {
+      if (!shouldAutoRenameChildRoom(child, parent)) return;
+      child.name = `${parent.name} - ${autoIndex}`;
+      autoIndex += 1;
+    });
+  });
+}
+
+function getHierarchyDepth(room: Room2D, roomById: Map<string, Room2D>): number {
+  let depth = 0;
+  let cursor = room.parentRoomId ? roomById.get(room.parentRoomId) ?? null : null;
+  let guard = 0;
+  while (cursor && guard < 32) {
+    depth += 1;
+    cursor = cursor.parentRoomId ? roomById.get(cursor.parentRoomId) ?? null : null;
+    guard += 1;
+  }
+  return depth;
+}
+
+function shouldAutoRenameChildRoom(child: Room2D, parent: Room2D): boolean {
+  const name = (child.name ?? '').trim();
+  if (!name) return true;
+  if (/^Room\s+\d+(\s*-\s*\d+)?$/i.test(name)) return true;
+  if (/^Sub\s*Room\s+\d+$/i.test(name)) return true;
+  if (new RegExp(`^${escapeRegExp(parent.name)}\\s-\\s\\d+$`, 'i').test(name)) return true;
+  if (/^.+\s-\s\d+$/i.test(name) && child.parentRoomId !== null) return true;
+  return false;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function calculatePolygonBounds(vertices: Point2D[]): {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+} {
+  if (vertices.length === 0) {
+    return { left: 0, top: 0, right: 0, bottom: 0 };
+  }
+  let left = Number.POSITIVE_INFINITY;
+  let top = Number.POSITIVE_INFINITY;
+  let right = Number.NEGATIVE_INFINITY;
+  let bottom = Number.NEGATIVE_INFINITY;
+
+  vertices.forEach((vertex) => {
+    left = Math.min(left, vertex.x);
+    top = Math.min(top, vertex.y);
+    right = Math.max(right, vertex.x);
+    bottom = Math.max(bottom, vertex.y);
+  });
+
+  return { left, top, right, bottom };
+}
+
+function boundsContains(
+  outer: { left: number; top: number; right: number; bottom: number },
+  inner: { left: number; top: number; right: number; bottom: number },
+  tolerance = 1e-6
+): boolean {
+  return (
+    outer.left <= inner.left + tolerance &&
+    outer.top <= inner.top + tolerance &&
+    outer.right >= inner.right - tolerance &&
+    outer.bottom >= inner.bottom - tolerance
+  );
+}
+
+function isPointStrictlyInsidePolygon(
+  point: Point2D,
+  polygon: Point2D[],
+  tolerance = 1e-6
+): boolean {
+  if (polygon.length < 3) return false;
+  if (isPointOnPolygonBoundary(point, polygon, tolerance)) return false;
+
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const pi = polygon[i];
+    const pj = polygon[j];
+    if (!pi || !pj) continue;
+
+    const intersects =
+      (pi.y > point.y) !== (pj.y > point.y) &&
+      point.x < ((pj.x - pi.x) * (point.y - pi.y)) / (pj.y - pi.y + Number.EPSILON) + pi.x;
+    if (intersects) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function isPointInsidePolygonInclusive(point: Point2D, polygon: Point2D[], tolerance = 1e-6): boolean {
+  return (
+    isPointStrictlyInsidePolygon(point, polygon, tolerance) ||
+    isPointOnPolygonBoundary(point, polygon, tolerance)
+  );
+}
+
+function isPointOnPolygonBoundary(
+  point: Point2D,
+  polygon: Point2D[],
+  tolerance: number
+): boolean {
+  for (let i = 0; i < polygon.length; i++) {
+    const start = polygon[i];
+    const end = polygon[(i + 1) % polygon.length];
+    if (!start || !end) continue;
+    if (distancePointToSegment(point, start, end) <= tolerance) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function distancePointToSegment(point: Point2D, start: Point2D, end: Point2D): number {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lengthSq = dx * dx + dy * dy;
+  if (lengthSq <= 1e-12) return Math.hypot(point.x - start.x, point.y - start.y);
+
+  const t = Math.max(
+    0,
+    Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSq)
+  );
+  const px = start.x + t * dx;
+  const py = start.y + t * dy;
+  return Math.hypot(point.x - px, point.y - py);
+}
+
+export function validateNestedRooms(rooms: Room2D[]): NestedRoomValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const roomById = new Map(rooms.map((room) => [room.id, room]));
+  const childrenByParent = new Map<string, Room2D[]>();
+
+  rooms.forEach((room) => {
+    if (!room.parentRoomId) return;
+    const parentChildren = childrenByParent.get(room.parentRoomId) ?? [];
+    parentChildren.push(room);
+    childrenByParent.set(room.parentRoomId, parentChildren);
+  });
+
+  rooms.forEach((room) => {
+    if (!room.parentRoomId) return;
+    const parent = roomById.get(room.parentRoomId);
+    if (!parent) return;
+
+    if (room.grossArea > parent.grossArea + 1e-8) {
+      errors.push(`"${room.name}" cannot be larger than parent "${parent.name}".`);
+    } else if (room.grossArea >= parent.grossArea - 1e-8) {
+      warnings.push(
+        `"${room.name}" nearly fills "${parent.name}" (remaining area approaches zero).`
+      );
+    }
+  });
+
+  childrenByParent.forEach((children, parentId) => {
+    const parent = roomById.get(parentId);
+    for (let i = 0; i < children.length; i++) {
+      const roomA = children[i];
+      if (!roomA) continue;
+      for (let j = i + 1; j < children.length; j++) {
+        const roomB = children[j];
+        if (!roomB) continue;
+        if (!polygonsOverlapWithArea(roomA.vertices, roomB.vertices)) continue;
+        errors.push(
+          `Child rooms "${roomA.name}" and "${roomB.name}" overlap inside "${parent?.name ?? 'parent room'}".`
+        );
+      }
+    }
+  });
+
+  rooms.forEach((room) => {
+    if (room.childRoomIds.length === 0) return;
+    if (room.netArea <= 1e-6) {
+      warnings.push(`"${room.name}" has zero remaining net area.`);
+    }
+  });
+
+  return { errors, warnings };
+}
+
+function polygonsOverlapWithArea(a: Point2D[], b: Point2D[]): boolean {
+  if (a.length < 3 || b.length < 3) return false;
+
+  const aBounds = calculatePolygonBounds(a);
+  const bBounds = calculatePolygonBounds(b);
+  if (!boundsOverlap(aBounds, bBounds)) return false;
+
+  if (a.some((point) => isPointStrictlyInsidePolygon(point, b))) return true;
+  if (b.some((point) => isPointStrictlyInsidePolygon(point, a))) return true;
+
+  for (let i = 0; i < a.length; i++) {
+    const aStart = a[i];
+    const aEnd = a[(i + 1) % a.length];
+    if (!aStart || !aEnd) continue;
+
+    for (let j = 0; j < b.length; j++) {
+      const bStart = b[j];
+      const bEnd = b[(j + 1) % b.length];
+      if (!bStart || !bEnd) continue;
+      if (segmentsIntersectStrict(aStart, aEnd, bStart, bEnd)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function boundsOverlap(
+  a: { left: number; top: number; right: number; bottom: number },
+  b: { left: number; top: number; right: number; bottom: number },
+  tolerance = 1e-8
+): boolean {
+  return (
+    a.left < b.right - tolerance &&
+    a.right > b.left + tolerance &&
+    a.top < b.bottom - tolerance &&
+    a.bottom > b.top + tolerance
+  );
+}
+
+function segmentsIntersectStrict(
+  a1: Point2D,
+  a2: Point2D,
+  b1: Point2D,
+  b2: Point2D,
+  tolerance = 1e-8
+): boolean {
+  const o1 = orientation(a1, a2, b1);
+  const o2 = orientation(a1, a2, b2);
+  const o3 = orientation(b1, b2, a1);
+  const o4 = orientation(b1, b2, a2);
+
+  if (
+    Math.abs(o1) <= tolerance ||
+    Math.abs(o2) <= tolerance ||
+    Math.abs(o3) <= tolerance ||
+    Math.abs(o4) <= tolerance
+  ) {
+    return false;
+  }
+
+  return (o1 > 0) !== (o2 > 0) && (o3 > 0) !== (o4 > 0);
+}
+
+function orientation(a: Point2D, b: Point2D, c: Point2D): number {
+  return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
 }
 
 function nextRoomNameIndex(rooms: Room2D[]): number {
