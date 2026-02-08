@@ -53,3 +53,6 @@ export {
   generateBoqSummary,
   type DuctDefaults,
 } from './duct-plan';
+
+// Room detection utilities
+export { detectRoomsFromWallGraph } from './room-detection';

@@ -1,18 +1,17 @@
 /**
  * Properties Panel Component
- * 
+ *
  * Displays and allows editing of selected element properties.
  */
 
 'use client';
 
 import React from 'react';
+import { X, Trash2 } from 'lucide-react';
 import { useSmartDrawingStore } from '../store';
-import { X, Trash2, Copy, Lock, Unlock, Eye, EyeOff } from 'lucide-react';
+import type { DisplayUnit, Room2D, Wall2D } from '../types';
 
-// =============================================================================
-// Types
-// =============================================================================
+const PX_TO_MM = 25.4 / 96;
 
 export interface PropertiesPanelProps {
   className?: string;
@@ -24,10 +23,6 @@ interface PropertyRowProps {
   children: React.ReactNode;
 }
 
-// =============================================================================
-// PropertyRow Component
-// =============================================================================
-
 function PropertyRow({ label, children }: PropertyRowProps) {
   return (
     <div className="flex items-center justify-between py-2 border-b border-amber-100/70 last:border-0">
@@ -36,10 +31,6 @@ function PropertyRow({ label, children }: PropertyRowProps) {
     </div>
   );
 }
-
-// =============================================================================
-// Number Input
-// =============================================================================
 
 function NumberInput({
   value,
@@ -62,146 +53,231 @@ function NumberInput({
     <div className={`flex items-center gap-1 ${className}`}>
       <input
         type="number"
-        value={value}
+        value={Number.isFinite(value) ? value : 0}
         onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
         min={min}
         max={max}
         step={step}
-        className="w-20 px-2 py-1 text-sm border border-amber-200/80 rounded focus:outline-none focus:ring-1 focus:ring-amber-400"
+        className="w-24 px-2 py-1 text-sm border border-amber-200/80 rounded focus:outline-none focus:ring-1 focus:ring-amber-400"
       />
       {unit && <span className="text-xs text-slate-500">{unit}</span>}
     </div>
   );
 }
 
-// =============================================================================
-// Color Input
-// =============================================================================
+function toDisplayDistance(mm: number, unit: DisplayUnit): number {
+  switch (unit) {
+    case 'cm':
+      return mm / 10;
+    case 'm':
+      return mm / 1000;
+    case 'ft-in':
+      return mm / 304.8;
+    default:
+      return mm;
+  }
+}
 
-function ColorInput({
-  value,
-  onChange,
-  className = '',
-}: {
-  value: string;
-  onChange: (value: string) => void;
-  className?: string;
-}) {
+function fromDisplayDistance(value: number, unit: DisplayUnit): number {
+  switch (unit) {
+    case 'cm':
+      return value * 10;
+    case 'm':
+      return value * 1000;
+    case 'ft-in':
+      return value * 304.8;
+    default:
+      return value;
+  }
+}
+
+function unitSuffix(unit: DisplayUnit): string {
+  switch (unit) {
+    case 'cm':
+      return 'cm';
+    case 'm':
+      return 'm';
+    case 'ft-in':
+      return 'ft';
+    default:
+      return 'mm';
+  }
+}
+
+function displayStep(unit: DisplayUnit): number {
+  switch (unit) {
+    case 'cm':
+      return 0.5;
+    case 'm':
+      return 0.01;
+    case 'ft-in':
+      return 0.1;
+    default:
+      return 10;
+  }
+}
+
+function formatDistance(mm: number, unit: DisplayUnit): string {
+  if (!Number.isFinite(mm)) return '0 mm';
+  switch (unit) {
+    case 'cm':
+      return `${(mm / 10).toFixed(mm >= 1000 ? 0 : 1)} cm`;
+    case 'm':
+      return `${(mm / 1000).toFixed(mm >= 10_000 ? 1 : 2)} m`;
+    case 'ft-in': {
+      const totalInches = mm / 25.4;
+      const feet = Math.floor(totalInches / 12);
+      const inches = totalInches - feet * 12;
+      return `${feet}' ${inches.toFixed(1)}"`;
+    }
+    default:
+      return `${Math.round(mm)} mm`;
+  }
+}
+
+function formatArea(areaSqm: number, unit: DisplayUnit): string {
+  switch (unit) {
+    case 'mm':
+      return `${Math.round(areaSqm * 1_000_000).toLocaleString()} mm^2`;
+    case 'cm':
+      return `${(areaSqm * 10_000).toFixed(areaSqm >= 1 ? 0 : 1)} cm^2`;
+    case 'ft-in':
+      return `${(areaSqm * 10.7639104).toFixed(areaSqm >= 10 ? 1 : 2)} ft^2`;
+    default:
+      return `${areaSqm.toFixed(areaSqm >= 10 ? 1 : 2)} m^2`;
+  }
+}
+
+function UnitSelector() {
+  const { displayUnit, setDisplayUnit } = useSmartDrawingStore();
   return (
-    <div className={`flex items-center gap-2 ${className}`}>
-      <input
-        type="color"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-8 h-8 border border-amber-200/80 rounded cursor-pointer"
-      />
-      <input
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-20 px-2 py-1 text-sm font-mono border border-amber-200/80 rounded focus:outline-none focus:ring-1 focus:ring-amber-400"
-      />
-    </div>
+    <PropertyRow label="Display Unit">
+      <select
+        value={displayUnit}
+        onChange={(e) => setDisplayUnit(e.target.value as DisplayUnit)}
+        className="w-24 px-2 py-1 text-sm border border-amber-200/80 rounded focus:outline-none focus:ring-1 focus:ring-amber-400 bg-white"
+      >
+        <option value="mm">mm</option>
+        <option value="cm">cm</option>
+        <option value="m">m</option>
+        <option value="ft-in">ft</option>
+      </select>
+    </PropertyRow>
   );
 }
 
-// =============================================================================
-// Panel Sections
-// =============================================================================
-
-function WallProperties({ wall }: { wall: { id: string; start: { x: number; y: number }; end: { x: number; y: number }; thickness: number } }) {
-  const { updateWall } = useSmartDrawingStore();
-
-  const length = Math.hypot(wall.end.x - wall.start.x, wall.end.y - wall.start.y);
+function WallProperties({ wall }: { wall: Wall2D }) {
+  const { updateWall, displayUnit } = useSmartDrawingStore();
+  const lengthPx = Math.hypot(wall.end.x - wall.start.x, wall.end.y - wall.start.y);
+  const lengthMm = lengthPx * PX_TO_MM;
   const angle = Math.atan2(wall.end.y - wall.start.y, wall.end.x - wall.start.x) * (180 / Math.PI);
+
+  const setLengthMm = (nextLengthMm: number) => {
+    if (!Number.isFinite(nextLengthMm) || nextLengthMm <= 1) return;
+    const dx = wall.end.x - wall.start.x;
+    const dy = wall.end.y - wall.start.y;
+    const currentLengthPx = Math.hypot(dx, dy);
+    if (currentLengthPx <= 0.0001) return;
+    const nextLengthPx = nextLengthMm / PX_TO_MM;
+    const scale = nextLengthPx / currentLengthPx;
+    updateWall(wall.id, {
+      end: {
+        x: wall.start.x + dx * scale,
+        y: wall.start.y + dy * scale,
+      },
+    });
+  };
 
   return (
     <div className="space-y-1">
       <h3 className="text-sm font-semibold text-slate-800 mb-3">Wall Properties</h3>
-      
+      <UnitSelector />
+
       <PropertyRow label="Length">
-        <span className="text-sm font-mono">{length.toFixed(2)} m</span>
+        <NumberInput
+          value={toDisplayDistance(lengthMm, displayUnit)}
+          onChange={(value) => setLengthMm(fromDisplayDistance(value, displayUnit))}
+          min={0}
+          step={displayStep(displayUnit)}
+          unit={unitSuffix(displayUnit)}
+        />
       </PropertyRow>
-      
+
       <PropertyRow label="Angle">
-        <span className="text-sm font-mono">{angle.toFixed(1)}°</span>
+        <span className="text-sm font-mono">{angle.toFixed(1)} deg</span>
       </PropertyRow>
-      
+
       <PropertyRow label="Thickness">
         <NumberInput
           value={wall.thickness}
-          onChange={(v) => updateWall(wall.id, { thickness: v })}
-          min={0.05}
-          max={1}
-          step={0.05}
-          unit="m"
+          onChange={(value) => updateWall(wall.id, { thickness: value })}
+          min={10}
+          max={1000}
+          step={5}
+          unit="mm"
         />
       </PropertyRow>
-      
+
+      <PropertyRow label="Height">
+        <NumberInput
+          value={wall.height}
+          onChange={(value) => updateWall(wall.id, { height: value })}
+          min={200}
+          max={10000}
+          step={50}
+          unit="mm"
+        />
+      </PropertyRow>
+
+      <PropertyRow label="Material">
+        <input
+          type="text"
+          value={wall.material || 'concrete'}
+          onChange={(e) => updateWall(wall.id, { material: e.target.value })}
+          className="w-24 px-2 py-1 text-sm border border-amber-200/80 rounded focus:outline-none focus:ring-1 focus:ring-amber-400"
+        />
+      </PropertyRow>
+
       <PropertyRow label="Start X">
         <NumberInput
-          value={wall.start.x}
-          onChange={(v) => updateWall(wall.id, { start: { ...wall.start, x: v } })}
-          step={0.1}
-          unit="m"
+          value={toDisplayDistance(wall.start.x * PX_TO_MM, displayUnit)}
+          onChange={(value) =>
+            updateWall(wall.id, {
+              start: { ...wall.start, x: fromDisplayDistance(value, displayUnit) / PX_TO_MM },
+            })
+          }
+          step={displayStep(displayUnit)}
+          unit={unitSuffix(displayUnit)}
         />
       </PropertyRow>
-      
+
       <PropertyRow label="Start Y">
         <NumberInput
-          value={wall.start.y}
-          onChange={(v) => updateWall(wall.id, { start: { ...wall.start, y: v } })}
-          step={0.1}
-          unit="m"
-        />
-      </PropertyRow>
-      
-      <PropertyRow label="End X">
-        <NumberInput
-          value={wall.end.x}
-          onChange={(v) => updateWall(wall.id, { end: { ...wall.end, x: v } })}
-          step={0.1}
-          unit="m"
-        />
-      </PropertyRow>
-      
-      <PropertyRow label="End Y">
-        <NumberInput
-          value={wall.end.y}
-          onChange={(v) => updateWall(wall.id, { end: { ...wall.end, y: v } })}
-          step={0.1}
-          unit="m"
+          value={toDisplayDistance(wall.start.y * PX_TO_MM, displayUnit)}
+          onChange={(value) =>
+            updateWall(wall.id, {
+              start: { ...wall.start, y: fromDisplayDistance(value, displayUnit) / PX_TO_MM },
+            })
+          }
+          step={displayStep(displayUnit)}
+          unit={unitSuffix(displayUnit)}
         />
       </PropertyRow>
     </div>
   );
 }
 
-function RoomProperties({ room }: { room: { id: string; vertices: { x: number; y: number }[]; name?: string } }) {
-  const { updateRoom } = useSmartDrawingStore();
-
-  // Calculate area using shoelace formula
-  const calculateArea = (vertices: { x: number; y: number }[]): number => {
-    if (vertices.length < 3) return 0;
-    let area = 0;
-    for (let i = 0; i < vertices.length; i++) {
-      const j = (i + 1) % vertices.length;
-      const vi = vertices[i];
-      const vj = vertices[j];
-      if (vi && vj) {
-        area += vi.x * vj.y;
-        area -= vj.x * vi.y;
-      }
-    }
-    return Math.abs(area / 2);
-  };
-
-  const area = calculateArea(room.vertices);
+function RoomProperties({ room }: { room: Room2D }) {
+  const { updateRoom, displayUnit } = useSmartDrawingStore();
+  const area = room.area ?? 0;
+  const perimeter = room.perimeter ?? 0;
+  const boundaryWalls = room.wallIds?.length ?? 0;
 
   return (
     <div className="space-y-1">
       <h3 className="text-sm font-semibold text-slate-800 mb-3">Room Properties</h3>
-      
+      <UnitSelector />
+
       <PropertyRow label="Name">
         <input
           type="text"
@@ -211,13 +287,30 @@ function RoomProperties({ room }: { room: { id: string; vertices: { x: number; y
           className="w-32 px-2 py-1 text-sm border border-amber-200/80 rounded focus:outline-none focus:ring-1 focus:ring-amber-400"
         />
       </PropertyRow>
-      
-      <PropertyRow label="Area">
-        <span className="text-sm font-mono">{area.toFixed(2)} m²</span>
+
+      <PropertyRow label="Fill Color">
+        <input
+          type="color"
+          value={room.color || '#cbd5e1'}
+          onChange={(e) => updateRoom(room.id, { color: e.target.value })}
+          className="w-20 h-8 border border-amber-200/80 rounded"
+        />
       </PropertyRow>
-      
+
+      <PropertyRow label="Area">
+        <span className="text-sm font-mono">{formatArea(area, displayUnit)}</span>
+      </PropertyRow>
+
+      <PropertyRow label="Perimeter">
+        <span className="text-sm font-mono">{formatDistance(perimeter * 1000, displayUnit)}</span>
+      </PropertyRow>
+
       <PropertyRow label="Vertices">
         <span className="text-sm font-mono">{room.vertices.length}</span>
+      </PropertyRow>
+
+      <PropertyRow label="Boundary Walls">
+        <span className="text-sm font-mono">{boundaryWalls}</span>
       </PropertyRow>
     </div>
   );
@@ -228,15 +321,6 @@ function MultiSelectionProperties({ count }: { count: number }) {
     <div className="space-y-3">
       <h3 className="text-sm font-semibold text-slate-800">Multiple Selection</h3>
       <p className="text-sm text-slate-600">{count} objects selected</p>
-      
-      <div className="flex gap-2 mt-4">
-        <button className="flex-1 px-3 py-2 text-sm bg-amber-50 hover:bg-amber-100 rounded transition-colors">
-          Group
-        </button>
-        <button className="flex-1 px-3 py-2 text-sm bg-amber-50 hover:bg-amber-100 rounded transition-colors">
-          Align
-        </button>
-      </div>
     </div>
   );
 }
@@ -244,33 +328,19 @@ function MultiSelectionProperties({ count }: { count: number }) {
 function NoSelectionProperties() {
   return (
     <div className="text-center py-8">
-      <p className="text-sm text-slate-500">
-        Select an object to view its properties
-      </p>
+      <p className="text-sm text-slate-500">Select an object to view its properties</p>
     </div>
   );
 }
 
-// =============================================================================
-// PropertiesPanel Component
-// =============================================================================
-
 export function PropertiesPanel({ className = '', onClose }: PropertiesPanelProps) {
-  const { selectedIds, walls, rooms, deleteSelected } = useSmartDrawingStore();
-
-  const selectedWalls = walls.filter((w) => selectedIds.includes(w.id));
-  const selectedRooms = rooms.filter((r) => selectedIds.includes(r.id));
+  const { selectedElementIds: selectedIds, walls, rooms, deleteSelected } = useSmartDrawingStore();
+  const selectedWalls = walls.filter((wall) => selectedIds.includes(wall.id));
+  const selectedRooms = rooms.filter((room) => selectedIds.includes(room.id));
   const totalSelected = selectedIds.length;
 
   return (
-    <div
-      className={`
-        flex flex-col w-72
-        bg-[#fffaf0] border-l border-amber-200/70
-        ${className}
-      `}
-    >
-      {/* Header */}
+    <div className={`flex flex-col w-72 bg-[#fffaf0] border-l border-amber-200/70 ${className}`}>
       <div className="flex items-center justify-between px-4 py-3 border-b border-amber-200/70">
         <h2 className="text-sm font-semibold text-slate-800">Properties</h2>
         <div className="flex items-center gap-1">
@@ -295,18 +365,14 @@ export function PropertiesPanel({ className = '', onClose }: PropertiesPanelProp
         </div>
       </div>
 
-      {/* Content */}
       <div className="flex-1 overflow-y-auto p-4">
         {totalSelected === 0 && <NoSelectionProperties />}
-        
         {totalSelected === 1 && selectedWalls.length === 1 && selectedWalls[0] && (
           <WallProperties wall={selectedWalls[0]} />
         )}
-        
         {totalSelected === 1 && selectedRooms.length === 1 && selectedRooms[0] && (
           <RoomProperties room={selectedRooms[0]} />
         )}
-        
         {totalSelected > 1 && <MultiSelectionProperties count={totalSelected} />}
       </div>
     </div>

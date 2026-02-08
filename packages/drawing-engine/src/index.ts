@@ -38,6 +38,7 @@ export { useSmartDrawingStore, type SmartDrawingState } from './store';
 export type {
   Point2D,
   Bounds,
+  DisplayUnit,
   SplineType,
   SplineSettings,
   DrawingTool,
@@ -99,6 +100,7 @@ export {
   buildBranchRoute,
   buildDuctPlan,
   generateBoqSummary,
+  detectRoomsFromWallGraph,
   type DuctDefaults,
 } from './utils';
 

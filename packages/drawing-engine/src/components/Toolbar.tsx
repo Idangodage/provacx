@@ -189,16 +189,18 @@ export function Toolbar({
   showLabels = false,
 }: ToolbarProps) {
   const {
-    tool,
+    activeTool,
     zoom,
-    canUndo,
-    canRedo,
+    history,
+    historyIndex,
     setTool,
     setZoom,
     undo,
     redo,
     resetView,
   } = useSmartDrawingStore();
+  const canUndo = historyIndex > 0;
+  const canRedo = historyIndex < history.length - 1;
 
   const handleZoomIn = () => {
     setZoom(Math.min(zoom * 1.2, 5));
@@ -241,7 +243,7 @@ export function Toolbar({
             icon={toolDef.icon}
             label={toolDef.label}
             shortLabel={toolDef.shortLabel}
-            active={tool === toolDef.id}
+            active={activeTool === toolDef.id}
             onClick={() => setTool(toolDef.id)}
             shortcut={toolDef.shortcut}
             variant={variant}

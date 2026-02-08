@@ -5,6 +5,8 @@
  * Follows industrial CAD standards with proper separation of concerns.
  */
 
+import type { ReactNode } from 'react';
+
 // =============================================================================
 // Geometry Types
 // =============================================================================
@@ -13,6 +15,8 @@ export interface Point2D {
   x: number;
   y: number;
 }
+
+export type DisplayUnit = 'mm' | 'cm' | 'm' | 'ft-in';
 
 export interface Bounds {
   minX: number;
@@ -121,6 +125,8 @@ export interface Wall2D {
   wallType: WallType;
   material?: string;
   color?: string;
+  layer?: string;
+  connectedWallIds?: string[];
   openings: Opening2D[];
 }
 
@@ -138,8 +144,10 @@ export interface Opening2D {
 export interface Room2D {
   id: string;
   name: string;
+  wallIds: string[];
   vertices: Point2D[];
   area: number;
+  perimeter: number;
   spaceType: string;
   floorHeight: number;
   ceilingHeight: number;
@@ -194,7 +202,7 @@ export interface Symbol {
   id: string;
   name: string;
   category: string;
-  icon: React.ReactNode;
+  icon: ReactNode;
   svgPath?: string;
   viewBox?: { width: number; height: number };
   defaultWidth: number;
@@ -206,7 +214,7 @@ export interface Symbol {
 export interface SymbolCategory {
   id: string;
   name: string;
-  icon: React.ReactNode;
+  icon: ReactNode;
   symbols: Symbol[];
 }
 

@@ -363,7 +363,7 @@ export function SmartDrawingEditor({
     loadData,
     exportData,
     setTool,
-    tool,
+    activeTool,
     showGrid,
     showRulers,
     snapToGrid,
@@ -677,7 +677,7 @@ export function SmartDrawingEditor({
                           key={action.id}
                           icon={action.icon}
                           label={action.label}
-                          active={tool === action.id}
+                          active={activeTool === action.id}
                           onClick={() => setTool(action.id)}
                           disabled={readOnly}
                         />

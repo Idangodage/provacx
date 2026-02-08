@@ -36,15 +36,21 @@ export const PageLayout: React.FC<PageLayoutProps> = ({
   const pageTop = originOffset.y + (-panOffset.y) * zoom;
   const pageWidthPx = pageWidth * zoom;
   const pageHeightPx = pageHeight * zoom;
+  const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+  const snapPx = (value: number) => Math.round(value * dpr) / dpr;
+  const snappedLeft = snapPx(pageLeft);
+  const snappedTop = snapPx(pageTop);
+  const snappedWidth = Math.max(1, snapPx(pageLeft + pageWidthPx) - snappedLeft);
+  const snappedHeight = Math.max(1, snapPx(pageTop + pageHeightPx) - snappedTop);
 
   return (
     <div
       style={{
         position: 'absolute',
-        left: pageLeft,
-        top: pageTop,
-        width: pageWidthPx,
-        height: pageHeightPx,
+        left: snappedLeft,
+        top: snappedTop,
+        width: snappedWidth,
+        height: snappedHeight,
         backgroundColor,
         border: `1px solid ${borderColor}`,
         boxShadow: shadow,

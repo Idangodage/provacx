@@ -9,6 +9,7 @@ import { create } from 'zustand';
 import { devtools } from 'zustand/middleware';
 import type {
   Point2D,
+  DisplayUnit,
   Wall2D,
   Room2D,
   Opening2D,
@@ -28,7 +29,8 @@ import type {
   SplineMethod,
 } from '../types';
 import { DEFAULT_SPLINE_SETTINGS } from '../utils/spline';
-import { generateId, calculatePolygonArea } from '../utils/geometry';
+import { generateId } from '../utils/geometry';
+import { detectRoomsFromWallGraph } from '../utils/room-detection';
 
 // =============================================================================
 // Default Settings
@@ -42,7 +44,7 @@ const DEFAULT_PAGE_CONFIG: PageConfig = {
 };
 
 const DEFAULT_ELEMENT_SETTINGS = {
-  defaultWallThickness: 0.2,
+  defaultWallThickness: 1,
   defaultWallHeight: 3.0,
   defaultWindowHeight: 1.2,
   defaultWindowSillHeight: 0.9,
@@ -54,6 +56,202 @@ const DEFAULT_LAYERS: DrawingLayer[] = [
   { id: 'imported', name: 'Imported Drawing', visible: true, locked: true, opacity: 0.5, elements: [] },
   { id: 'detected', name: 'AI Detected', visible: true, locked: false, opacity: 0.8, elements: [] },
 ];
+
+const WALL_NODE_TOLERANCE_PX = 0.5;
+
+function deepClone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function createEmptyHistorySnapshot(): HistoryEntry['snapshot'] {
+  return {
+    walls: [],
+    rooms: [],
+    detectedElements: [],
+    dimensions: [],
+    annotations: [],
+    sketches: [],
+    symbols: [],
+  };
+}
+
+function createHistoryEntry(action: string, snapshot: HistoryEntry['snapshot']): HistoryEntry {
+  return {
+    id: generateId(),
+    timestamp: Date.now(),
+    action,
+    snapshot,
+  };
+}
+
+function createHistorySnapshot(state: {
+  walls: Wall2D[];
+  rooms: Room2D[];
+  detectedElements: DetectedElement[];
+  dimensions: Dimension2D[];
+  annotations: Annotation2D[];
+  sketches: Sketch2D[];
+  symbols: SymbolInstance2D[];
+}): HistoryEntry['snapshot'] {
+  return {
+    walls: deepClone(state.walls),
+    rooms: deepClone(state.rooms),
+    detectedElements: deepClone(state.detectedElements),
+    dimensions: deepClone(state.dimensions),
+    annotations: deepClone(state.annotations),
+    sketches: deepClone(state.sketches),
+    symbols: deepClone(state.symbols),
+  };
+}
+
+function wallGeometryChanged(a: Wall2D, b: Wall2D, tolerance = 1e-6): boolean {
+  return (
+    Math.abs(a.start.x - b.start.x) > tolerance ||
+    Math.abs(a.start.y - b.start.y) > tolerance ||
+    Math.abs(a.end.x - b.end.x) > tolerance ||
+    Math.abs(a.end.y - b.end.y) > tolerance
+  );
+}
+
+function pointToEndpointKey(point: Point2D, tolerance: number): string {
+  const step = Math.max(tolerance, 1e-4);
+  return `${Math.round(point.x / step)}:${Math.round(point.y / step)}`;
+}
+
+function buildWallAdjacencyMap(walls: Wall2D[], tolerance: number): Map<string, Set<string>> {
+  const adjacency = new Map<string, Set<string>>();
+  const buckets = new Map<string, string[]>();
+
+  walls.forEach((wall) => {
+    adjacency.set(wall.id, new Set<string>());
+    const keys = [
+      pointToEndpointKey(wall.start, tolerance),
+      pointToEndpointKey(wall.end, tolerance),
+    ];
+
+    keys.forEach((key) => {
+      const wallIds = buckets.get(key) ?? [];
+      wallIds.push(wall.id);
+      buckets.set(key, wallIds);
+    });
+  });
+
+  buckets.forEach((wallIdsAtNode) => {
+    for (let i = 0; i < wallIdsAtNode.length; i++) {
+      const sourceId = wallIdsAtNode[i];
+      if (!sourceId) continue;
+      for (let j = i + 1; j < wallIdsAtNode.length; j++) {
+        const targetId = wallIdsAtNode[j];
+        if (!targetId) continue;
+        adjacency.get(sourceId)?.add(targetId);
+        adjacency.get(targetId)?.add(sourceId);
+      }
+    }
+  });
+
+  return adjacency;
+}
+
+function detectRoomsIncremental(
+  previousWalls: Wall2D[],
+  nextWalls: Wall2D[],
+  previousRooms: Room2D[]
+): Room2D[] {
+  if (nextWalls.length < 3) return [];
+
+  const previousById = new Map(previousWalls.map((wall) => [wall.id, wall]));
+  const nextById = new Map(nextWalls.map((wall) => [wall.id, wall]));
+  const changedWallIds = new Set<string>();
+
+  nextById.forEach((nextWall, wallId) => {
+    const previousWall = previousById.get(wallId);
+    if (!previousWall || wallGeometryChanged(previousWall, nextWall)) {
+      changedWallIds.add(wallId);
+    }
+  });
+
+  previousById.forEach((_previousWall, wallId) => {
+    if (!nextById.has(wallId)) {
+      changedWallIds.add(wallId);
+    }
+  });
+
+  if (changedWallIds.size === 0) {
+    return previousRooms;
+  }
+
+  const previousAdjacency = buildWallAdjacencyMap(previousWalls, WALL_NODE_TOLERANCE_PX);
+  const nextAdjacency = buildWallAdjacencyMap(nextWalls, WALL_NODE_TOLERANCE_PX);
+  const affectedWallIds = new Set<string>();
+  const queue = Array.from(changedWallIds);
+
+  while (queue.length > 0) {
+    const wallId = queue.shift();
+    if (!wallId || affectedWallIds.has(wallId)) continue;
+    affectedWallIds.add(wallId);
+
+    const previousNeighbors = previousAdjacency.get(wallId);
+    previousNeighbors?.forEach((neighborId) => {
+      if (!affectedWallIds.has(neighborId)) {
+        queue.push(neighborId);
+      }
+    });
+
+    const nextNeighbors = nextAdjacency.get(wallId);
+    nextNeighbors?.forEach((neighborId) => {
+      if (!affectedWallIds.has(neighborId)) {
+        queue.push(neighborId);
+      }
+    });
+  }
+
+  if (affectedWallIds.size === 0) {
+    return detectRoomsFromWallGraph(nextWalls, previousRooms);
+  }
+
+  const nextWallIdSet = new Set(nextWalls.map((wall) => wall.id));
+  const unaffectedRooms = previousRooms.filter((room) =>
+    room.wallIds.every((wallId) => nextWallIdSet.has(wallId) && !affectedWallIds.has(wallId))
+  );
+  const affectedWalls = nextWalls.filter((wall) => affectedWallIds.has(wall.id));
+  const recalculatedRooms = detectRoomsFromWallGraph(affectedWalls, previousRooms);
+
+  return sortRoomsForDisplay([...unaffectedRooms, ...recalculatedRooms]);
+}
+
+function withRebuiltAdjacency(walls: Wall2D[]): Wall2D[] {
+  const adjacency = buildWallAdjacencyMap(walls, WALL_NODE_TOLERANCE_PX);
+  return walls.map((wall) => ({
+    ...wall,
+    connectedWallIds: Array.from(adjacency.get(wall.id) ?? []),
+  }));
+}
+
+function getRoomCentroid(room: Room2D): Point2D {
+  if (room.vertices.length === 0) return { x: 0, y: 0 };
+  const sum = room.vertices.reduce(
+    (acc, vertex) => ({ x: acc.x + vertex.x, y: acc.y + vertex.y }),
+    { x: 0, y: 0 }
+  );
+  return {
+    x: sum.x / room.vertices.length,
+    y: sum.y / room.vertices.length,
+  };
+}
+
+function sortRoomsForDisplay(rooms: Room2D[]): Room2D[] {
+  return [...rooms].sort((a, b) => {
+    const centroidA = getRoomCentroid(a);
+    const centroidB = getRoomCentroid(b);
+    if (Math.abs(centroidA.y - centroidB.y) > 1e-6) {
+      return centroidA.y - centroidB.y;
+    }
+    if (Math.abs(centroidA.x - centroidB.x) > 1e-6) {
+      return centroidA.x - centroidB.x;
+    }
+    return a.name.localeCompare(b.name);
+  });
+}
 
 // =============================================================================
 // Store Interface
@@ -92,6 +290,7 @@ export interface DrawingState {
   zoomToFitRequestId: number;
   resetViewRequestId: number;
   panOffset: Point2D;
+  displayUnit: DisplayUnit;
   gridSize: number;
   snapToGrid: boolean;
   showGrid: boolean;
@@ -138,6 +337,7 @@ export interface DrawingState {
   clearDetectedElements: () => void;
   
   // Actions - Walls
+  setWalls: (walls: Wall2D[], historyAction?: string) => void;
   addWall: (wall: Omit<Wall2D, 'id' | 'openings'>) => string;
   updateWall: (id: string, data: Partial<Wall2D>) => void;
   deleteWall: (id: string) => void;
@@ -146,7 +346,7 @@ export interface DrawingState {
   deleteOpening: (wallId: string, openingId: string) => void;
   
   // Actions - Rooms
-  addRoom: (room: Omit<Room2D, 'id' | 'area'>) => string;
+  addRoom: (room: Omit<Room2D, 'id' | 'area' | 'perimeter'>) => string;
   updateRoom: (id: string, data: Partial<Room2D>) => void;
   deleteRoom: (id: string) => void;
   detectRoomsFromWalls: () => void;
@@ -202,6 +402,7 @@ export interface DrawingState {
   setZoom: (zoom: number) => void;
   setPanOffset: (offset: Point2D) => void;
   setViewTransform: (zoom: number, offset: Point2D) => void;
+  setDisplayUnit: (unit: DisplayUnit) => void;
   setGridSize: (size: number) => void;
   setSnapToGrid: (snap: boolean) => void;
   setShowGrid: (show: boolean) => void;
@@ -285,17 +486,18 @@ export const useDrawingStore = create<DrawingState>()(
       selectedElementIds: [],
       hoveredElementId: null,
       
-      // Aliases for backward compatibility (computed from main properties)
-      get tool() { return get().activeTool; },
-      get selectedIds() { return get().selectedElementIds; },
-      get canUndo() { return get().historyIndex > 0; },
-      get canRedo() { return get().historyIndex < get().history.length - 1; },
+      // Aliases for backward compatibility
+      tool: 'select',
+      selectedIds: [],
+      canUndo: false,
+      canRedo: false,
       hvacLayout: null,
       
       zoom: 1,
       zoomToFitRequestId: 0,
       resetViewRequestId: 0,
       panOffset: { x: 0, y: 0 },
+      displayUnit: 'mm',
       gridSize: 20,
       snapToGrid: true,
       showGrid: true,
@@ -306,8 +508,8 @@ export const useDrawingStore = create<DrawingState>()(
       autoSync3D: true,
       isCalibrating: false,
       calibrationStep: 0,
-      history: [],
-      historyIndex: -1,
+      history: [createHistoryEntry('Initial state', createEmptyHistorySnapshot())],
+      historyIndex: 0,
       ...DEFAULT_ELEMENT_SETTINGS,
       splineSettings: { ...DEFAULT_SPLINE_SETTINGS },
       splineEditMode: 'draw',
@@ -360,24 +562,54 @@ export const useDrawingStore = create<DrawingState>()(
       clearGuides: () => set({ guides: [] }),
 
       // Wall Actions
+      setWalls: (walls, historyAction = 'Update walls') => {
+        set((state) => {
+          const normalizedWalls = withRebuiltAdjacency(walls);
+          return {
+            walls: normalizedWalls,
+            rooms: detectRoomsIncremental(state.walls, normalizedWalls, state.rooms),
+          };
+        });
+        get().saveToHistory(historyAction);
+      },
+
       addWall: (wall) => {
         const id = generateId();
-        set((state) => ({ 
-          walls: [...state.walls, { ...wall, id, openings: [] }] 
-        }));
+        set((state) => {
+          const nextWalls = withRebuiltAdjacency([
+            ...state.walls,
+            { ...wall, id, openings: [] },
+          ]);
+          return {
+            walls: nextWalls,
+            rooms: detectRoomsIncremental(state.walls, nextWalls, state.rooms),
+          };
+        });
         get().saveToHistory('Add wall');
         return id;
       },
       
       updateWall: (id, data) => {
-        set((state) => ({ 
-          walls: state.walls.map((w) => w.id === id ? { ...w, ...data } : w) 
-        }));
+        set((state) => {
+          const nextWalls = withRebuiltAdjacency(
+            state.walls.map((w) => (w.id === id ? { ...w, ...data } : w))
+          );
+          return {
+            walls: nextWalls,
+            rooms: detectRoomsIncremental(state.walls, nextWalls, state.rooms),
+          };
+        });
         get().saveToHistory('Update wall');
       },
       
       deleteWall: (id) => {
-        set((state) => ({ walls: state.walls.filter((w) => w.id !== id) }));
+        set((state) => {
+          const nextWalls = withRebuiltAdjacency(state.walls.filter((w) => w.id !== id));
+          return {
+            walls: nextWalls,
+            rooms: detectRoomsIncremental(state.walls, nextWalls, state.rooms),
+          };
+        });
         get().saveToHistory('Delete wall');
       },
       
@@ -423,108 +655,36 @@ export const useDrawingStore = create<DrawingState>()(
 
       // Room Actions
       addRoom: (room) => {
-        const id = generateId();
-        const area = calculatePolygonArea(room.vertices);
-        set((state) => ({ rooms: [...state.rooms, { ...room, id, area }] }));
-        get().saveToHistory('Add room');
-        return id;
+        void room;
+        const { walls, rooms } = get();
+        const derivedRooms = detectRoomsFromWallGraph(walls, rooms);
+        set({ rooms: derivedRooms });
+        return derivedRooms[0]?.id ?? '';
       },
       
       updateRoom: (id, data) => {
+        const { vertices: _ignoredVertices, wallIds: _ignoredWallIds, area: _ignoredArea, perimeter: _ignoredPerimeter, ...allowed } = data;
+        void _ignoredVertices;
+        void _ignoredWallIds;
+        void _ignoredArea;
+        void _ignoredPerimeter;
         set((state) => ({
-          rooms: state.rooms.map((r) => {
-            if (r.id !== id) return r;
-            const updated = { ...r, ...data };
-            if (data.vertices) {
-              updated.area = calculatePolygonArea(data.vertices);
-            }
-            return updated;
-          }),
+          rooms: state.rooms.map((r) => (r.id === id ? { ...r, ...allowed } : r)),
         }));
         get().saveToHistory('Update room');
       },
       
       deleteRoom: (id) => {
-        set((state) => ({ rooms: state.rooms.filter((r) => r.id !== id) }));
-        get().saveToHistory('Delete room');
+        void id;
+        set((state) => ({
+          rooms: detectRoomsFromWallGraph(state.walls, state.rooms),
+        }));
       },
       
       detectRoomsFromWalls: () => {
-        const { walls, rooms, setProcessingStatus } = get();
-        if (walls.length < 3) {
-          setProcessingStatus('Add at least 3 walls to detect rooms.', false);
-          return;
-        }
-
-        const points: Point2D[] = [];
-        walls.forEach((wall) => {
-          points.push(wall.start);
-          points.push(wall.end);
-        });
-
-        const uniquePoints: Point2D[] = [];
-        const tolerance = 6;
-        points.forEach((point) => {
-          const exists = uniquePoints.some(
-            (p) => Math.abs(p.x - point.x) < tolerance && Math.abs(p.y - point.y) < tolerance
-          );
-          if (!exists) uniquePoints.push(point);
-        });
-
-        if (uniquePoints.length < 3) {
-          setProcessingStatus('Unable to detect a room outline.', false);
-          return;
-        }
-
-        const centroid = {
-          x: uniquePoints.reduce((sum, p) => sum + p.x, 0) / uniquePoints.length,
-          y: uniquePoints.reduce((sum, p) => sum + p.y, 0) / uniquePoints.length,
-        };
-        
-        const sorted = [...uniquePoints].sort((a, b) => {
-          const angleA = Math.atan2(a.y - centroid.y, a.x - centroid.x);
-          const angleB = Math.atan2(b.y - centroid.y, b.x - centroid.x);
-          return angleA - angleB;
-        });
-
-        const area = Math.abs(calculatePolygonArea(sorted));
-        if (area < 1) {
-          setProcessingStatus('Detected room is too small.', false);
-          return;
-        }
-
-        const newCentroid = {
-          x: sorted.reduce((sum, p) => sum + p.x, 0) / sorted.length,
-          y: sorted.reduce((sum, p) => sum + p.y, 0) / sorted.length,
-        };
-        
-        const isDuplicate = rooms.some((room) => {
-          const roomCentroid = {
-            x: room.vertices.reduce((sum, p) => sum + p.x, 0) / room.vertices.length,
-            y: room.vertices.reduce((sum, p) => sum + p.y, 0) / room.vertices.length,
-          };
-          return Math.hypot(roomCentroid.x - newCentroid.x, roomCentroid.y - newCentroid.y) < 10;
-        });
-
-        if (isDuplicate) {
-          setProcessingStatus('Room already detected.', false);
-          return;
-        }
-
-        const roomName = `Room ${rooms.length + 1}`;
-        const newRoom: Room2D = {
-          id: generateId(),
-          name: roomName,
-          vertices: sorted,
-          area,
-          spaceType: 'office',
-          floorHeight: 0,
-          ceilingHeight: 3,
-        };
-
-        set((state) => ({ rooms: [...state.rooms, newRoom] }));
-        get().saveToHistory('Detect rooms');
-        setProcessingStatus(`Detected ${roomName}.`, false);
+        set((state) => ({
+          rooms: detectRoomsFromWallGraph(state.walls, state.rooms),
+        }));
       },
 
       // Dimension Actions
@@ -612,16 +772,28 @@ export const useDrawingStore = create<DrawingState>()(
         selectedElementIds: addToSelection 
           ? [...state.selectedElementIds, id] 
           : [id],
+        selectedIds: addToSelection 
+          ? [...state.selectedElementIds, id] 
+          : [id],
       })),
       
       deselectElement: (id) => set((state) => ({
         selectedElementIds: state.selectedElementIds.filter((eid) => eid !== id),
+        selectedIds: state.selectedElementIds.filter((eid) => eid !== id),
       })),
       
-      clearSelection: () => set({ selectedElementIds: [] }),
+      clearSelection: () => set({ selectedElementIds: [], selectedIds: [] }),
       
       selectAll: () => set((state) => ({
         selectedElementIds: [
+          ...state.walls.map((w) => w.id),
+          ...state.rooms.map((r) => r.id),
+          ...state.dimensions.map((d) => d.id),
+          ...state.annotations.map((a) => a.id),
+          ...state.sketches.map((s) => s.id),
+          ...state.symbols.map((s) => s.id),
+        ],
+        selectedIds: [
           ...state.walls.map((w) => w.id),
           ...state.rooms.map((r) => r.id),
           ...state.dimensions.map((d) => d.id),
@@ -635,27 +807,32 @@ export const useDrawingStore = create<DrawingState>()(
       
       deleteSelectedElements: () => {
         const { selectedElementIds, walls, rooms, dimensions, annotations, sketches, symbols } = get();
+        const nextWalls = withRebuiltAdjacency(
+          walls.filter((w) => !selectedElementIds.includes(w.id))
+        );
+        const nextRooms = detectRoomsIncremental(walls, nextWalls, rooms);
         set({
-          walls: walls.filter((w) => !selectedElementIds.includes(w.id)),
-          rooms: rooms.filter((r) => !selectedElementIds.includes(r.id)),
+          walls: nextWalls,
+          rooms: nextRooms,
           dimensions: dimensions.filter((d) => !selectedElementIds.includes(d.id)),
           annotations: annotations.filter((a) => !selectedElementIds.includes(a.id)),
           sketches: sketches.filter((s) => !selectedElementIds.includes(s.id)),
           symbols: symbols.filter((s) => !selectedElementIds.includes(s.id)),
           selectedElementIds: [],
+          selectedIds: [],
         });
         get().saveToHistory('Delete selected');
       },
       
       // Alias methods for backward compatibility
-      setSelectedIds: (ids) => set({ selectedElementIds: ids }),
+      setSelectedIds: (ids) => set({ selectedElementIds: ids, selectedIds: ids }),
       deleteSelected: () => get().deleteSelectedElements(),
-      setTool: (tool) => set({ activeTool: tool }),
+      setTool: (tool) => set({ activeTool: tool, tool }),
       loadData: (data) => { /* TODO: Implement data loading */ console.log('loadData:', data); },
       exportData: () => get().getFloorPlanData(),
 
       // Tool Actions
-      setActiveTool: (tool) => set({ activeTool: tool }),
+      setActiveTool: (tool) => set({ activeTool: tool, tool }),
 
       // View Actions
       setZoom: (zoom) => set({ zoom: Math.max(0.1, Math.min(10, zoom)) }),
@@ -665,6 +842,7 @@ export const useDrawingStore = create<DrawingState>()(
           zoom: Math.max(0.1, Math.min(10, zoom)),
           panOffset: offset,
         }),
+      setDisplayUnit: (unit) => set({ displayUnit: unit }),
       setGridSize: (size) => set({ gridSize: size }),
       setSnapToGrid: (snap) => set({ snapToGrid: snap }),
       setShowGrid: (show) => set({ showGrid: show }),
@@ -685,7 +863,8 @@ export const useDrawingStore = create<DrawingState>()(
       startCalibration: () => set({ 
         isCalibrating: true, 
         calibrationStep: 1, 
-        activeTool: 'calibrate' 
+        activeTool: 'calibrate',
+        tool: 'calibrate',
       }),
       
       addCalibrationPoint: (point) => set((state) => {
@@ -707,6 +886,9 @@ export const useDrawingStore = create<DrawingState>()(
           return state;
         }
         const [p1, p2] = state.importedDrawing.calibrationPoints;
+        if (!p1 || !p2) {
+          return state;
+        }
         const pixelDistance = Math.sqrt(
           Math.pow(p2.pixelPoint.x - p1.pixelPoint.x, 2) + 
           Math.pow(p2.pixelPoint.y - p1.pixelPoint.y, 2)
@@ -716,20 +898,23 @@ export const useDrawingStore = create<DrawingState>()(
           importedDrawing: { ...state.importedDrawing, scale }, 
           isCalibrating: false, 
           calibrationStep: 0, 
-          activeTool: 'select' 
+          activeTool: 'select',
+          tool: 'select',
         };
       }),
       
       finishCalibration: () => set({ 
         isCalibrating: false, 
         calibrationStep: 0, 
-        activeTool: 'select' 
+        activeTool: 'select',
+        tool: 'select',
       }),
       
       cancelCalibration: () => set((state) => ({
         isCalibrating: false,
         calibrationStep: 0,
         activeTool: 'select',
+        tool: 'select',
         importedDrawing: state.importedDrawing 
           ? { ...state.importedDrawing, calibrationPoints: [] } 
           : null,
@@ -785,31 +970,27 @@ export const useDrawingStore = create<DrawingState>()(
 
       // History Actions
       saveToHistory: (action) => set((state) => {
-        const entry: HistoryEntry = {
-          id: generateId(),
-          timestamp: Date.now(),
-          action,
-          snapshot: {
-            walls: JSON.parse(JSON.stringify(state.walls)),
-            rooms: JSON.parse(JSON.stringify(state.rooms)),
-            detectedElements: JSON.parse(JSON.stringify(state.detectedElements)),
-            dimensions: JSON.parse(JSON.stringify(state.dimensions)),
-            annotations: JSON.parse(JSON.stringify(state.annotations)),
-            sketches: JSON.parse(JSON.stringify(state.sketches)),
-            symbols: JSON.parse(JSON.stringify(state.symbols)),
-          },
-        };
+        const snapshot = createHistorySnapshot(state);
+        const entry = createHistoryEntry(action, snapshot);
         const newHistory = state.history.slice(0, state.historyIndex + 1);
         newHistory.push(entry);
         if (newHistory.length > 50) {
           newHistory.shift();
         }
-        return { history: newHistory, historyIndex: newHistory.length - 1 };
+        const nextHistoryIndex = newHistory.length - 1;
+        return {
+          history: newHistory,
+          historyIndex: nextHistoryIndex,
+          canUndo: nextHistoryIndex > 0,
+          canRedo: nextHistoryIndex < newHistory.length - 1,
+        };
       }),
       
       undo: () => set((state) => {
         if (state.historyIndex <= 0) return state;
         const prevEntry = state.history[state.historyIndex - 1];
+        if (!prevEntry) return state;
+        const nextHistoryIndex = state.historyIndex - 1;
         return {
           walls: prevEntry.snapshot.walls,
           rooms: prevEntry.snapshot.rooms,
@@ -818,13 +999,17 @@ export const useDrawingStore = create<DrawingState>()(
           annotations: prevEntry.snapshot.annotations,
           sketches: prevEntry.snapshot.sketches,
           symbols: prevEntry.snapshot.symbols,
-          historyIndex: state.historyIndex - 1,
+          historyIndex: nextHistoryIndex,
+          canUndo: nextHistoryIndex > 0,
+          canRedo: nextHistoryIndex < state.history.length - 1,
         };
       }),
       
       redo: () => set((state) => {
         if (state.historyIndex >= state.history.length - 1) return state;
         const nextEntry = state.history[state.historyIndex + 1];
+        if (!nextEntry) return state;
+        const nextHistoryIndex = state.historyIndex + 1;
         return {
           walls: nextEntry.snapshot.walls,
           rooms: nextEntry.snapshot.rooms,
@@ -833,11 +1018,18 @@ export const useDrawingStore = create<DrawingState>()(
           annotations: nextEntry.snapshot.annotations,
           sketches: nextEntry.snapshot.sketches,
           symbols: nextEntry.snapshot.symbols,
-          historyIndex: state.historyIndex + 1,
+          historyIndex: nextHistoryIndex,
+          canUndo: nextHistoryIndex > 0,
+          canRedo: nextHistoryIndex < state.history.length - 1,
         };
       }),
       
-      clearHistory: () => set({ history: [], historyIndex: -1 }),
+      clearHistory: () => set((state) => ({
+        history: [createHistoryEntry('Baseline', createHistorySnapshot(state))],
+        historyIndex: 0,
+        canUndo: false,
+        canRedo: false,
+      })),
 
       // Export/Import Actions
       exportToJSON: () => {
@@ -859,9 +1051,12 @@ export const useDrawingStore = create<DrawingState>()(
       importFromJSON: (json) => {
         try {
           const data = JSON.parse(json);
+          const importedWalls: Wall2D[] = withRebuiltAdjacency(data.walls || []);
+          const importedRooms: Room2D[] = data.rooms || [];
+          const derivedRooms = detectRoomsFromWallGraph(importedWalls, importedRooms);
           set({
-            walls: data.walls || [],
-            rooms: data.rooms || [],
+            walls: importedWalls,
+            rooms: derivedRooms,
             dimensions: data.dimensions || [],
             annotations: data.annotations || [],
             sketches: data.sketches || [],

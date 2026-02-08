@@ -45,6 +45,12 @@ export const Grid: React.FC<GridProps> = ({
   const pageTop = originOffset.y + (-panOffset.y) * scale;
   const pageWidthPx = pageWidth * scale;
   const pageHeightPx = pageHeight * scale;
+  const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+  const snapPx = (value: number) => Math.round(value * dpr) / dpr;
+  const snappedLeft = snapPx(pageLeft);
+  const snappedTop = snapPx(pageTop);
+  const snappedWidth = Math.max(1, snapPx(pageLeft + pageWidthPx) - snappedLeft);
+  const snappedHeight = Math.max(1, snapPx(pageTop + pageHeightPx) - snappedTop);
 
   const background = useMemo(() => {
     const layers: Array<{ image: string; size: string }> = [];
@@ -85,10 +91,10 @@ export const Grid: React.FC<GridProps> = ({
     <div
       style={{
         position: 'absolute',
-        left: pageLeft,
-        top: pageTop,
-        width: pageWidthPx,
-        height: pageHeightPx,
+        left: snappedLeft,
+        top: snappedTop,
+        width: snappedWidth,
+        height: snappedHeight,
         pointerEvents: 'none',
         zIndex: 1,
         overflow: 'hidden',

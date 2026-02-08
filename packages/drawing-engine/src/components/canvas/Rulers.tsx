@@ -1,8 +1,8 @@
 'use client';
 
 import React, { useMemo } from 'react';
-import type { Point2D } from '../../types';
-import { formatRulerLabel, getAdaptiveSteps, PX_TO_MM } from './scale';
+import type { DisplayUnit, Point2D } from '../../types';
+import { getAdaptiveSteps, PX_TO_MM } from './scale';
 
 interface RulerTick {
   valueMm: number;
@@ -26,6 +26,7 @@ export interface RulersProps {
   rulerSize?: number;
   originOffset?: Point2D;
   gridSize?: number;
+  displayUnit?: DisplayUnit;
   /** Mouse position in canvas coordinates for cursor indicator */
   mousePosition?: Point2D;
 }
@@ -39,6 +40,7 @@ const CURSOR_INDICATOR_COLOR = '#4CAF50';
 const PAGE_EXTENT_FILL = 'rgba(76, 175, 80, 0.12)';
 const PAGE_EDGE_COLOR = 'rgba(76, 175, 80, 0.7)';
 const MIN_VISIBLE_RULER_PX = 72;
+const PAGE_ATTACH_OVERLAP_PX = 1;
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const positiveModulo = (value: number, mod: number) => (mod > 0 ? ((value % mod) + mod) % mod : 0);
@@ -69,6 +71,7 @@ export const Rulers: React.FC<RulersProps> = ({
   rulerSize = 24,
   originOffset = { x: 0, y: 0 },
   gridSize = 20,
+  displayUnit = 'cm',
   mousePosition,
 }) => {
   if (!showRulers || viewportWidth <= 0 || viewportHeight <= 0) return null;
@@ -91,10 +94,14 @@ export const Rulers: React.FC<RulersProps> = ({
 
   // Page-attached by default, clamped only when leaving viewport to keep always visible.
   const topRulerLeft = clampKeepVisible(pageLeft, pageWidthPx, canvasLeft, canvasRight);
-  const topRulerTop = clamp(pageTop - rulerSize, 0, Math.max(0, canvasBottom - rulerSize));
+  const topRulerTop = clamp(
+    pageTop - rulerSize + PAGE_ATTACH_OVERLAP_PX,
+    0,
+    Math.max(0, canvasBottom - rulerSize)
+  );
   const leftRulerTop = clampKeepVisible(pageTop, pageHeightPx, canvasTop, canvasBottom);
   const leftRulerLeft = clamp(
-    pageLeft - leftRulerWidth,
+    pageLeft - leftRulerWidth + PAGE_ATTACH_OVERLAP_PX,
     0,
     Math.max(0, canvasRight - leftRulerWidth)
   );
@@ -220,6 +227,33 @@ export const Rulers: React.FC<RulersProps> = ({
 
   const cursorX = mousePosition ? (mousePosition.x - sceneOffsetX) * scale : null;
   const cursorY = mousePosition ? (mousePosition.y - sceneOffsetY) * scale : null;
+  const unitLabel = displayUnit === 'ft-in' ? 'ft' : displayUnit;
+
+  const formatTickLabel = (valueMm: number, majorStepMm: number): string => {
+    switch (displayUnit) {
+      case 'mm':
+        return Math.round(valueMm).toString();
+      case 'm': {
+        const valueM = valueMm / 1000;
+        const precision = majorStepMm >= 1000 ? 1 : 2;
+        return valueM.toFixed(precision).replace(/\.0+$/, '');
+      }
+      case 'ft-in': {
+        const valueFt = valueMm / 304.8;
+        const precision = majorStepMm >= 304.8 ? 1 : 2;
+        return valueFt.toFixed(precision).replace(/\.0+$/, '');
+      }
+      default: {
+        const cm = valueMm / 10;
+        if (majorStepMm >= 10) {
+          const rounded = Math.round(cm);
+          return rounded === 0 ? '0' : rounded.toString();
+        }
+        if (Math.abs(cm) < 0.0001) return '0';
+        return cm.toFixed(1).replace(/\.0$/, '');
+      }
+    }
+  };
 
   return (
     <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 5 }}>
@@ -246,7 +280,7 @@ export const Rulers: React.FC<RulersProps> = ({
             textTransform: 'uppercase',
           }}
         >
-          cm
+          {unitLabel}
         </span>
       </div>
 
@@ -341,7 +375,7 @@ export const Rulers: React.FC<RulersProps> = ({
                 whiteSpace: 'nowrap',
               }}
             >
-              {formatRulerLabel(tick.valueMm, rulerData.x.majorStepMm)}
+              {formatTickLabel(tick.valueMm, rulerData.x.majorStepMm)}
             </div>
           </React.Fragment>
         ))}
@@ -457,7 +491,7 @@ export const Rulers: React.FC<RulersProps> = ({
                 whiteSpace: 'nowrap',
               }}
             >
-              {formatRulerLabel(tick.valueMm, rulerData.y.majorStepMm)}
+              {formatTickLabel(tick.valueMm, rulerData.y.majorStepMm)}
             </div>
           </React.Fragment>
         ))}
