@@ -35,7 +35,6 @@ import { DEFAULT_SPLINE_SETTINGS } from '../utils/spline';
 import { generateId } from '../utils/geometry';
 import { applyNestedRoomHierarchy, detectRoomsFromWallGraph } from '../utils/room-detection';
 import {
-  BUILT_IN_WALL_TYPES,
   DEFAULT_WALL_TYPE_ID,
   addWallLayer,
   convertWallCoreMaterial,
@@ -48,230 +47,20 @@ import {
   updateWallLayerThickness,
 } from '../utils/wall-types';
 
-// =============================================================================
-// Default Settings
-// =============================================================================
-
-const DEFAULT_PAGE_CONFIG: PageConfig = {
-  // A3 landscape at 96 DPI
-  width: 1587,
-  height: 1122,
-  orientation: 'landscape',
-};
-
-const DEFAULT_ELEMENT_SETTINGS = {
-  defaultWallThickness: 1,
-  defaultWallHeight: 3.0,
-  defaultWindowHeight: 1.2,
-  defaultWindowSillHeight: 0.9,
-  defaultDoorHeight: 2.1,
-};
-
-const DEFAULT_LAYERS: DrawingLayer[] = [
-  { id: 'default', name: 'Default', visible: true, locked: false, opacity: 1, elements: [] },
-  { id: 'imported', name: 'Imported Drawing', visible: true, locked: true, opacity: 0.5, elements: [] },
-  { id: 'detected', name: 'AI Detected', visible: true, locked: false, opacity: 0.8, elements: [] },
-];
-
-const WALL_NODE_TOLERANCE_PX = 0.5;
-
-function deepClone<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
-}
-
-function createEmptyHistorySnapshot(): HistoryEntry['snapshot'] {
-  return {
-    walls: [],
-    rooms: [],
-    detectedElements: [],
-    dimensions: [],
-    annotations: [],
-    sketches: [],
-    symbols: [],
-  };
-}
-
-function createHistoryEntry(action: string, snapshot: HistoryEntry['snapshot']): HistoryEntry {
-  return {
-    id: generateId(),
-    timestamp: Date.now(),
-    action,
-    snapshot,
-  };
-}
-
-function createHistorySnapshot(state: {
-  walls: Wall2D[];
-  rooms: Room2D[];
-  detectedElements: DetectedElement[];
-  dimensions: Dimension2D[];
-  annotations: Annotation2D[];
-  sketches: Sketch2D[];
-  symbols: SymbolInstance2D[];
-}): HistoryEntry['snapshot'] {
-  return {
-    walls: deepClone(state.walls),
-    rooms: deepClone(state.rooms),
-    detectedElements: deepClone(state.detectedElements),
-    dimensions: deepClone(state.dimensions),
-    annotations: deepClone(state.annotations),
-    sketches: deepClone(state.sketches),
-    symbols: deepClone(state.symbols),
-  };
-}
-
-function wallGeometryChanged(a: Wall2D, b: Wall2D, tolerance = 1e-6): boolean {
-  return (
-    Math.abs(a.start.x - b.start.x) > tolerance ||
-    Math.abs(a.start.y - b.start.y) > tolerance ||
-    Math.abs(a.end.x - b.end.x) > tolerance ||
-    Math.abs(a.end.y - b.end.y) > tolerance
-  );
-}
-
-function pointToEndpointKey(point: Point2D, tolerance: number): string {
-  const step = Math.max(tolerance, 1e-4);
-  return `${Math.round(point.x / step)}:${Math.round(point.y / step)}`;
-}
-
-function buildWallAdjacencyMap(walls: Wall2D[], tolerance: number): Map<string, Set<string>> {
-  const adjacency = new Map<string, Set<string>>();
-  const buckets = new Map<string, string[]>();
-
-  walls.forEach((wall) => {
-    adjacency.set(wall.id, new Set<string>());
-    const keys = [
-      pointToEndpointKey(wall.start, tolerance),
-      pointToEndpointKey(wall.end, tolerance),
-    ];
-
-    keys.forEach((key) => {
-      const wallIds = buckets.get(key) ?? [];
-      wallIds.push(wall.id);
-      buckets.set(key, wallIds);
-    });
-  });
-
-  buckets.forEach((wallIdsAtNode) => {
-    for (let i = 0; i < wallIdsAtNode.length; i++) {
-      const sourceId = wallIdsAtNode[i];
-      if (!sourceId) continue;
-      for (let j = i + 1; j < wallIdsAtNode.length; j++) {
-        const targetId = wallIdsAtNode[j];
-        if (!targetId) continue;
-        adjacency.get(sourceId)?.add(targetId);
-        adjacency.get(targetId)?.add(sourceId);
-      }
-    }
-  });
-
-  return adjacency;
-}
-
-function detectRoomsIncremental(
-  previousWalls: Wall2D[],
-  nextWalls: Wall2D[],
-  previousRooms: Room2D[]
-): Room2D[] {
-  if (nextWalls.length < 3) return [];
-
-  const previousById = new Map(previousWalls.map((wall) => [wall.id, wall]));
-  const nextById = new Map(nextWalls.map((wall) => [wall.id, wall]));
-  const changedWallIds = new Set<string>();
-
-  nextById.forEach((nextWall, wallId) => {
-    const previousWall = previousById.get(wallId);
-    if (!previousWall || wallGeometryChanged(previousWall, nextWall)) {
-      changedWallIds.add(wallId);
-    }
-  });
-
-  previousById.forEach((_previousWall, wallId) => {
-    if (!nextById.has(wallId)) {
-      changedWallIds.add(wallId);
-    }
-  });
-
-  if (changedWallIds.size === 0) {
-    return sortRoomsForDisplay(applyNestedRoomHierarchy(previousRooms));
-  }
-
-  const previousAdjacency = buildWallAdjacencyMap(previousWalls, WALL_NODE_TOLERANCE_PX);
-  const nextAdjacency = buildWallAdjacencyMap(nextWalls, WALL_NODE_TOLERANCE_PX);
-  const affectedWallIds = new Set<string>();
-  const queue = Array.from(changedWallIds);
-
-  while (queue.length > 0) {
-    const wallId = queue.shift();
-    if (!wallId || affectedWallIds.has(wallId)) continue;
-    affectedWallIds.add(wallId);
-
-    const previousNeighbors = previousAdjacency.get(wallId);
-    previousNeighbors?.forEach((neighborId) => {
-      if (!affectedWallIds.has(neighborId)) {
-        queue.push(neighborId);
-      }
-    });
-
-    const nextNeighbors = nextAdjacency.get(wallId);
-    nextNeighbors?.forEach((neighborId) => {
-      if (!affectedWallIds.has(neighborId)) {
-        queue.push(neighborId);
-      }
-    });
-  }
-
-  if (affectedWallIds.size === 0) {
-    return sortRoomsForDisplay(detectRoomsFromWallGraph(nextWalls, previousRooms));
-  }
-
-  const nextWallIdSet = new Set(nextWalls.map((wall) => wall.id));
-  const unaffectedRooms = previousRooms.filter((room) =>
-    room.wallIds.every((wallId) => nextWallIdSet.has(wallId) && !affectedWallIds.has(wallId))
-  );
-  const affectedWalls = nextWalls.filter((wall) => affectedWallIds.has(wall.id));
-  const recalculatedRooms = detectRoomsFromWallGraph(affectedWalls, previousRooms);
-
-  return sortRoomsForDisplay(applyNestedRoomHierarchy([...unaffectedRooms, ...recalculatedRooms]));
-}
-
-function withRebuiltAdjacency(
-  walls: Wall2D[],
-  wallTypeRegistry: WallTypeDefinition[] = BUILT_IN_WALL_TYPES
-): Wall2D[] {
-  const normalizedWalls = walls.map((wall) => normalizeWallForTypeSystem(wall, wallTypeRegistry));
-  const adjacency = buildWallAdjacencyMap(normalizedWalls, WALL_NODE_TOLERANCE_PX);
-  return normalizedWalls.map((wall) => ({
-    ...wall,
-    connectedWallIds: Array.from(adjacency.get(wall.id) ?? []),
-  }));
-}
-
-function getRoomCentroid(room: Room2D): Point2D {
-  if (room.vertices.length === 0) return { x: 0, y: 0 };
-  const sum = room.vertices.reduce(
-    (acc, vertex) => ({ x: acc.x + vertex.x, y: acc.y + vertex.y }),
-    { x: 0, y: 0 }
-  );
-  return {
-    x: sum.x / room.vertices.length,
-    y: sum.y / room.vertices.length,
-  };
-}
-
-function sortRoomsForDisplay(rooms: Room2D[]): Room2D[] {
-  return [...rooms].sort((a, b) => {
-    const centroidA = getRoomCentroid(a);
-    const centroidB = getRoomCentroid(b);
-    if (Math.abs(centroidA.y - centroidB.y) > 1e-6) {
-      return centroidA.y - centroidB.y;
-    }
-    if (Math.abs(centroidA.x - centroidB.x) > 1e-6) {
-      return centroidA.x - centroidB.x;
-    }
-    return a.name.localeCompare(b.name);
-  });
-}
+// Import from extracted modules
+import {
+  createEmptyHistorySnapshot,
+  createHistoryEntry,
+  createHistorySnapshot,
+  detectRoomsIncremental,
+  sortRoomsForDisplay,
+  withRebuiltAdjacency,
+} from './helpers';
+import {
+  DEFAULT_PAGE_CONFIG,
+  DEFAULT_ELEMENT_SETTINGS,
+  DEFAULT_LAYERS,
+} from './defaults';
 
 // =============================================================================
 // Store Interface
@@ -287,14 +76,14 @@ export interface DrawingState {
   guides: Guide[];
   symbols: SymbolInstance2D[];
   layers: DrawingLayer[];
-  
+
   // Import State
   importedDrawing: ImportedDrawing | null;
   importProgress: number;
   isProcessing: boolean;
   processingStatus: string;
   detectedElements: DetectedElement[];
-  
+
   // Tool State
   activeTool: DrawingTool;
   activeWallTypeId: string;
@@ -302,11 +91,11 @@ export interface DrawingState {
   activeLayerId: string | null;
   selectedElementIds: string[];
   hoveredElementId: string | null;
-  
+
   // Aliases for backward compatibility
   tool: DrawingTool;
   selectedIds: string[];
-  
+
   // View State
   zoom: number;
   zoomToFitRequestId: number;
@@ -318,46 +107,46 @@ export interface DrawingState {
   showGrid: boolean;
   showRulers: boolean;
   pageConfig: PageConfig;
-  
+
   // Preview State
   previewHeight: number;
   show3DPreview: boolean;
   autoSync3D: boolean;
-  
+
   // Calibration State
   isCalibrating: boolean;
   calibrationStep: number;
-  
+
   // History State
   history: HistoryEntry[];
   historyIndex: number;
-  
+
   // Element Defaults
   defaultWallThickness: number;
   defaultWallHeight: number;
   defaultWindowHeight: number;
   defaultWindowSillHeight: number;
   defaultDoorHeight: number;
-  
+
   // Spline Settings
   splineSettings: SplineSettings;
   splineEditMode: 'draw' | 'edit-points' | 'add-point' | 'remove-point';
   editingSplineId: string | null;
-  
+
   // Actions - Import
   setImportedDrawing: (drawing: ImportedDrawing | null) => void;
   updateImportedDrawing: (data: Partial<ImportedDrawing>) => void;
   setImportProgress: (progress: number) => void;
   setProcessingStatus: (status: string, isProcessing: boolean) => void;
   clearImportedDrawing: () => void;
-  
+
   // Actions - Detection
   setDetectedElements: (elements: DetectedElement[]) => void;
   acceptDetectedElement: (id: string) => void;
   rejectDetectedElement: (id: string) => void;
   acceptAllDetectedElements: () => void;
   clearDetectedElements: () => void;
-  
+
   // Actions - Walls
   setWalls: (walls: Wall2D[], historyAction?: string) => void;
   addWall: (wall: Omit<Wall2D, 'id' | 'openings'>) => string;
@@ -375,7 +164,7 @@ export interface DrawingState {
   addOpeningToWall: (wallId: string, opening: Omit<Opening2D, 'id' | 'wallId'>) => string;
   updateOpening: (wallId: string, openingId: string, data: Partial<Opening2D>) => void;
   deleteOpening: (wallId: string, openingId: string) => void;
-  
+
   // Actions - Rooms
   addRoom: (
     room: Omit<
@@ -394,32 +183,32 @@ export interface DrawingState {
   reparentRoom: (roomId: string, parentRoomId: string | null) => boolean;
   deleteRoom: (id: string) => void;
   detectRoomsFromWalls: () => void;
-  
+
   // Actions - Dimensions
   addDimension: (dimension: Omit<Dimension2D, 'id'>) => string;
   updateDimension: (id: string, data: Partial<Dimension2D>) => void;
   deleteDimension: (id: string) => void;
-  
+
   // Actions - Annotations
   addAnnotation: (annotation: Omit<Annotation2D, 'id'>) => string;
   updateAnnotation: (id: string, data: Partial<Annotation2D>) => void;
   deleteAnnotation: (id: string) => void;
-  
+
   // Actions - Sketches
   addSketch: (sketch: Omit<Sketch2D, 'id'>) => string;
   updateSketch: (id: string, data: Partial<Sketch2D>) => void;
   deleteSketch: (id: string) => void;
-  
+
   // Actions - Guides
   addGuide: (guide: Guide) => void;
   removeGuide: (id: string) => void;
   clearGuides: () => void;
-  
+
   // Actions - Symbols
   addSymbol: (symbol: Omit<SymbolInstance2D, 'id'>) => string;
   updateSymbol: (id: string, data: Partial<SymbolInstance2D>) => void;
   deleteSymbol: (id: string) => void;
-  
+
   // Actions - Selection
   selectElement: (id: string, addToSelection?: boolean) => void;
   deselectElement: (id: string) => void;
@@ -427,21 +216,21 @@ export interface DrawingState {
   selectAll: () => void;
   setHoveredElement: (id: string | null) => void;
   deleteSelectedElements: () => void;
-  
+
   // Aliases for backward compatibility
   setSelectedIds: (ids: string[]) => void;
   deleteSelected: () => void;
-  
+
   // Actions - Tools
   setActiveTool: (tool: DrawingTool) => void;
-  
+
   // Alias for backward compatibility
   setTool: (tool: DrawingTool) => void;
-  
+
   // Computed properties for history
   canUndo: boolean;
   canRedo: boolean;
-  
+
   // Actions - View
   setZoom: (zoom: number) => void;
   setPanOffset: (offset: Point2D) => void;
@@ -455,19 +244,19 @@ export interface DrawingState {
   setPageConfig: (config: Partial<PageConfig>) => void;
   resetView: () => void;
   zoomToFit: () => void;
-  
+
   // Actions - Preview
   setPreviewHeight: (height: number) => void;
   setShow3DPreview: (show: boolean) => void;
   setAutoSync3D: (sync: boolean) => void;
-  
+
   // Actions - Calibration
   startCalibration: () => void;
   addCalibrationPoint: (point: Point2D) => void;
   setCalibrationDistance: (distance: number) => void;
   finishCalibration: () => void;
   cancelCalibration: () => void;
-  
+
   // Actions - Layers
   addLayer: (name: string) => string;
   updateLayer: (id: string, data: Partial<DrawingLayer>) => void;
@@ -476,23 +265,23 @@ export interface DrawingState {
   moveElementToLayer: (elementId: string, layerId: string) => void;
   toggleLayerVisibility: (id: string) => void;
   toggleLayerLock: (id: string) => void;
-  
+
   // Actions - History
   saveToHistory: (action: string) => void;
   undo: () => void;
   redo: () => void;
   clearHistory: () => void;
-  
+
   // Actions - Export/Import
   exportToJSON: () => string;
   importFromJSON: (json: string) => void;
   getFloorPlanData: () => FloorPlanData;
-  
+
   // Data management aliases
   hvacLayout: unknown | null;
   loadData: (data: unknown) => void;
   exportData: () => unknown;
-  
+
   // Actions - Spline
   setSplineSettings: (settings: Partial<SplineSettings>) => void;
   setSplineEditMode: (mode: 'draw' | 'edit-points' | 'add-point' | 'remove-point') => void;
@@ -531,14 +320,14 @@ export const useDrawingStore = create<DrawingState>()(
       activeLayerId: 'default',
       selectedElementIds: [],
       hoveredElementId: null,
-      
+
       // Aliases for backward compatibility
       tool: 'select',
       selectedIds: [],
       canUndo: false,
       canRedo: false,
       hvacLayout: null,
-      
+
       zoom: 1,
       zoomToFitRequestId: 0,
       resetViewRequestId: 0,
@@ -563,43 +352,43 @@ export const useDrawingStore = create<DrawingState>()(
 
       // Import Actions
       setImportedDrawing: (drawing) => set({ importedDrawing: drawing }),
-      
+
       updateImportedDrawing: (data) => set((state) => ({
-        importedDrawing: state.importedDrawing 
-          ? { ...state.importedDrawing, ...data } 
+        importedDrawing: state.importedDrawing
+          ? { ...state.importedDrawing, ...data }
           : null,
       })),
-      
+
       setImportProgress: (progress) => set({ importProgress: progress }),
-      
-      setProcessingStatus: (status, isProcessing) => set({ 
-        processingStatus: status, 
-        isProcessing 
+
+      setProcessingStatus: (status, isProcessing) => set({
+        processingStatus: status,
+        isProcessing
       }),
-      
-      clearImportedDrawing: () => set({ 
-        importedDrawing: null, 
-        importProgress: 0, 
-        detectedElements: [] 
+
+      clearImportedDrawing: () => set({
+        importedDrawing: null,
+        importProgress: 0,
+        detectedElements: []
       }),
 
       // Detection Actions
       setDetectedElements: (elements) => set({ detectedElements: elements }),
-      
+
       acceptDetectedElement: (id) => set((state) => ({
-        detectedElements: state.detectedElements.map((el) => 
+        detectedElements: state.detectedElements.map((el) =>
           el.id === id ? { ...el, accepted: true } : el
         ),
       })),
-      
+
       rejectDetectedElement: (id) => set((state) => ({
         detectedElements: state.detectedElements.filter((el) => el.id !== id),
       })),
-      
+
       acceptAllDetectedElements: () => set((state) => ({
         detectedElements: state.detectedElements.map((el) => ({ ...el, accepted: true })),
       })),
-      
+
       clearDetectedElements: () => set({ detectedElements: [] }),
 
       // Guide Actions
@@ -638,7 +427,7 @@ export const useDrawingStore = create<DrawingState>()(
         get().saveToHistory('Add wall');
         return id;
       },
-      
+
       updateWall: (id, data) => {
         set((state) => {
           const nextWalls = withRebuiltAdjacency(
@@ -652,7 +441,7 @@ export const useDrawingStore = create<DrawingState>()(
         });
         get().saveToHistory('Update wall');
       },
-      
+
       deleteWall: (id) => {
         set((state) => {
           const nextWalls = withRebuiltAdjacency(
@@ -828,41 +617,41 @@ export const useDrawingStore = create<DrawingState>()(
         });
         get().saveToHistory('Reset wall to type default');
       },
-      
+
       addOpeningToWall: (wallId, opening) => {
         const id = generateId();
         set((state) => ({
           walls: state.walls.map((w) =>
-            w.id === wallId 
-              ? { ...w, openings: [...w.openings, { ...opening, id, wallId }] } 
+            w.id === wallId
+              ? { ...w, openings: [...w.openings, { ...opening, id, wallId }] }
               : w
           ),
         }));
         get().saveToHistory('Add opening');
         return id;
       },
-      
+
       updateOpening: (wallId, openingId, data) => {
         set((state) => ({
           walls: state.walls.map((w) =>
             w.id === wallId
-              ? { 
-                  ...w, 
-                  openings: w.openings.map((o) => 
-                    o.id === openingId ? { ...o, ...data } : o
-                  ) 
-                }
+              ? {
+                ...w,
+                openings: w.openings.map((o) =>
+                  o.id === openingId ? { ...o, ...data } : o
+                )
+              }
               : w
           ),
         }));
         get().saveToHistory('Update opening');
       },
-      
+
       deleteOpening: (wallId, openingId) => {
         set((state) => ({
           walls: state.walls.map((w) =>
-            w.id === wallId 
-              ? { ...w, openings: w.openings.filter((o) => o.id !== openingId) } 
+            w.id === wallId
+              ? { ...w, openings: w.openings.filter((o) => o.id !== openingId) }
               : w
           ),
         }));
@@ -877,7 +666,7 @@ export const useDrawingStore = create<DrawingState>()(
         set({ rooms: derivedRooms });
         return derivedRooms[0]?.id ?? '';
       },
-      
+
       updateRoom: (id, data) => {
         const {
           vertices: _ignoredVertices,
@@ -946,14 +735,14 @@ export const useDrawingStore = create<DrawingState>()(
 
         return applied;
       },
-      
+
       deleteRoom: (id) => {
         void id;
         set((state) => ({
           rooms: detectRoomsFromWallGraph(state.walls, state.rooms),
         }));
       },
-      
+
       detectRoomsFromWalls: () => {
         set((state) => ({
           rooms: detectRoomsFromWallGraph(state.walls, state.rooms),
@@ -967,14 +756,14 @@ export const useDrawingStore = create<DrawingState>()(
         get().saveToHistory('Add dimension');
         return id;
       },
-      
+
       updateDimension: (id, data) => {
-        set((state) => ({ 
-          dimensions: state.dimensions.map((d) => d.id === id ? { ...d, ...data } : d) 
+        set((state) => ({
+          dimensions: state.dimensions.map((d) => d.id === id ? { ...d, ...data } : d)
         }));
         get().saveToHistory('Update dimension');
       },
-      
+
       deleteDimension: (id) => {
         set((state) => ({ dimensions: state.dimensions.filter((d) => d.id !== id) }));
         get().saveToHistory('Delete dimension');
@@ -987,14 +776,14 @@ export const useDrawingStore = create<DrawingState>()(
         get().saveToHistory('Add annotation');
         return id;
       },
-      
+
       updateAnnotation: (id, data) => {
-        set((state) => ({ 
-          annotations: state.annotations.map((a) => a.id === id ? { ...a, ...data } : a) 
+        set((state) => ({
+          annotations: state.annotations.map((a) => a.id === id ? { ...a, ...data } : a)
         }));
         get().saveToHistory('Update annotation');
       },
-      
+
       deleteAnnotation: (id) => {
         set((state) => ({ annotations: state.annotations.filter((a) => a.id !== id) }));
         get().saveToHistory('Delete annotation');
@@ -1007,14 +796,14 @@ export const useDrawingStore = create<DrawingState>()(
         get().saveToHistory('Add sketch');
         return id;
       },
-      
+
       updateSketch: (id, data) => {
-        set((state) => ({ 
-          sketches: state.sketches.map((s) => s.id === id ? { ...s, ...data } : s) 
+        set((state) => ({
+          sketches: state.sketches.map((s) => s.id === id ? { ...s, ...data } : s)
         }));
         get().saveToHistory('Update sketch');
       },
-      
+
       deleteSketch: (id) => {
         set((state) => ({ sketches: state.sketches.filter((s) => s.id !== id) }));
         get().saveToHistory('Delete sketch');
@@ -1027,14 +816,14 @@ export const useDrawingStore = create<DrawingState>()(
         get().saveToHistory('Add symbol');
         return id;
       },
-      
+
       updateSymbol: (id, data) => {
-        set((state) => ({ 
-          symbols: state.symbols.map((s) => s.id === id ? { ...s, ...data } : s) 
+        set((state) => ({
+          symbols: state.symbols.map((s) => s.id === id ? { ...s, ...data } : s)
         }));
         get().saveToHistory('Update symbol');
       },
-      
+
       deleteSymbol: (id) => {
         set((state) => ({ symbols: state.symbols.filter((s) => s.id !== id) }));
         get().saveToHistory('Delete symbol');
@@ -1042,21 +831,21 @@ export const useDrawingStore = create<DrawingState>()(
 
       // Selection Actions
       selectElement: (id, addToSelection = false) => set((state) => ({
-        selectedElementIds: addToSelection 
-          ? [...state.selectedElementIds, id] 
+        selectedElementIds: addToSelection
+          ? [...state.selectedElementIds, id]
           : [id],
-        selectedIds: addToSelection 
-          ? [...state.selectedElementIds, id] 
+        selectedIds: addToSelection
+          ? [...state.selectedElementIds, id]
           : [id],
       })),
-      
+
       deselectElement: (id) => set((state) => ({
         selectedElementIds: state.selectedElementIds.filter((eid) => eid !== id),
         selectedIds: state.selectedElementIds.filter((eid) => eid !== id),
       })),
-      
+
       clearSelection: () => set({ selectedElementIds: [], selectedIds: [] }),
-      
+
       selectAll: () => set((state) => ({
         selectedElementIds: [
           ...state.walls.map((w) => w.id),
@@ -1075,9 +864,9 @@ export const useDrawingStore = create<DrawingState>()(
           ...state.symbols.map((s) => s.id),
         ],
       })),
-      
+
       setHoveredElement: (id) => set({ hoveredElementId: id }),
-      
+
       deleteSelectedElements: () => {
         const { selectedElementIds, walls, rooms, dimensions, annotations, sketches, symbols } = get();
         const wallIdSet = new Set(walls.map((wall) => wall.id));
@@ -1133,7 +922,7 @@ export const useDrawingStore = create<DrawingState>()(
         });
         get().saveToHistory('Delete selected');
       },
-      
+
       // Alias methods for backward compatibility
       setSelectedIds: (ids) => set({ selectedElementIds: ids, selectedIds: ids }),
       deleteSelected: () => get().deleteSelectedElements(),
@@ -1158,8 +947,8 @@ export const useDrawingStore = create<DrawingState>()(
       setShowGrid: (show) => set({ showGrid: show }),
       setShowRulers: (show) => set({ showRulers: show }),
       toggleRulers: () => set((state) => ({ showRulers: !state.showRulers })),
-      setPageConfig: (config) => set((state) => ({ 
-        pageConfig: { ...state.pageConfig, ...config } 
+      setPageConfig: (config) => set((state) => ({
+        pageConfig: { ...state.pageConfig, ...config }
       })),
       resetView: () => set({ zoom: 1, panOffset: { x: 0, y: 0 }, resetViewRequestId: Date.now() }),
       zoomToFit: () => set({ zoomToFitRequestId: Date.now() }),
@@ -1170,29 +959,29 @@ export const useDrawingStore = create<DrawingState>()(
       setAutoSync3D: (sync) => set({ autoSync3D: sync }),
 
       // Calibration Actions
-      startCalibration: () => set({ 
-        isCalibrating: true, 
-        calibrationStep: 1, 
+      startCalibration: () => set({
+        isCalibrating: true,
+        calibrationStep: 1,
         activeTool: 'calibrate',
         tool: 'calibrate',
       }),
-      
+
       addCalibrationPoint: (point) => set((state) => {
         if (!state.importedDrawing) return state;
         const points = state.importedDrawing.calibrationPoints || [];
         const newPoint = { id: generateId(), pixelPoint: point };
         return {
-          importedDrawing: { 
-            ...state.importedDrawing, 
-            calibrationPoints: [...points, newPoint] 
+          importedDrawing: {
+            ...state.importedDrawing,
+            calibrationPoints: [...points, newPoint]
           },
           calibrationStep: state.calibrationStep + 1,
         };
       }),
-      
+
       setCalibrationDistance: (distance) => set((state) => {
-        if (!state.importedDrawing?.calibrationPoints || 
-            state.importedDrawing.calibrationPoints.length < 2) {
+        if (!state.importedDrawing?.calibrationPoints ||
+          state.importedDrawing.calibrationPoints.length < 2) {
           return state;
         }
         const [p1, p2] = state.importedDrawing.calibrationPoints;
@@ -1200,33 +989,33 @@ export const useDrawingStore = create<DrawingState>()(
           return state;
         }
         const pixelDistance = Math.sqrt(
-          Math.pow(p2.pixelPoint.x - p1.pixelPoint.x, 2) + 
+          Math.pow(p2.pixelPoint.x - p1.pixelPoint.x, 2) +
           Math.pow(p2.pixelPoint.y - p1.pixelPoint.y, 2)
         );
         const scale = pixelDistance / distance;
-        return { 
-          importedDrawing: { ...state.importedDrawing, scale }, 
-          isCalibrating: false, 
-          calibrationStep: 0, 
+        return {
+          importedDrawing: { ...state.importedDrawing, scale },
+          isCalibrating: false,
+          calibrationStep: 0,
           activeTool: 'select',
           tool: 'select',
         };
       }),
-      
-      finishCalibration: () => set({ 
-        isCalibrating: false, 
-        calibrationStep: 0, 
+
+      finishCalibration: () => set({
+        isCalibrating: false,
+        calibrationStep: 0,
         activeTool: 'select',
         tool: 'select',
       }),
-      
+
       cancelCalibration: () => set((state) => ({
         isCalibrating: false,
         calibrationStep: 0,
         activeTool: 'select',
         tool: 'select',
-        importedDrawing: state.importedDrawing 
-          ? { ...state.importedDrawing, calibrationPoints: [] } 
+        importedDrawing: state.importedDrawing
+          ? { ...state.importedDrawing, calibrationPoints: [] }
           : null,
       })),
 
@@ -1234,46 +1023,46 @@ export const useDrawingStore = create<DrawingState>()(
       addLayer: (name) => {
         const id = generateId();
         set((state) => ({
-          layers: [...state.layers, { 
-            id, 
-            name, 
-            visible: true, 
-            locked: false, 
-            opacity: 1, 
-            elements: [] 
+          layers: [...state.layers, {
+            id,
+            name,
+            visible: true,
+            locked: false,
+            opacity: 1,
+            elements: []
           }],
         }));
         return id;
       },
-      
+
       updateLayer: (id, data) => set((state) => ({
         layers: state.layers.map((l) => l.id === id ? { ...l, ...data } : l),
       })),
-      
+
       deleteLayer: (id) => set((state) => ({
         layers: state.layers.filter((l) => l.id !== id),
         activeLayerId: state.activeLayerId === id ? 'default' : state.activeLayerId,
       })),
-      
+
       setActiveLayer: (id) => set({ activeLayerId: id }),
-      
+
       moveElementToLayer: (elementId, layerId) => set((state) => ({
         layers: state.layers.map((l) => ({
           ...l,
-          elements: l.id === layerId 
-            ? [...l.elements.filter((e) => e !== elementId), elementId] 
+          elements: l.id === layerId
+            ? [...l.elements.filter((e) => e !== elementId), elementId]
             : l.elements.filter((e) => e !== elementId),
         })),
       })),
-      
+
       toggleLayerVisibility: (id) => set((state) => ({
-        layers: state.layers.map((l) => 
+        layers: state.layers.map((l) =>
           l.id === id ? { ...l, visible: !l.visible } : l
         ),
       })),
-      
+
       toggleLayerLock: (id) => set((state) => ({
-        layers: state.layers.map((l) => 
+        layers: state.layers.map((l) =>
           l.id === id ? { ...l, locked: !l.locked } : l
         ),
       })),
@@ -1295,7 +1084,7 @@ export const useDrawingStore = create<DrawingState>()(
           canRedo: nextHistoryIndex < newHistory.length - 1,
         };
       }),
-      
+
       undo: () => set((state) => {
         if (state.historyIndex <= 0) return state;
         const prevEntry = state.history[state.historyIndex - 1];
@@ -1314,7 +1103,7 @@ export const useDrawingStore = create<DrawingState>()(
           canRedo: nextHistoryIndex < state.history.length - 1,
         };
       }),
-      
+
       redo: () => set((state) => {
         if (state.historyIndex >= state.history.length - 1) return state;
         const nextEntry = state.history[state.historyIndex + 1];
@@ -1333,7 +1122,7 @@ export const useDrawingStore = create<DrawingState>()(
           canRedo: nextHistoryIndex < state.history.length - 1,
         };
       }),
-      
+
       clearHistory: () => set((state) => ({
         history: [createHistoryEntry('Baseline', createHistorySnapshot(state))],
         historyIndex: 0,
@@ -1357,7 +1146,7 @@ export const useDrawingStore = create<DrawingState>()(
           exportedAt: new Date().toISOString(),
         }, null, 2);
       },
-      
+
       importFromJSON: (json) => {
         try {
           const data = JSON.parse(json);
@@ -1382,7 +1171,7 @@ export const useDrawingStore = create<DrawingState>()(
           get().setProcessingStatus('Failed to import drawing JSON.', false);
         }
       },
-      
+
       getFloorPlanData: () => {
         const { walls, rooms, importedDrawing, pageConfig } = get();
         return {
@@ -1398,11 +1187,11 @@ export const useDrawingStore = create<DrawingState>()(
       setSplineSettings: (settings) => set((state) => ({
         splineSettings: { ...state.splineSettings, ...settings },
       })),
-      
+
       setSplineEditMode: (mode) => set({ splineEditMode: mode }),
-      
+
       setEditingSpline: (id) => set({ editingSplineId: id }),
-      
+
       addSplineControlPoint: (sketchId, point, index) => {
         set((state) => ({
           sketches: state.sketches.map((s) => {
@@ -1418,7 +1207,7 @@ export const useDrawingStore = create<DrawingState>()(
         }));
         get().saveToHistory('Add spline point');
       },
-      
+
       updateSplineControlPoint: (sketchId, pointIndex, position) => {
         set((state) => ({
           sketches: state.sketches.map((s) => {
@@ -1432,7 +1221,7 @@ export const useDrawingStore = create<DrawingState>()(
         }));
         get().saveToHistory('Move spline point');
       },
-      
+
       removeSplineControlPoint: (sketchId, pointIndex) => {
         set((state) => ({
           sketches: state.sketches.map((s) => {
@@ -1444,7 +1233,7 @@ export const useDrawingStore = create<DrawingState>()(
         }));
         get().saveToHistory('Remove spline point');
       },
-      
+
       toggleSplineClosed: (sketchId) => {
         set((state) => ({
           sketches: state.sketches.map((s) => {
@@ -1459,7 +1248,7 @@ export const useDrawingStore = create<DrawingState>()(
         }));
         get().saveToHistory('Toggle spline closed');
       },
-      
+
       convertSplineMethod: (sketchId, method) => {
         set((state) => ({
           sketches: state.sketches.map((s) => {
