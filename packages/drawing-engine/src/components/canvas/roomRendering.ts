@@ -214,6 +214,20 @@ export function formatRoomPerimeter(perimeterM: number, unit: DisplayUnit): stri
     return formatDistance(mm, unit);
 }
 
+export function formatRealRoomArea(areaSqm: number, unit: DisplayUnit, paperToRealRatio = 1): string {
+    const safeRatio = Number.isFinite(paperToRealRatio) && paperToRealRatio > 0 ? paperToRealRatio : 1;
+    return formatRoomArea(areaSqm * safeRatio * safeRatio, unit);
+}
+
+export function formatRealRoomPerimeter(
+    perimeterM: number,
+    unit: DisplayUnit,
+    paperToRealRatio = 1
+): string {
+    const safeRatio = Number.isFinite(paperToRealRatio) && paperToRealRatio > 0 ? paperToRealRatio : 1;
+    return formatRoomPerimeter(perimeterM * safeRatio, unit);
+}
+
 // =============================================================================
 // Room Tag Rendering
 // =============================================================================
@@ -261,12 +275,13 @@ export function createRoomTagObject(
     room: Room2D,
     zoom: number,
     unit: DisplayUnit,
+    paperToRealRatio: number,
     anchor: Point2D,
     options: RoomRenderOptions = {}
 ): fabric.Group {
-    const netAreaText = formatRoomArea(room.netArea ?? room.area, unit);
-    const grossAreaText = formatRoomArea(room.grossArea ?? room.area, unit);
-    const perimeterText = formatRoomPerimeter(room.perimeter, unit);
+    const netAreaText = formatRealRoomArea(room.netArea ?? room.area, unit, paperToRealRatio);
+    const grossAreaText = formatRealRoomArea(room.grossArea ?? room.area, unit, paperToRealRatio);
+    const perimeterText = formatRealRoomPerimeter(room.perimeter, unit, paperToRealRatio);
     const isSelected = options.selected === true;
     const hasChildren = room.childRoomIds.length > 0;
     const textLines = [
@@ -377,6 +392,7 @@ export function createRoomRenderObjects(
     room: Room2D,
     zoom: number,
     unit: DisplayUnit,
+    paperToRealRatio: number,
     roomById: Map<string, Room2D>,
     occupiedTagBounds: TagBounds[],
     options: RoomRenderOptions = {}
@@ -405,7 +421,7 @@ export function createRoomRenderObjects(
     }
 
     const preferredAnchor = getPreferredRoomTagAnchor(room, roomById);
-    const roomTag = createRoomTagObject(room, zoom, unit, preferredAnchor, {
+    const roomTag = createRoomTagObject(room, zoom, unit, paperToRealRatio, preferredAnchor, {
         selected: isSelected,
     });
     const tagBounds = resolveRoomTagPlacement(roomTag, room, roomById, occupiedTagBounds, zoom);
@@ -574,3 +590,4 @@ export function clearRenderedRooms(canvas: fabric.Canvas): void {
         });
     roomObjects.forEach((obj) => canvas.remove(obj));
 }
+

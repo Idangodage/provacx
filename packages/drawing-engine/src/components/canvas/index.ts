@@ -27,8 +27,18 @@ export * from './wallOperations';
 // Tool utilities
 export * from './toolUtils';
 
-// Scale constants
-export { MM_TO_PX, PX_TO_MM } from './scale';
+// Scale and unit utilities
+export {
+  MM_TO_PX,
+  PX_TO_MM,
+  toMillimeters,
+  fromMillimeters,
+  getUnitLabel,
+  getAdaptiveInterval,
+  getAdaptiveSteps,
+  type PaperUnit,
+  type LinearUnit,
+} from './scale';
 
 // Custom hooks
 export * from './hooks';

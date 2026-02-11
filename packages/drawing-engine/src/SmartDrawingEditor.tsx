@@ -68,6 +68,38 @@ export interface SmartDrawingEditorProps {
 type RibbonTone = 'default' | 'accent' | 'ghost';
 const PX_PER_INCH = 96;
 const MM_PER_INCH = 25.4;
+type PaperUnit = 'mm' | 'cm' | 'in' | 'm';
+type MeasurementMode = 'paper' | 'real';
+const mmToPx = (mm: number) => (mm / MM_PER_INCH) * PX_PER_INCH;
+
+const SCALE_PRESETS = [
+  '1:1',
+  '1:2',
+  '1:5',
+  '1:10',
+  '1:20',
+  '1:25',
+  '1:50',
+  '1:100',
+  '1:200',
+  '1:500',
+  '1:1000',
+  '2:1',
+  '5:1',
+  '10:1',
+] as const;
+
+function parseScaleRatio(input: string): { drawing: number; real: number } | null {
+  const parts = input.split(':');
+  if (parts.length !== 2) return null;
+  const drawingRaw = parts[0];
+  const realRaw = parts[1];
+  if (!drawingRaw || !realRaw) return null;
+  const drawing = Number.parseInt(drawingRaw, 10);
+  const real = Number.parseInt(realRaw, 10);
+  if (!Number.isFinite(drawing) || !Number.isFinite(real) || drawing <= 0 || real <= 0) return null;
+  return { drawing, real };
+}
 
 function RibbonButton({
   icon,
@@ -180,6 +212,8 @@ function EditorRibbon({
   pageConfig,
   pageLayouts,
   onPageChange,
+  scalePreset,
+  onScaleChange,
   readOnly,
 }: {
   projectId?: string;
@@ -197,6 +231,8 @@ function EditorRibbon({
   pageConfig: { width: number; height: number; orientation: 'portrait' | 'landscape' };
   pageLayouts: PageLayout[];
   onPageChange: (layoutId: string) => void;
+  scalePreset: string;
+  onScaleChange: (value: string) => void;
   readOnly: boolean;
 }) {
   const currentLayoutId =
@@ -269,11 +305,28 @@ function EditorRibbon({
             <option value="custom">Custom ({pageWidthMm}×{pageHeightMm} mm)</option>
           </select>
         </div>
+        <div className="flex items-center gap-2 ml-2">
+          <span className="text-[10px] font-medium text-slate-500 uppercase tracking-wide">Scale</span>
+          <select
+            value={scalePreset}
+            onChange={(e) => onScaleChange(e.target.value)}
+            className="h-7 rounded-md border border-amber-200/80 bg-white px-2 text-[10px] font-medium text-slate-600 focus:outline-none focus:ring-1 focus:ring-amber-300"
+          >
+            {SCALE_PRESETS.map((preset) => (
+              <option key={preset} value={preset}>
+                {preset}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
 
       <div className="flex-1" />
 
       <div className="hidden md:flex items-center gap-3 text-xs text-slate-500">
+        <span>
+          Scale: <span className="font-medium text-slate-700">{scalePreset}</span>
+        </span>
         {projectId && (
           <span>
             Project ID: <span className="font-medium text-slate-700">{projectId}</span>
@@ -284,12 +337,6 @@ function EditorRibbon({
         {saveState === 'error' && <span className="text-red-600">Save failed</span>}
       </div>
 
-      <RibbonButton
-        icon={<Settings size={16} />}
-        label="Settings"
-        onClick={() => {}}
-        tone="ghost"
-      />
     </div>
   );
 }
@@ -346,12 +393,12 @@ export function SmartDrawingEditor({
   className = '',
 }: SmartDrawingEditorProps) {
   const PAGE_LAYOUTS: PageLayout[] = [
-    { id: 'a4-portrait', label: 'A4 Portrait (210×297 mm)', width: 794, height: 1123, orientation: 'portrait' },
-    { id: 'a4-landscape', label: 'A4 Landscape (297×210 mm)', width: 1123, height: 794, orientation: 'landscape' },
-    { id: 'a3-portrait', label: 'A3 Portrait (297×420 mm)', width: 1122, height: 1587, orientation: 'portrait' },
-    { id: 'a3-landscape', label: 'A3 Landscape (420×297 mm)', width: 1587, height: 1122, orientation: 'landscape' },
-    { id: 'a2-portrait', label: 'A2 Portrait (420×594 mm)', width: 1587, height: 2245, orientation: 'portrait' },
-    { id: 'a2-landscape', label: 'A2 Landscape (594×420 mm)', width: 2245, height: 1587, orientation: 'landscape' },
+    { id: 'a4-portrait', label: 'A4 Portrait (210 x 297 mm)', width: mmToPx(210), height: mmToPx(297), orientation: 'portrait' },
+    { id: 'a4-landscape', label: 'A4 Landscape (297 x 210 mm)', width: mmToPx(297), height: mmToPx(210), orientation: 'landscape' },
+    { id: 'a3-portrait', label: 'A3 Portrait (297 x 420 mm)', width: mmToPx(297), height: mmToPx(420), orientation: 'portrait' },
+    { id: 'a3-landscape', label: 'A3 Landscape (420 x 297 mm)', width: mmToPx(420), height: mmToPx(297), orientation: 'landscape' },
+    { id: 'a2-portrait', label: 'A2 Portrait (420 x 594 mm)', width: mmToPx(420), height: mmToPx(594), orientation: 'portrait' },
+    { id: 'a2-landscape', label: 'A2 Landscape (594 x 420 mm)', width: mmToPx(594), height: mmToPx(420), orientation: 'landscape' },
   ];
   const [showLeftPanel, setShowLeftPanel] = useState(true);
   const [showRightPanel, setShowRightPanel] = useState(true);
@@ -359,11 +406,22 @@ export function SmartDrawingEditor({
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   const [mousePosition, setMousePosition] = useState<Point2D>({ x: 0, y: 0 });
   const [fabricCanvas, setFabricCanvas] = useState<fabric.Canvas | null>(null);
+  const [scaleDrawing, setScaleDrawing] = useState(1);
+  const [scaleReal, setScaleReal] = useState(50);
+  const paperUnit: PaperUnit = 'mm';
+  const rulerMode: MeasurementMode = 'paper';
+  const gridMode: MeasurementMode = 'paper';
+  const majorTickInterval = 10;
+  const tickSubdivisions = 10;
+  const majorGridSize = 10;
+  const gridSubdivisions = 10;
+  const showRulerLabels = true;
   const leftPanelRef = useRef<HTMLDivElement>(null);
   const minLeftWidth = 96;
   const [maxLeftWidth, setMaxLeftWidth] = useState(360);
   const [leftPanelWidth, setLeftPanelWidth] = useState(minLeftWidth);
   const [isResizingLeft, setIsResizingLeft] = useState(false);
+  const previousPaperScaleRef = useRef(scaleDrawing / scaleReal);
   const compactThreshold = Math.max(minLeftWidth + 32, Math.min(190, maxLeftWidth - 40));
   const isLeftCompact = leftPanelWidth <= compactThreshold;
 
@@ -372,6 +430,10 @@ export function SmartDrawingEditor({
     walls,
     rooms,
     sketches,
+    annotations,
+    dimensions,
+    symbols,
+    guides,
     hvacLayout,
     loadData,
     exportData,
@@ -387,6 +449,8 @@ export function SmartDrawingEditor({
     pageConfig,
     setZoom,
     setPanOffset,
+    displayUnit,
+    setWalls,
   } = store;
 
   const quickActions: { id: DrawingTool; label: string; icon: React.ReactNode }[] = [
@@ -395,6 +459,16 @@ export function SmartDrawingEditor({
     { id: 'dimension', label: 'Dimension', icon: <Ruler size={14} /> },
     { id: 'text', label: 'Text', icon: <Type size={14} /> },
   ];
+  const currentScaleRatio = `${scaleDrawing}:${scaleReal}`;
+  const currentScalePreset = SCALE_PRESETS.includes(currentScaleRatio as (typeof SCALE_PRESETS)[number])
+    ? currentScaleRatio
+    : '1:50';
+  const applyScaleRatio = useCallback((ratio: string) => {
+    const parsed = parseScaleRatio(ratio);
+    if (!parsed) return;
+    setScaleDrawing(parsed.drawing);
+    setScaleReal(parsed.real);
+  }, []);
 
   // Calculate total element count
   type HVACLayoutType = { indoorUnits?: unknown[]; ductSegments?: unknown[] } | null;
@@ -442,6 +516,100 @@ export function SmartDrawingEditor({
     if (!onSave || saveState === 'saving' || saveState === 'idle') return;
     setSaveState('idle');
   }, [walls, rooms, sketches, hvacLayout, onSave, saveState]);
+
+  // Keep paper size fixed; only scale drawn content when drawing scale changes.
+  useEffect(() => {
+    const nextPaperScale = scaleDrawing / scaleReal;
+    const prevPaperScale = previousPaperScaleRef.current;
+
+    if (
+      !Number.isFinite(nextPaperScale) ||
+      !Number.isFinite(prevPaperScale) ||
+      prevPaperScale <= 0 ||
+      nextPaperScale <= 0
+    ) {
+      previousPaperScaleRef.current = nextPaperScale;
+      return;
+    }
+
+    if (Math.abs(nextPaperScale - prevPaperScale) < 0.000001) return;
+
+    const scaleFactor = nextPaperScale / prevPaperScale;
+    previousPaperScaleRef.current = nextPaperScale;
+
+    const hasDrawableContent =
+      walls.length > 0 ||
+      sketches.length > 0 ||
+      annotations.length > 0 ||
+      dimensions.length > 0 ||
+      symbols.length > 0 ||
+      guides.length > 0;
+    if (!hasDrawableContent) return;
+
+    const scalePoint = (point: Point2D): Point2D => ({
+      x: point.x * scaleFactor,
+      y: point.y * scaleFactor,
+    });
+
+    if (walls.length > 0) {
+      const scaledWalls = walls.map((wall) => ({
+        ...wall,
+        start: scalePoint(wall.start),
+        end: scalePoint(wall.end),
+        thickness: wall.thickness * scaleFactor,
+        openings: wall.openings.map((opening) => ({
+          ...opening,
+          width: opening.width * scaleFactor,
+          height: opening.height * scaleFactor,
+          sillHeight: opening.sillHeight * scaleFactor,
+        })),
+      }));
+      setWalls(scaledWalls, `Scale drawing ${scaleDrawing}:${scaleReal}`);
+    }
+
+    useSmartDrawingStore.setState((state) => ({
+      sketches: state.sketches.map((sketch) => ({
+        ...sketch,
+        points: sketch.points.map(scalePoint),
+        controlPoints: sketch.controlPoints?.map((controlPoint) => ({
+          ...controlPoint,
+          position: scalePoint(controlPoint.position),
+          tangentIn: controlPoint.tangentIn ? scalePoint(controlPoint.tangentIn) : controlPoint.tangentIn,
+          tangentOut: controlPoint.tangentOut ? scalePoint(controlPoint.tangentOut) : controlPoint.tangentOut,
+        })),
+      })),
+      annotations: state.annotations.map((annotation) => ({
+        ...annotation,
+        position: scalePoint(annotation.position),
+        leaderPoints: annotation.leaderPoints?.map(scalePoint),
+      })),
+      dimensions: state.dimensions.map((dimension) => ({
+        ...dimension,
+        points: dimension.points.map(scalePoint),
+        textPosition: scalePoint(dimension.textPosition),
+        value: dimension.value * scaleFactor,
+      })),
+      symbols: state.symbols.map((symbol) => ({
+        ...symbol,
+        position: scalePoint(symbol.position),
+        scale: symbol.scale * scaleFactor,
+      })),
+      guides: state.guides.map((guide) => ({
+        ...guide,
+        offset: guide.offset * scaleFactor,
+      })),
+    }));
+  }, [
+    annotations.length,
+    dimensions.length,
+    guides.length,
+    scaleDrawing,
+    scaleReal,
+    setWalls,
+    sketches.length,
+    symbols.length,
+    walls,
+  ]);
 
   useEffect(() => {
     const handleOpenRoomProperties = () => {
@@ -645,6 +813,8 @@ export function SmartDrawingEditor({
           setZoom(1);
           setPanOffset({ x: 0, y: 0 });
         }}
+        scalePreset={currentScalePreset}
+        onScaleChange={applyScaleRatio}
         readOnly={readOnly}
       />
 
@@ -826,6 +996,17 @@ export function SmartDrawingEditor({
             showGrid={showGrid}
             showRulers={showRulers}
             snapToGrid={snapToGrid}
+            paperUnit={paperUnit}
+            realWorldUnit={displayUnit}
+            scaleDrawing={scaleDrawing}
+            scaleReal={scaleReal}
+            rulerMode={rulerMode}
+            majorTickInterval={majorTickInterval}
+            tickSubdivisions={tickSubdivisions}
+            showRulerLabels={showRulerLabels}
+            gridMode={gridMode}
+            majorGridSize={majorGridSize}
+            gridSubdivisions={gridSubdivisions}
           />
         </div>
 

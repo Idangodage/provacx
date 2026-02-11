@@ -41,6 +41,7 @@ export interface UseWallModeOptions {
     activeWallTypeId: string;
     wallTypeRegistry: WallTypeDefinition[];
     displayUnit: DisplayUnit;
+    paperToRealRatio: number;
     setWalls: (walls: Wall2D[], historyLabel?: string) => void;
     notifyRoomValidation: (messages: string[], title: string, blocking?: boolean) => void;
 }
@@ -54,6 +55,7 @@ export function useWallMode({
     activeWallTypeId,
     wallTypeRegistry,
     displayUnit,
+    paperToRealRatio,
     setWalls,
     notifyRoomValidation,
 }: UseWallModeOptions) {
@@ -125,7 +127,7 @@ export function useWallMode({
     );
 
     const handleMouseDown = useCallback(
-        (point: Point2D, isDoubleClick: boolean, shiftKey: boolean): boolean => {
+        (point: Point2D, isDoubleClick: boolean, shiftKey: boolean, totalThickness: number): boolean => {
             const canvas = fabricRef.current;
             if (!canvas) return false;
 
@@ -155,7 +157,17 @@ export function useWallMode({
                 wallChainStartRef.current = targetPoint;
                 wallChainActiveRef.current = true;
                 snapTargetRef.current = snapTarget;
-                clearDrawingPreview(canvas);
+                renderWallPreview(
+                    canvas,
+                    targetPoint,
+                    targetPoint,
+                    totalThickness,
+                    displayUnit,
+                    paperToRealRatio,
+                    activeWallTypeId,
+                    wallTypeRegistry,
+                    zoomRef.current
+                );
                 if (snapTarget) {
                     renderSnapHighlight(canvas, snapTarget.point, zoomRef.current);
                 } else {
@@ -170,7 +182,17 @@ export function useWallMode({
                 wallChainStartRef.current = targetPoint;
                 wallChainActiveRef.current = true;
                 snapTargetRef.current = snapTarget;
-                clearDrawingPreview(canvas);
+                renderWallPreview(
+                    canvas,
+                    targetPoint,
+                    targetPoint,
+                    totalThickness,
+                    displayUnit,
+                    paperToRealRatio,
+                    activeWallTypeId,
+                    wallTypeRegistry,
+                    zoomRef.current
+                );
                 if (snapTarget) {
                     renderSnapHighlight(canvas, snapTarget.point, zoomRef.current);
                 } else {
@@ -179,7 +201,17 @@ export function useWallMode({
             }
             return true;
         },
-        [fabricRef, wallsRef, zoomRef, commitWallSegment, endWallChain]
+        [
+            fabricRef,
+            wallsRef,
+            zoomRef,
+            commitWallSegment,
+            endWallChain,
+            displayUnit,
+            paperToRealRatio,
+            activeWallTypeId,
+            wallTypeRegistry,
+        ]
     );
 
     const handleMouseMove = useCallback(
@@ -189,8 +221,9 @@ export function useWallMode({
 
             const chainStart = wallChainStartRef.current;
             const snapThresholdScene = WALL_SNAP_THRESHOLD_PX / Math.max(zoomRef.current, 0.01);
-            let snapTarget = findWallSnapTarget(point, wallsRef.current, snapThresholdScene);
-            let targetPoint = snapTarget ? snapTarget.point : point;
+            let workingPoint = point;
+            let snapTarget = findWallSnapTarget(workingPoint, wallsRef.current, snapThresholdScene);
+            let targetPoint = snapTarget ? snapTarget.point : workingPoint;
 
             if (chainStart && shiftKey) {
                 const orthogonalPoint = applyOrthogonalConstraint(chainStart, targetPoint);
@@ -198,9 +231,11 @@ export function useWallMode({
                 if (orthogonalSnapTarget) {
                     snapTarget = orthogonalSnapTarget;
                     targetPoint = orthogonalSnapTarget.point;
+                    workingPoint = orthogonalPoint;
                 } else {
                     snapTarget = null;
                     targetPoint = orthogonalPoint;
+                    workingPoint = orthogonalPoint;
                 }
             }
 
@@ -210,13 +245,25 @@ export function useWallMode({
                 clearSnapHighlight(canvas);
             }
 
-            if (chainStart && distanceBetween(chainStart, targetPoint) > 0.001) {
-                renderWallPreview(canvas, chainStart, targetPoint, totalThickness, displayUnit);
+            if (chainStart) {
+                const previewPoint =
+                    distanceBetween(chainStart, targetPoint) <= 0.001 ? workingPoint : targetPoint;
+                renderWallPreview(
+                    canvas,
+                    chainStart,
+                    previewPoint,
+                    totalThickness,
+                    displayUnit,
+                    paperToRealRatio,
+                    activeWallTypeId,
+                    wallTypeRegistry,
+                    zoomRef.current
+                );
             } else {
                 clearDrawingPreview(canvas);
             }
         },
-        [fabricRef, wallsRef, zoomRef, displayUnit]
+        [fabricRef, wallsRef, zoomRef, displayUnit, paperToRealRatio, activeWallTypeId, wallTypeRegistry]
     );
 
     return {

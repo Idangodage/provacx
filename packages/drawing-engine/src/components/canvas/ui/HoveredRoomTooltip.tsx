@@ -7,7 +7,7 @@
 'use client';
 
 import type { DisplayUnit } from '../../../types';
-import { formatRoomArea, formatRoomPerimeter } from '../roomRendering';
+import { formatRealRoomArea, formatRealRoomPerimeter } from '../roomRendering';
 
 export interface HoveredRoomInfo {
     id: string;
@@ -21,9 +21,10 @@ export interface HoveredRoomInfo {
 export interface HoveredRoomTooltipProps {
     roomInfo: HoveredRoomInfo;
     displayUnit: DisplayUnit;
+    paperToRealRatio: number;
 }
 
-export function HoveredRoomTooltip({ roomInfo, displayUnit }: HoveredRoomTooltipProps) {
+export function HoveredRoomTooltip({ roomInfo, displayUnit, paperToRealRatio }: HoveredRoomTooltipProps) {
     return (
         <div
             className="pointer-events-none absolute z-[35] rounded-md border border-slate-300/90 bg-white/95 px-2 py-1.5 shadow-md"
@@ -34,10 +35,10 @@ export function HoveredRoomTooltip({ roomInfo, displayUnit }: HoveredRoomTooltip
         >
             <div className="text-[11px] font-semibold text-slate-800">{roomInfo.name}</div>
             <div className="text-[10px] text-slate-600">
-                Area: {formatRoomArea(roomInfo.area, displayUnit)}
+                Area: {formatRealRoomArea(roomInfo.area, displayUnit, paperToRealRatio)}
             </div>
             <div className="text-[10px] text-slate-600">
-                Perim: {formatRoomPerimeter(roomInfo.perimeter, displayUnit)}
+                Perim: {formatRealRoomPerimeter(roomInfo.perimeter, displayUnit, paperToRealRatio)}
             </div>
         </div>
     );

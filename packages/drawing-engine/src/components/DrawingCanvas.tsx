@@ -11,7 +11,7 @@ import * as fabric from 'fabric';
 import { useEffect, useRef, useCallback, useState, useMemo } from 'react';
 
 import { useSmartDrawingStore } from '../store';
-import type { Point2D, Wall2D, Room2D, WallTypeDefinition } from '../types';
+import type { DisplayUnit, Point2D, Wall2D, Room2D, WallTypeDefinition } from '../types';
 import { generateId } from '../utils/geometry';
 import { BUILT_IN_WALL_TYPE_IDS, getWallTypeById } from '../utils/wall-types';
 
@@ -38,6 +38,9 @@ import {
     getToolCursor,
     isDrawingTool,
     renderDrawingPreview,
+    MM_TO_PX,
+    toMillimeters,
+    type PaperUnit,
     // Hooks
     useCanvasKeyboard,
     useSelectMode,
@@ -60,6 +63,17 @@ export interface DrawingCanvasProps {
     snapToGrid?: boolean;
     showGrid?: boolean;
     showRulers?: boolean;
+    paperUnit?: PaperUnit;
+    realWorldUnit?: DisplayUnit;
+    scaleDrawing?: number;
+    scaleReal?: number;
+    rulerMode?: 'paper' | 'real';
+    majorTickInterval?: number;
+    tickSubdivisions?: number;
+    showRulerLabels?: boolean;
+    gridMode?: 'paper' | 'real';
+    majorGridSize?: number;
+    gridSubdivisions?: number;
     backgroundColor?: string;
     onCanvasReady?: (canvas: fabric.Canvas) => void;
 }
@@ -85,6 +99,17 @@ export function DrawingCanvas({
     snapToGrid,
     showGrid,
     showRulers,
+    paperUnit = 'mm',
+    realWorldUnit,
+    scaleDrawing = 1,
+    scaleReal = 50,
+    rulerMode = 'paper',
+    majorTickInterval = 10,
+    tickSubdivisions = 10,
+    showRulerLabels = true,
+    gridMode = 'paper',
+    majorGridSize = 10,
+    gridSubdivisions = 10,
     backgroundColor = 'transparent',
     onCanvasReady,
 }: DrawingCanvasProps) {
@@ -157,10 +182,23 @@ export function DrawingCanvas({
         () => getWallTypeById(activeWallTypeId, wallTypeRegistry),
         [activeWallTypeId, wallTypeRegistry]
     );
+    const resolvedRealWorldUnit = realWorldUnit ?? displayUnit;
     const resolvedGridSize = gridSize ?? storeGridSize ?? 20;
     const resolvedShowGrid = showGrid ?? storeShowGrid ?? true;
     const resolvedShowRulers = showRulers ?? storeShowRulers ?? true;
     const resolvedSnapToGrid = snapToGrid ?? storeSnapToGrid ?? true;
+    const safeScaleDrawing = Number.isFinite(scaleDrawing) && scaleDrawing > 0 ? scaleDrawing : 1;
+    const safeScaleReal = Number.isFinite(scaleReal) && scaleReal > 0 ? scaleReal : 1;
+    const paperPerRealRatio = safeScaleDrawing / safeScaleReal;
+    const realPerPaperRatio = safeScaleReal / safeScaleDrawing;
+    const safeGridSubdivisions = Number.isFinite(gridSubdivisions) && gridSubdivisions >= 1
+        ? Math.max(1, Math.floor(gridSubdivisions))
+        : 1;
+    const baseGridMajorMm = gridMode === 'real'
+        ? toMillimeters(majorGridSize, resolvedRealWorldUnit) * paperPerRealRatio
+        : toMillimeters(majorGridSize, paperUnit);
+    const configuredGridMajorScenePx = Math.max(baseGridMajorMm * MM_TO_PX, 0.5);
+    const effectiveSnapGridSize = Math.max(configuredGridMajorScenePx / safeGridSubdivisions, 0.5);
     const rulerSize = 24;
     const leftRulerWidth = Math.round(rulerSize * 1.2);
     const originOffset = resolvedShowRulers ? { x: leftRulerWidth, y: rulerSize } : { x: 0, y: 0 };
@@ -205,7 +243,7 @@ export function DrawingCanvas({
         wallsRef,
         roomsRef,
         resolvedSnapToGrid,
-        resolvedGridSize,
+        resolvedGridSize: effectiveSnapGridSize,
         setSelectedIds,
         notifyRoomValidation,
         setHoveredRoomInfo,
@@ -222,6 +260,7 @@ export function DrawingCanvas({
         activeWallTypeId,
         wallTypeRegistry,
         displayUnit,
+        paperToRealRatio: realPerPaperRatio,
         setWalls,
         notifyRoomValidation,
     });
@@ -377,7 +416,7 @@ export function DrawingCanvas({
         clearRenderedWalls(canvas);
         visibleWalls.forEach((wall) => {
             const { wallBody, dimensionLabel, overrideMarker } = createWallRenderObjects(
-                wall, displayUnit, wallTypeRegistry,
+                wall, displayUnit, realPerPaperRatio, wallTypeRegistry,
                 { selected: selectedWallIdSet.has(wall.id) || selectedRoomBoundarySet.has(wall.id) }
             );
             wallBody.selectable = allowSelection;
@@ -415,7 +454,7 @@ export function DrawingCanvas({
         clearRenderedRooms(canvas);
         orderedRooms.forEach((room) => {
             const { roomFill, roomTag, tagBounds } = createRoomRenderObjects(
-                room, zoom, displayUnit, roomById, occupiedTagBounds,
+                room, zoom, displayUnit, realPerPaperRatio, roomById, occupiedTagBounds,
                 { selected: selectedRoomId === room.id, hovered: hoveredRoomId === room.id }
             );
             roomFill.selectable = allowSelection;
@@ -504,9 +543,10 @@ export function DrawingCanvas({
 
             const viewportPoint = canvas.getViewportPoint(e.e);
             const scenePoint = canvas.getScenePoint(e.e);
+            const rawPoint = { x: scenePoint.x, y: scenePoint.y };
             const point = resolvedSnapToGrid
-                ? snapPointToGrid({ x: scenePoint.x, y: scenePoint.y }, resolvedGridSize)
-                : { x: scenePoint.x, y: scenePoint.y };
+                ? snapPointToGrid(rawPoint, effectiveSnapGridSize)
+                : rawPoint;
             setMousePosition({ x: scenePoint.x, y: scenePoint.y });
 
             const mouseEvent = e.e as MouseEvent;
@@ -536,7 +576,7 @@ export function DrawingCanvas({
             }
 
             if (tool === 'wall') {
-                wallMode.handleMouseDown(point, mouseEvent.detail >= 2, mouseEvent.shiftKey);
+                wallMode.handleMouseDown(point, mouseEvent.detail >= 2, mouseEvent.shiftKey, activeWallType.totalThickness);
                 return;
             }
 
@@ -546,7 +586,7 @@ export function DrawingCanvas({
                 setCanvasState(nextState);
             }
         },
-        [tool, roomDrawMode, resolvedSnapToGrid, resolvedGridSize, isSpacePressed, wallMode, roomMode]
+        [tool, roomDrawMode, resolvedSnapToGrid, effectiveSnapGridSize, isSpacePressed, wallMode, roomMode, activeWallType.totalThickness]
     );
 
     const handleMouseMove = useCallback(
@@ -556,9 +596,10 @@ export function DrawingCanvas({
 
             const viewportPoint = canvas.getViewportPoint(e.e);
             const scenePoint = canvas.getScenePoint(e.e);
+            const rawPoint = { x: scenePoint.x, y: scenePoint.y };
             const point = resolvedSnapToGrid
-                ? snapPointToGrid({ x: scenePoint.x, y: scenePoint.y }, resolvedGridSize)
-                : { x: scenePoint.x, y: scenePoint.y };
+                ? snapPointToGrid(rawPoint, effectiveSnapGridSize)
+                : rawPoint;
             setMousePosition({ x: scenePoint.x, y: scenePoint.y });
 
             const currentState = canvasStateRef.current;
@@ -600,7 +641,8 @@ export function DrawingCanvas({
 
             if (tool === 'wall') {
                 const mouseEvent = e.e as MouseEvent;
-                wallMode.handleMouseMove(point, mouseEvent.shiftKey, activeWallType.totalThickness);
+                // Use raw cursor position for smooth rubber-band preview from pivot to pointer.
+                wallMode.handleMouseMove(rawPoint, mouseEvent.shiftKey, activeWallType.totalThickness);
                 return;
             }
 
@@ -611,7 +653,7 @@ export function DrawingCanvas({
             setCanvasState(nextState);
             renderDrawingPreview(canvas, nextPoints, tool);
         },
-        [tool, roomDrawMode, resolvedSnapToGrid, resolvedGridSize, setPanOffset, activeWallType.totalThickness, isSpacePressed, selectMode, wallMode, roomMode, setHoveredElement]
+        [tool, roomDrawMode, resolvedSnapToGrid, effectiveSnapGridSize, setPanOffset, activeWallType.totalThickness, isSpacePressed, selectMode, wallMode, roomMode, setHoveredElement]
     );
 
     const handleMouseUp = useCallback(() => {
@@ -825,6 +867,13 @@ export function DrawingCanvas({
                     showGrid={resolvedShowGrid}
                     viewportWidth={hostWidth}
                     viewportHeight={hostHeight}
+                    gridMode={gridMode}
+                    paperUnit={paperUnit}
+                    realWorldUnit={resolvedRealWorldUnit}
+                    scaleDrawing={safeScaleDrawing}
+                    scaleReal={safeScaleReal}
+                    majorGridSize={majorGridSize}
+                    gridSubdivisions={safeGridSubdivisions}
                 />
                 <canvas ref={canvasRef} className="relative z-[2] block" />
             </div>
@@ -841,7 +890,11 @@ export function DrawingCanvas({
             {tool === 'room' && <RoomModeSelector roomDrawMode={roomDrawMode} onModeChange={setRoomDrawMode} />}
 
             {hoveredRoomInfo && tool === 'select' && !isSpacePressed && (
-                <HoveredRoomTooltip roomInfo={hoveredRoomInfo} displayUnit={displayUnit} />
+                <HoveredRoomTooltip
+                    roomInfo={hoveredRoomInfo}
+                    displayUnit={displayUnit}
+                    paperToRealRatio={realPerPaperRatio}
+                />
             )}
 
             <Rulers
@@ -855,8 +908,16 @@ export function DrawingCanvas({
                 rulerSize={rulerSize}
                 originOffset={originOffset}
                 gridSize={resolvedGridSize}
-                displayUnit={displayUnit}
+                displayUnit={resolvedRealWorldUnit}
                 mousePosition={mousePosition}
+                rulerMode={rulerMode}
+                paperUnit={paperUnit}
+                realWorldUnit={resolvedRealWorldUnit}
+                scaleDrawing={safeScaleDrawing}
+                scaleReal={safeScaleReal}
+                majorTickInterval={majorTickInterval}
+                tickSubdivisions={tickSubdivisions}
+                showRulerLabels={showRulerLabels}
             />
         </div>
     );

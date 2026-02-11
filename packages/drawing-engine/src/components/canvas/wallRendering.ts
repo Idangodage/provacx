@@ -10,7 +10,7 @@ import * as fabric from 'fabric';
 import type { Point2D, Wall2D, DisplayUnit, WallTypeDefinition } from '../../types';
 import { getWallTypeById, resolveWallLayers } from '../../utils/wall-types';
 
-import { formatWallLength, normalizeHexColor, tintHexColor, withPatternAlpha } from './formatting';
+import { formatRealWallLength, normalizeHexColor, tintHexColor, withPatternAlpha } from './formatting';
 import { distanceBetween } from './snapping';
 import { wallThicknessToCanvasPx } from './spatial-index';
 
@@ -207,6 +207,7 @@ function createWallFillStyle(wall: Wall2D, wallTypeRegistry: WallTypeDefinition[
 export function createWallRenderObjects(
     wall: Wall2D,
     unit: DisplayUnit,
+    paperToRealRatio: number,
     wallTypeRegistry: WallTypeDefinition[],
     options: WallRenderOptions = {}
 ): {
@@ -255,7 +256,7 @@ export function createWallRenderObjects(
         angleDeg += 180;
     }
 
-    const dimensionLabel = new fabric.Text(formatWallLength(length, unit), {
+    const dimensionLabel = new fabric.Text(formatRealWallLength(length, paperToRealRatio, unit), {
         left: midX,
         top: midY,
         originX: 'center',
@@ -411,26 +412,69 @@ export function renderWallPreview(
     start: Point2D,
     end: Point2D,
     thicknessMm: number,
-    unit: DisplayUnit
+    unit: DisplayUnit,
+    paperToRealRatio: number,
+    activeWallTypeId: string,
+    wallTypeRegistry: WallTypeDefinition[],
+    zoom: number
 ): void {
     clearDrawingPreview(canvas, false);
     const thicknessPx = wallThicknessToCanvasPx(thicknessMm);
     const polygonPoints = createWallPolygonPoints(start, end, thicknessPx);
-    if (!polygonPoints) {
-        canvas.requestRenderAll();
-        return;
+
+    if (polygonPoints) {
+        const previewWallFill = createWallFillStyle(
+            {
+                id: 'preview-wall',
+                start,
+                end,
+                thickness: thicknessMm,
+                height: 3000,
+                wallType: 'interior',
+                wallTypeId: activeWallTypeId,
+                openings: [],
+            },
+            wallTypeRegistry
+        );
+
+        const previewWall = new fabric.Polygon(polygonPoints, {
+            fill: previewWallFill,
+            stroke: '#1d4ed8',
+            strokeWidth: Math.max(1 / Math.max(zoom, 0.01), 1),
+            selectable: false,
+            evented: false,
+            objectCaching: false,
+            opacity: 0.62,
+        });
+        (previewWall as unknown as { name?: string }).name = 'drawing-preview';
+        canvas.add(previewWall);
     }
 
-    const previewWall = new fabric.Polygon(polygonPoints, {
-        fill: 'rgba(37, 99, 235, 0.35)',
-        stroke: '#1d4ed8',
-        strokeWidth: 1,
+    const previewCenterline = new fabric.Line([start.x, start.y, end.x, end.y], {
+        stroke: '#0f3ebf',
+        strokeWidth: Math.max(1.2 / Math.max(zoom, 0.01), 1),
+        strokeDashArray: [10 / Math.max(zoom, 0.01), 6 / Math.max(zoom, 0.01)],
         selectable: false,
         evented: false,
         objectCaching: false,
     });
-    (previewWall as unknown as { name?: string }).name = 'drawing-preview';
-    canvas.add(previewWall);
+    (previewCenterline as unknown as { name?: string }).name = 'drawing-preview';
+    canvas.add(previewCenterline);
+
+    const pivotRadius = Math.max(4 / Math.max(zoom, 0.01), 2);
+    const pivotMarker = new fabric.Circle({
+        left: start.x - pivotRadius,
+        top: start.y - pivotRadius,
+        radius: pivotRadius,
+        fill: '#f59e0b',
+        stroke: '#ffffff',
+        strokeWidth: Math.max(1 / Math.max(zoom, 0.01), 0.8),
+        selectable: false,
+        evented: false,
+        objectCaching: false,
+    });
+    (pivotMarker as unknown as { name?: string }).name = 'drawing-preview';
+    canvas.add(pivotMarker);
 
     const length = distanceBetween(start, end);
     const midX = (start.x + end.x) / 2;
@@ -438,7 +482,7 @@ export function renderWallPreview(
     let angleDeg = (Math.atan2(end.y - start.y, end.x - start.x) * 180) / Math.PI;
     if (angleDeg > 90 || angleDeg < -90) angleDeg += 180;
 
-    const previewLabel = new fabric.Text(formatWallLength(length, unit), {
+    const previewLabel = new fabric.Text(formatRealWallLength(length, paperToRealRatio, unit), {
         left: midX,
         top: midY,
         originX: 'center',
@@ -452,6 +496,12 @@ export function renderWallPreview(
         name: 'drawing-preview',
     });
     canvas.add(previewLabel);
+
+    const canvasWithBring = canvas as unknown as { bringObjectToFront?: (obj: fabric.Object) => void };
+    [previewCenterline, pivotMarker, previewLabel].forEach((obj) => {
+        canvasWithBring.bringObjectToFront?.(obj);
+    });
+
     canvas.requestRenderAll();
 }
 

@@ -40,6 +40,16 @@ export function formatWallLength(lengthScenePx: number, unit: DisplayUnit = 'mm'
     return formatDistance(mm, unit);
 }
 
+export function formatRealWallLength(
+    lengthScenePx: number,
+    paperToRealRatio: number,
+    unit: DisplayUnit = 'mm'
+): string {
+    const safeRatio = Number.isFinite(paperToRealRatio) && paperToRealRatio > 0 ? paperToRealRatio : 1;
+    const mm = lengthScenePx * PX_TO_MM * safeRatio;
+    return formatDistance(mm, unit);
+}
+
 export function formatArea(areaMm2: number, unit: DisplayUnit = 'mm'): string {
     switch (unit) {
         case 'mm':
