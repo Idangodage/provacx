@@ -436,10 +436,14 @@ function orientationForOrderedComponent(
   }
 
   const fallbackCycleInterior: WallSide = winding === 'counter-clockwise' ? 'left' : 'right';
+  // For open chains, keep one consistent interior side across the component.
+  // Using accumulated cross sum can flip orientation while the user is still drawing,
+  // which causes temporary corner/offset jumps. First meaningful turn is more stable.
+  const firstTurn = crosses.find((value) => Math.abs(value) > EPSILON);
   const fallbackChainInterior: WallSide =
-    Math.abs(crossSum) <= EPSILON
+    firstTurn === undefined
       ? options.defaultInteriorSideForOpenChains
-      : crossSum > 0
+      : firstTurn > 0
         ? 'right'
         : 'left';
 
@@ -472,14 +476,9 @@ function orientationForOrderedComponent(
         options.probeOffsetPx
       );
     } else {
-      const prevCross = i > 0 ? crosses[i - 1] ?? 0 : 0;
-      const nextCross = i < crosses.length ? crosses[i] ?? 0 : 0;
-      const localCross = prevCross + nextCross;
-      if (Math.abs(localCross) <= EPSILON) {
-        interiorInTraversal = fallbackChainInterior;
-      } else {
-        interiorInTraversal = localCross > 0 ? 'right' : 'left';
-      }
+      // Open-chain components use a single side selection for all segments to
+      // avoid per-segment side flips before polygon closure.
+      interiorInTraversal = fallbackChainInterior;
     }
 
     const traversalDirection = normalize({

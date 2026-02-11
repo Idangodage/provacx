@@ -28,6 +28,7 @@ import {
     WALL_SPATIAL_INDEX_CELL_PX,
     WALL_VIEWPORT_MARGIN_PX,
     createWallRenderObjects,
+    buildWallBoundaryLookup,
     createWallJoinRenderObjects,
     createWallChainDimensionObjects,
     createWallOrientationIndicatorObjects,
@@ -456,6 +457,10 @@ export function DrawingCanvas({
         const selectedRoom = rooms.find((r) => selectedIds.includes(r.id));
         const selectedRoomBoundarySet = new Set(selectedRoom?.wallIds ?? []);
         const wallLookup = new Map(walls.map((wall) => [wall.id, wall]));
+        const roomPolygons = rooms
+            .map((room) => room.vertices)
+            .filter((vertices) => vertices.length >= 3);
+        const wallBoundaryLookup = buildWallBoundaryLookup(walls, realPerPaperRatio, roomPolygons);
         const visibleWalls = queryWallsInBounds(
             wallSpatialIndex,
             visibleSceneBounds,
@@ -474,6 +479,8 @@ export function DrawingCanvas({
                     selected: selectedWallIdSet.has(wall.id) || selectedRoomBoundarySet.has(wall.id),
                     zoom,
                     wallLookup,
+                    roomPolygons,
+                    wallBoundaryLookup,
                 }
             );
             wallBody.selectable = allowSelection;
@@ -494,7 +501,8 @@ export function DrawingCanvas({
             visibleWalls,
             realPerPaperRatio,
             wallTypeRegistry,
-            new Set([...selectedWallIdSet, ...selectedRoomBoundarySet])
+            new Set([...selectedWallIdSet, ...selectedRoomBoundarySet]),
+            wallBoundaryLookup
         );
         wallJoinObjects.forEach((joinObject) => {
             joinObject.selectable = false;
@@ -511,7 +519,8 @@ export function DrawingCanvas({
             visibleWalls,
             displayUnit,
             realPerPaperRatio,
-            zoom
+            zoom,
+            roomPolygons
         );
         const allDimensionObjects = [...renderedWallLabels, ...wallChainDimensions];
         resolveWallDimensionCollisions(allDimensionObjects, zoom);

@@ -110,9 +110,15 @@ export function useWallMode({
             wallTypeRegistry,
             previewState.interiorSideHint,
             zoomRef.current,
-            true
+            true,
+            {
+                walls: wallsRef.current,
+                roomPolygons: roomsRef.current
+                    .map((room) => room.vertices)
+                    .filter((vertices) => vertices.length >= 3),
+            }
         );
-    }, [fabricRef, zoomRef, displayUnit, paperToRealRatio, activeWallTypeId, wallTypeRegistry]);
+    }, [fabricRef, zoomRef, displayUnit, paperToRealRatio, activeWallTypeId, wallTypeRegistry, wallsRef, roomsRef]);
 
     const schedulePreviewFrame = useCallback(() => {
         if (typeof window === 'undefined') return;
