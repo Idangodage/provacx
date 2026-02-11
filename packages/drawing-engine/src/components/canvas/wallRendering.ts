@@ -11,7 +11,6 @@ import type { Point2D, Wall2D, DisplayUnit, WallTypeDefinition } from '../../typ
 import { getWallTypeById, resolveWallLayers } from '../../utils/wall-types';
 
 import { formatRealWallLength, normalizeHexColor, tintHexColor, withPatternAlpha } from './formatting';
-import { distanceBetween } from './snapping';
 import { wallThicknessToCanvasPx } from './spatial-index';
 
 // =============================================================================
@@ -403,31 +402,54 @@ export function clearSnapHighlight(canvas: fabric.Canvas, shouldRender = true): 
     }
 }
 
-// =============================================================================
-// Wall Preview Rendering
-// =============================================================================
+const WALL_RUBBER_BAND_PREVIEW_NAME = 'wall-rubber-band-preview';
+const WALL_RUBBER_BAND_PREVIEW_BODY_NAME = 'wall-rubber-band-preview-body';
+const WALL_RUBBER_BAND_PREVIEW_LABEL_NAME = 'wall-rubber-band-preview-label';
 
-export function renderWallPreview(
+function getWallRubberBandPreview(canvas: fabric.Canvas): fabric.Line | null {
+    const object = canvas
+        .getObjects()
+        .find((obj) => (obj as unknown as { name?: string }).name === WALL_RUBBER_BAND_PREVIEW_NAME);
+    return (object as fabric.Line | undefined) ?? null;
+}
+
+function getWallRubberBandPreviewBody(canvas: fabric.Canvas): fabric.Polygon | null {
+    const object = canvas
+        .getObjects()
+        .find((obj) => (obj as unknown as { name?: string }).name === WALL_RUBBER_BAND_PREVIEW_BODY_NAME);
+    return (object as fabric.Polygon | undefined) ?? null;
+}
+
+function getWallRubberBandPreviewLabel(canvas: fabric.Canvas): fabric.Text | null {
+    const object = canvas
+        .getObjects()
+        .find((obj) => (obj as unknown as { name?: string }).name === WALL_RUBBER_BAND_PREVIEW_LABEL_NAME);
+    return (object as fabric.Text | undefined) ?? null;
+}
+
+export function renderWallRubberBandPreview(
     canvas: fabric.Canvas,
-    start: Point2D,
-    end: Point2D,
+    anchor: Point2D,
+    cursor: Point2D,
     thicknessMm: number,
     unit: DisplayUnit,
     paperToRealRatio: number,
     activeWallTypeId: string,
     wallTypeRegistry: WallTypeDefinition[],
-    zoom: number
+    zoom: number,
+    shouldRender = true
 ): void {
-    clearDrawingPreview(canvas, false);
-    const thicknessPx = wallThicknessToCanvasPx(thicknessMm);
-    const polygonPoints = createWallPolygonPoints(start, end, thicknessPx);
+    const safeZoom = Math.max(zoom, 0.01);
+    const previewThicknessPx = wallThicknessToCanvasPx(thicknessMm);
+    const previewPolygonPoints = createWallPolygonPoints(anchor, cursor, previewThicknessPx);
 
-    if (polygonPoints) {
-        const previewWallFill = createWallFillStyle(
+    let body = getWallRubberBandPreviewBody(canvas);
+    if (previewPolygonPoints) {
+        const previewFill = createWallFillStyle(
             {
-                id: 'preview-wall',
-                start,
-                end,
+                id: 'wall-rubber-band-preview',
+                start: anchor,
+                end: cursor,
                 thickness: thicknessMm,
                 height: 3000,
                 wallType: 'interior',
@@ -436,94 +458,180 @@ export function renderWallPreview(
             },
             wallTypeRegistry
         );
+        const styleKey = `${activeWallTypeId}:${Math.round(thicknessMm)}`;
 
-        const previewWall = new fabric.Polygon(polygonPoints, {
-            fill: previewWallFill,
-            stroke: '#1d4ed8',
-            strokeWidth: Math.max(1 / Math.max(zoom, 0.01), 1),
+        if (!body) {
+            body = new fabric.Polygon(previewPolygonPoints, {
+                fill: previewFill,
+                stroke: '#5f7088',
+                strokeWidth: Math.max(1.2 / safeZoom, 0.8),
+                selectable: false,
+                evented: false,
+                objectCaching: false,
+                opacity: 0.78,
+            });
+            (body as unknown as { name?: string }).name = WALL_RUBBER_BAND_PREVIEW_BODY_NAME;
+            (body as unknown as { styleKey?: string }).styleKey = styleKey;
+            canvas.add(body);
+        } else {
+            body.set({
+                strokeWidth: Math.max(1.2 / safeZoom, 0.8),
+                opacity: 0.78,
+                visible: true,
+            });
+            (body as unknown as { points: Point2D[] }).points = previewPolygonPoints;
+            const bodyMeta = body as unknown as { styleKey?: string };
+            if (bodyMeta.styleKey !== styleKey) {
+                body.set({ fill: previewFill });
+                bodyMeta.styleKey = styleKey;
+            }
+            body.setCoords();
+        }
+    } else if (body) {
+        body.set({ visible: false });
+    }
+
+    let line = getWallRubberBandPreview(canvas);
+
+    if (!line) {
+        line = new fabric.Line([anchor.x, anchor.y, cursor.x, cursor.y], {
+            stroke: '#2563eb',
+            strokeWidth: Math.max(1.8 / safeZoom, 1),
+            strokeDashArray: [8 / safeZoom, 6 / safeZoom],
             selectable: false,
             evented: false,
             objectCaching: false,
-            opacity: 0.62,
         });
-        (previewWall as unknown as { name?: string }).name = 'drawing-preview';
-        canvas.add(previewWall);
+        (line as unknown as { name?: string }).name = WALL_RUBBER_BAND_PREVIEW_NAME;
+        canvas.add(line);
+    } else {
+        line.set({
+            x1: anchor.x,
+            y1: anchor.y,
+            x2: cursor.x,
+            y2: cursor.y,
+            strokeWidth: Math.max(1.8 / safeZoom, 1),
+            strokeDashArray: [8 / safeZoom, 6 / safeZoom],
+            visible: true,
+        });
+        line.setCoords();
     }
 
-    const previewCenterline = new fabric.Line([start.x, start.y, end.x, end.y], {
-        stroke: '#0f3ebf',
-        strokeWidth: Math.max(1.2 / Math.max(zoom, 0.01), 1),
-        strokeDashArray: [10 / Math.max(zoom, 0.01), 6 / Math.max(zoom, 0.01)],
-        selectable: false,
-        evented: false,
-        objectCaching: false,
-    });
-    (previewCenterline as unknown as { name?: string }).name = 'drawing-preview';
-    canvas.add(previewCenterline);
+    const dx = cursor.x - anchor.x;
+    const dy = cursor.y - anchor.y;
+    const length = Math.hypot(dx, dy);
+    const midX = (anchor.x + cursor.x) / 2;
+    const midY = (anchor.y + cursor.y) / 2;
+    let angleDeg = (Math.atan2(dy, dx) * 180) / Math.PI;
+    if (angleDeg > 90 || angleDeg < -90) {
+        angleDeg += 180;
+    }
 
-    const pivotRadius = Math.max(4 / Math.max(zoom, 0.01), 2);
-    const pivotMarker = new fabric.Circle({
-        left: start.x - pivotRadius,
-        top: start.y - pivotRadius,
-        radius: pivotRadius,
-        fill: '#f59e0b',
-        stroke: '#ffffff',
-        strokeWidth: Math.max(1 / Math.max(zoom, 0.01), 0.8),
-        selectable: false,
-        evented: false,
-        objectCaching: false,
-    });
-    (pivotMarker as unknown as { name?: string }).name = 'drawing-preview';
-    canvas.add(pivotMarker);
-
-    const length = distanceBetween(start, end);
-    const midX = (start.x + end.x) / 2;
-    const midY = (start.y + end.y) / 2;
-    let angleDeg = (Math.atan2(end.y - start.y, end.x - start.x) * 180) / Math.PI;
-    if (angleDeg > 90 || angleDeg < -90) angleDeg += 180;
-
-    const previewLabel = new fabric.Text(formatRealWallLength(length, paperToRealRatio, unit), {
-        left: midX,
-        top: midY,
-        originX: 'center',
-        originY: 'center',
-        angle: angleDeg,
-        fontSize: 10,
-        fill: '#1d4ed8',
-        backgroundColor: 'rgba(255,255,255,0.75)',
-        selectable: false,
-        evented: false,
-        name: 'drawing-preview',
-    });
-    canvas.add(previewLabel);
+    let label = getWallRubberBandPreviewLabel(canvas);
+    if (length > 0.001) {
+        const labelText = formatRealWallLength(length, paperToRealRatio, unit);
+        if (!label) {
+            label = new fabric.Text(labelText, {
+                left: midX,
+                top: midY,
+                originX: 'center',
+                originY: 'center',
+                angle: angleDeg,
+                fontSize: 10,
+                fill: '#0f3ebf',
+                backgroundColor: 'rgba(255,255,255,0.8)',
+                selectable: false,
+                evented: false,
+                objectCaching: false,
+            });
+            (label as unknown as { name?: string }).name = WALL_RUBBER_BAND_PREVIEW_LABEL_NAME;
+            canvas.add(label);
+        } else {
+            label.set({
+                text: labelText,
+                left: midX,
+                top: midY,
+                angle: angleDeg,
+                visible: true,
+            });
+            label.setCoords();
+        }
+    } else if (label) {
+        label.set({ visible: false });
+    }
 
     const canvasWithBring = canvas as unknown as { bringObjectToFront?: (obj: fabric.Object) => void };
-    [previewCenterline, pivotMarker, previewLabel].forEach((obj) => {
-        canvasWithBring.bringObjectToFront?.(obj);
-    });
+    if (body) {
+        canvasWithBring.bringObjectToFront?.(body);
+    }
+    canvasWithBring.bringObjectToFront?.(line);
+    if (label) {
+        canvasWithBring.bringObjectToFront?.(label);
+    }
 
-    canvas.requestRenderAll();
+    if (shouldRender) {
+        canvas.requestRenderAll();
+    }
 }
 
-export function renderSnapHighlight(canvas: fabric.Canvas, point: Point2D, zoom: number): void {
-    clearSnapHighlight(canvas, false);
+export function clearWallRubberBandPreview(canvas: fabric.Canvas, shouldRender = true): void {
+    const line = getWallRubberBandPreview(canvas);
+    const body = getWallRubberBandPreviewBody(canvas);
+    const label = getWallRubberBandPreviewLabel(canvas);
+    if (line) {
+        canvas.remove(line);
+    }
+    if (body) {
+        canvas.remove(body);
+    }
+    if (label) {
+        canvas.remove(label);
+    }
+    if (shouldRender) {
+        canvas.requestRenderAll();
+    }
+}
 
-    const radius = Math.max(3 / Math.max(zoom, 0.01), 1.5);
-    const highlight = new fabric.Circle({
-        left: point.x - radius,
-        top: point.y - radius,
-        radius,
-        fill: 'rgba(76, 175, 80, 0.45)',
-        stroke: '#2e7d32',
-        strokeWidth: 1 / Math.max(zoom, 0.01),
-        selectable: false,
-        evented: false,
-        name: 'wall-snap-highlight',
-    });
-    canvas.add(highlight);
+export function renderSnapHighlight(
+    canvas: fabric.Canvas,
+    point: Point2D,
+    zoom: number,
+    shouldRender = true
+): void {
+    const safeZoom = Math.max(zoom, 0.01);
+    const radius = Math.max(3 / safeZoom, 1.5);
+    let highlight = canvas
+        .getObjects()
+        .find((obj) => (obj as unknown as { name?: string }).name === 'wall-snap-highlight') as fabric.Circle | undefined;
+
+    if (!highlight) {
+        highlight = new fabric.Circle({
+            left: point.x - radius,
+            top: point.y - radius,
+            radius,
+            fill: 'rgba(76, 175, 80, 0.45)',
+            stroke: '#2e7d32',
+            strokeWidth: 1 / safeZoom,
+            selectable: false,
+            evented: false,
+            name: 'wall-snap-highlight',
+        });
+        canvas.add(highlight);
+    } else {
+        highlight.set({
+            left: point.x - radius,
+            top: point.y - radius,
+            radius,
+            strokeWidth: 1 / safeZoom,
+            visible: true,
+        });
+        highlight.setCoords();
+    }
     const canvasWithBring = canvas as unknown as { bringObjectToFront?: (obj: fabric.Object) => void };
     canvasWithBring.bringObjectToFront?.(highlight);
-    canvas.requestRenderAll();
+    if (shouldRender) {
+        canvas.requestRenderAll();
+    }
 }
 
 export function bringTransientOverlaysToFront(canvas: fabric.Canvas): void {

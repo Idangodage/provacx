@@ -6,7 +6,7 @@
 
 import * as fabric from 'fabric';
 
-import type { Point2D, Room2D, DisplayUnit } from '../../types';
+import type { Point2D, Room2D, DisplayUnit, Wall2D, WallTypeDefinition } from '../../types';
 
 import { formatDistance } from './formatting';
 import {
@@ -14,7 +14,7 @@ import {
     calculatePolygonBounds,
     isPointInsidePolygon,
 } from './geometry';
-import { clearDrawingPreview } from './wallRendering';
+import { clearDrawingPreview, createWallRenderObjects } from './wallRendering';
 
 // Re-export from geometry for backward compatibility
 export { getRoomHierarchyDepth } from './geometry';
@@ -502,27 +502,111 @@ function tagBoundsOverlap(a: TagBounds, b: TagBounds): boolean {
 // Room Preview Rendering
 // =============================================================================
 
-export function renderRoomRectanglePreview(canvas: fabric.Canvas, start: Point2D, end: Point2D): void {
+function buildPreviewWall(
+    id: string,
+    start: Point2D,
+    end: Point2D,
+    thickness: number,
+    activeWallTypeId: string
+): Wall2D {
+    return {
+        id,
+        start,
+        end,
+        thickness,
+        height: 3000,
+        wallType: 'interior',
+        wallTypeId: activeWallTypeId,
+        openings: [],
+    };
+}
+
+function renderPreviewWallSegments(
+    canvas: fabric.Canvas,
+    segments: Array<{ start: Point2D; end: Point2D }>,
+    wallThicknessMm: number,
+    activeWallTypeId: string,
+    wallTypeRegistry: WallTypeDefinition[],
+    unit: DisplayUnit,
+    paperToRealRatio: number
+): void {
+    segments.forEach(({ start, end }, index) => {
+        if (Math.hypot(end.x - start.x, end.y - start.y) <= 0.001) return;
+        const previewWall = buildPreviewWall(
+            `room-preview-wall-${index}`,
+            start,
+            end,
+            wallThicknessMm,
+            activeWallTypeId
+        );
+        const { wallBody, dimensionLabel } = createWallRenderObjects(
+            previewWall,
+            unit,
+            paperToRealRatio,
+            wallTypeRegistry
+        );
+        (wallBody as unknown as { name?: string }).name = 'drawing-preview';
+        wallBody.selectable = false;
+        wallBody.evented = false;
+        wallBody.objectCaching = false;
+        (dimensionLabel as unknown as { name?: string }).name = 'drawing-preview';
+        dimensionLabel.selectable = false;
+        dimensionLabel.evented = false;
+        dimensionLabel.objectCaching = false;
+        canvas.add(wallBody);
+        canvas.add(dimensionLabel);
+    });
+}
+
+export function renderRoomRectanglePreview(
+    canvas: fabric.Canvas,
+    start: Point2D,
+    end: Point2D,
+    unit: DisplayUnit = 'mm',
+    paperToRealRatio = 1,
+    wallThicknessMm = 180,
+    activeWallTypeId = 'cement-block-wall',
+    wallTypeRegistry: WallTypeDefinition[] = []
+): void {
     clearDrawingPreview(canvas, false);
     const vertices = buildRectangleVertices(start, end);
     const polygon = new fabric.Polygon(vertices, {
-        fill: 'rgba(30, 64, 175, 0.12)',
-        stroke: '#1d4ed8',
-        strokeWidth: 1.5,
-        strokeDashArray: [6, 4],
+        fill: 'rgba(30, 64, 175, 0.08)',
+        stroke: 'rgba(30, 64, 175, 0)',
+        strokeWidth: 0,
         selectable: false,
         evented: false,
         objectCaching: false,
     });
     (polygon as unknown as { name?: string }).name = 'drawing-preview';
     canvas.add(polygon);
+
+    renderPreviewWallSegments(
+        canvas,
+        [
+            { start: vertices[0]!, end: vertices[1]! },
+            { start: vertices[1]!, end: vertices[2]! },
+            { start: vertices[2]!, end: vertices[3]! },
+            { start: vertices[3]!, end: vertices[0]! },
+        ],
+        wallThicknessMm,
+        activeWallTypeId,
+        wallTypeRegistry,
+        unit,
+        paperToRealRatio
+    );
     canvas.requestRenderAll();
 }
 
 export function renderRoomPolygonPreview(
     canvas: fabric.Canvas,
     vertices: Point2D[],
-    hoverPoint: Point2D | null
+    hoverPoint: Point2D | null,
+    unit: DisplayUnit = 'mm',
+    paperToRealRatio = 1,
+    wallThicknessMm = 180,
+    activeWallTypeId = 'cement-block-wall',
+    wallTypeRegistry: WallTypeDefinition[] = []
 ): void {
     clearDrawingPreview(canvas, false);
     if (vertices.length === 0) {
@@ -530,11 +614,59 @@ export function renderRoomPolygonPreview(
         return;
     }
 
-    if (vertices.length > 1) {
-        const closedPreview = hoverPoint ? [...vertices, hoverPoint] : [...vertices];
-        const polyline = new fabric.Polyline(closedPreview, {
+    if (hoverPoint) {
+        const rubberBandPoints = [...vertices, hoverPoint];
+        const polyline = new fabric.Polyline(rubberBandPoints, {
             stroke: '#1d4ed8',
-            strokeWidth: 1.5,
+            strokeWidth: 0.5,
+            strokeDashArray: [6, 4],
+            fill: vertices.length >= 2 ? 'rgba(30, 64, 175, 0.08)' : 'transparent',
+            selectable: false,
+            evented: false,
+            objectCaching: false,
+        });
+        (polyline as unknown as { name?: string }).name = 'drawing-preview';
+        canvas.add(polyline);
+
+        if (vertices.length >= 2) {
+            const firstVertex = vertices[0];
+            if (firstVertex) {
+                const closureGuide = new fabric.Line(
+                    [hoverPoint.x, hoverPoint.y, firstVertex.x, firstVertex.y],
+                    {
+                        stroke: 'rgba(29, 78, 216, 0.45)',
+                        strokeWidth: 1.1,
+                        strokeDashArray: [4, 5],
+                        selectable: false,
+                        evented: false,
+                        objectCaching: false,
+                    }
+                );
+                (closureGuide as unknown as { name?: string }).name = 'drawing-preview';
+                canvas.add(closureGuide);
+            }
+        }
+
+        const segments: Array<{ start: Point2D; end: Point2D }> = [];
+        for (let i = 0; i < rubberBandPoints.length - 1; i += 1) {
+            const segStart = rubberBandPoints[i];
+            const segEnd = rubberBandPoints[i + 1];
+            if (!segStart || !segEnd) continue;
+            segments.push({ start: segStart, end: segEnd });
+        }
+        renderPreviewWallSegments(
+            canvas,
+            segments,
+            wallThicknessMm,
+            activeWallTypeId,
+            wallTypeRegistry,
+            unit,
+            paperToRealRatio
+        );
+    } else if (vertices.length > 1) {
+        const polyline = new fabric.Polyline([...vertices], {
+            stroke: '#1d4ed8',
+            strokeWidth: 0.5,
             strokeDashArray: [6, 4],
             fill: 'rgba(30, 64, 175, 0.08)',
             selectable: false,
@@ -543,6 +675,23 @@ export function renderRoomPolygonPreview(
         });
         (polyline as unknown as { name?: string }).name = 'drawing-preview';
         canvas.add(polyline);
+
+        const segments: Array<{ start: Point2D; end: Point2D }> = [];
+        for (let i = 0; i < vertices.length - 1; i += 1) {
+            const segStart = vertices[i];
+            const segEnd = vertices[i + 1];
+            if (!segStart || !segEnd) continue;
+            segments.push({ start: segStart, end: segEnd });
+        }
+        renderPreviewWallSegments(
+            canvas,
+            segments,
+            wallThicknessMm,
+            activeWallTypeId,
+            wallTypeRegistry,
+            unit,
+            paperToRealRatio
+        );
     }
 
     vertices.forEach((vertex) => {

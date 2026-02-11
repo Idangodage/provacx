@@ -122,6 +122,8 @@ export function DrawingCanvas({
     const panOffsetRef = useRef<Point2D>({ x: 0, y: 0 });
     const wallsRef = useRef<Wall2D[]>([]);
     const roomsRef = useRef<Room2D[]>([]);
+    const mousePositionRef = useRef<Point2D>({ x: 0, y: 0 });
+    const mousePositionFrameRef = useRef<number | null>(null);
     const canvasStateRef = useRef<CanvasState>({
         isPanning: false,
         lastPanPoint: null,
@@ -160,6 +162,7 @@ export function DrawingCanvas({
         walls,
         rooms,
         selectedElementIds: selectedIds,
+        hoveredElementId,
         activeLayerId,
         pageConfig,
         gridSize: storeGridSize,
@@ -220,6 +223,25 @@ export function DrawingCanvas({
         [walls]
     );
 
+    const queueMousePositionUpdate = useCallback((position: Point2D) => {
+        mousePositionRef.current = position;
+        if (typeof window === 'undefined') return;
+        if (mousePositionFrameRef.current !== null) return;
+        mousePositionFrameRef.current = window.requestAnimationFrame(() => {
+            mousePositionFrameRef.current = null;
+            setMousePosition(mousePositionRef.current);
+        });
+    }, []);
+
+    useEffect(() => {
+        return () => {
+            if (mousePositionFrameRef.current !== null && typeof window !== 'undefined') {
+                window.cancelAnimationFrame(mousePositionFrameRef.current);
+                mousePositionFrameRef.current = null;
+            }
+        };
+    }, []);
+
     // Helper callback
     const notifyRoomValidation = useCallback(
         (messages: string[], title: string, blocking = false) => {
@@ -273,6 +295,8 @@ export function DrawingCanvas({
         activeLayerId,
         activeWallTypeId,
         wallTypeRegistry,
+        displayUnit,
+        paperToRealRatio: realPerPaperRatio,
         setWalls,
         notifyRoomValidation,
     });
@@ -503,7 +527,15 @@ export function DrawingCanvas({
     // Tool state cleanup
     useEffect(() => {
         if (tool !== 'wall') wallMode.endWallChain();
-        if (tool !== 'room') roomMode.clearRoomPolygonState();
+        if (tool !== 'room') {
+            roomMode.clearRoomPolygonState();
+            const currentState = canvasStateRef.current;
+            if (currentState.isDrawing) {
+                const nextState: CanvasState = { ...currentState, isDrawing: false, drawingPoints: [] };
+                canvasStateRef.current = nextState;
+                setCanvasState(nextState);
+            }
+        }
     }, [tool, wallMode, roomMode]);
 
     useEffect(() => {
@@ -512,9 +544,13 @@ export function DrawingCanvas({
 
     useEffect(() => {
         if (tool === 'select' && !isSpacePressed) return;
-        setHoveredRoomInfo(null);
-        setHoveredElement(null);
-    }, [tool, isSpacePressed, setHoveredElement]);
+        if (hoveredRoomInfo !== null) {
+            setHoveredRoomInfo(null);
+        }
+        if (hoveredElementId !== null) {
+            setHoveredElement(null);
+        }
+    }, [tool, isSpacePressed, hoveredRoomInfo, hoveredElementId, setHoveredElement]);
 
     useEffect(() => {
         if (tool !== 'room') return;
@@ -547,7 +583,7 @@ export function DrawingCanvas({
             const point = resolvedSnapToGrid
                 ? snapPointToGrid(rawPoint, effectiveSnapGridSize)
                 : rawPoint;
-            setMousePosition({ x: scenePoint.x, y: scenePoint.y });
+            queueMousePositionUpdate(rawPoint);
 
             const mouseEvent = e.e as MouseEvent;
             if ('button' in mouseEvent && mouseEvent.button === 1) {
@@ -566,9 +602,20 @@ export function DrawingCanvas({
             if (tool === 'room') {
                 if (roomDrawMode === 'rectangle') {
                     const targetPoint = roomMode.handleRectangleMouseDown(point);
-                    const nextState: CanvasState = { ...canvasStateRef.current, isDrawing: true, drawingPoints: [targetPoint] };
-                    canvasStateRef.current = nextState;
-                    setCanvasState(nextState);
+                    const currentState = canvasStateRef.current;
+                    const startPoint = currentState.drawingPoints[0];
+
+                    if (!currentState.isDrawing || !startPoint) {
+                        const nextState: CanvasState = { ...currentState, isDrawing: true, drawingPoints: [targetPoint, targetPoint] };
+                        canvasStateRef.current = nextState;
+                        setCanvasState(nextState);
+                        roomMode.handleRectangleMouseMove(targetPoint, targetPoint);
+                    } else {
+                        roomMode.handleRectangleMouseUp(startPoint, targetPoint);
+                        const nextState: CanvasState = { ...currentState, isDrawing: false, drawingPoints: [] };
+                        canvasStateRef.current = nextState;
+                        setCanvasState(nextState);
+                    }
                 } else {
                     roomMode.handlePolygonMouseDown(point, mouseEvent.detail >= 2);
                 }
@@ -576,7 +623,7 @@ export function DrawingCanvas({
             }
 
             if (tool === 'wall') {
-                wallMode.handleMouseDown(point, mouseEvent.detail >= 2, mouseEvent.shiftKey, activeWallType.totalThickness);
+                wallMode.handleMouseDown(rawPoint, mouseEvent.detail >= 2, mouseEvent.shiftKey, activeWallType.totalThickness);
                 return;
             }
 
@@ -586,7 +633,7 @@ export function DrawingCanvas({
                 setCanvasState(nextState);
             }
         },
-        [tool, roomDrawMode, resolvedSnapToGrid, effectiveSnapGridSize, isSpacePressed, wallMode, roomMode, activeWallType.totalThickness]
+        [tool, roomDrawMode, resolvedSnapToGrid, effectiveSnapGridSize, isSpacePressed, wallMode, roomMode, activeWallType.totalThickness, queueMousePositionUpdate]
     );
 
     const handleMouseMove = useCallback(
@@ -600,7 +647,7 @@ export function DrawingCanvas({
             const point = resolvedSnapToGrid
                 ? snapPointToGrid(rawPoint, effectiveSnapGridSize)
                 : rawPoint;
-            setMousePosition({ x: scenePoint.x, y: scenePoint.y });
+            queueMousePositionUpdate(rawPoint);
 
             const currentState = canvasStateRef.current;
             if (middlePan.middlePanRef.current.active) return;
@@ -621,20 +668,24 @@ export function DrawingCanvas({
             if (tool === 'select' && !isSpacePressed && !currentState.isDrawing) {
                 selectMode.handleRoomHover(point, { x: viewportPoint.x, y: viewportPoint.y });
             } else {
-                setHoveredRoomInfo(null);
-                setHoveredElement(null);
+                if (hoveredRoomInfo !== null) {
+                    setHoveredRoomInfo(null);
+                }
+                if (hoveredElementId !== null) {
+                    setHoveredElement(null);
+                }
             }
 
             if (tool === 'room') {
                 if (roomDrawMode === 'rectangle') {
                     if (currentState.isDrawing && currentState.drawingPoints[0]) {
-                        const targetPoint = roomMode.handleRectangleMouseMove(currentState.drawingPoints[0], point);
+                        const targetPoint = roomMode.handleRectangleMouseMove(currentState.drawingPoints[0], rawPoint);
                         const nextState: CanvasState = { ...currentState, drawingPoints: [currentState.drawingPoints[0], targetPoint] };
                         canvasStateRef.current = nextState;
                         setCanvasState(nextState);
                     }
                 } else {
-                    roomMode.handlePolygonMouseMove(point);
+                    roomMode.handlePolygonMouseMove(rawPoint);
                 }
                 return;
             }
@@ -653,7 +704,7 @@ export function DrawingCanvas({
             setCanvasState(nextState);
             renderDrawingPreview(canvas, nextPoints, tool);
         },
-        [tool, roomDrawMode, resolvedSnapToGrid, effectiveSnapGridSize, setPanOffset, activeWallType.totalThickness, isSpacePressed, selectMode, wallMode, roomMode, setHoveredElement]
+        [tool, roomDrawMode, resolvedSnapToGrid, effectiveSnapGridSize, setPanOffset, activeWallType.totalThickness, isSpacePressed, selectMode, wallMode, roomMode, setHoveredElement, hoveredRoomInfo, hoveredElementId, queueMousePositionUpdate]
     );
 
     const handleMouseUp = useCallback(() => {
@@ -669,16 +720,7 @@ export function DrawingCanvas({
         }
 
         if (tool === 'room' && roomDrawMode === 'rectangle') {
-            if (currentState.isDrawing && currentState.drawingPoints.length > 1) {
-                const startPoint = currentState.drawingPoints[0];
-                const endPoint = currentState.drawingPoints[currentState.drawingPoints.length - 1];
-                if (startPoint && endPoint) {
-                    roomMode.handleRectangleMouseUp(startPoint, endPoint);
-                }
-            }
-            const nextState: CanvasState = { ...currentState, isDrawing: false, drawingPoints: [] };
-            canvasStateRef.current = nextState;
-            setCanvasState(nextState);
+            // Rectangle room mode is click-click based: commit is handled on second click in mouse down.
             return;
         }
 

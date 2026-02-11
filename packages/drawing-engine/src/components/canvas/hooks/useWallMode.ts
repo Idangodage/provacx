@@ -9,7 +9,7 @@
  */
 
 import type { Canvas as FabricCanvas } from 'fabric';
-import { useRef, useCallback } from 'react';
+import { useRef, useCallback, useEffect } from 'react';
 
 import type { Point2D, Wall2D, Room2D, WallTypeDefinition, DisplayUnit } from '../../../types';
 import { detectRoomsFromWallGraph, validateNestedRooms } from '../../../utils/room-detection';
@@ -18,9 +18,9 @@ import {
     distanceBetween,
     findWallSnapTarget,
     applyOrthogonalConstraint,
-    clearDrawingPreview,
+    clearWallRubberBandPreview,
     clearSnapHighlight,
-    renderWallPreview,
+    renderWallRubberBandPreview,
     renderSnapHighlight,
     splitWallAtPoint,
     rebuildWallAdjacency,
@@ -29,8 +29,16 @@ import {
 import type { WallSnapTarget } from '../snapping';
 
 const WALL_SNAP_THRESHOLD_PX = 10;
+const WALL_SNAP_RELEASE_MULTIPLIER = 1.6;
 const WALL_ENDPOINT_TOLERANCE = 0.5;
 const ROOM_EDGE_OVERLAP_TOLERANCE = 0.5;
+
+interface RubberBandPreviewState {
+    anchor: Point2D | null;
+    cursor: Point2D | null;
+    thickness: number;
+    visible: boolean;
+}
 
 export interface UseWallModeOptions {
     fabricRef: React.RefObject<FabricCanvas | null>;
@@ -62,18 +70,95 @@ export function useWallMode({
     const wallChainStartRef = useRef<Point2D | null>(null);
     const wallChainActiveRef = useRef(false);
     const snapTargetRef = useRef<WallSnapTarget | null>(null);
+    const hoverSnapTargetRef = useRef<WallSnapTarget | null>(null);
+    const previewStateRef = useRef<RubberBandPreviewState>({
+        anchor: null,
+        cursor: null,
+        thickness: 0,
+        visible: false,
+    });
+    const previewFrameRef = useRef<number | null>(null);
+
+    const cancelPreviewFrame = useCallback(() => {
+        if (previewFrameRef.current === null || typeof window === 'undefined') return;
+        window.cancelAnimationFrame(previewFrameRef.current);
+        previewFrameRef.current = null;
+    }, []);
+
+    const flushPreviewFrame = useCallback(() => {
+        previewFrameRef.current = null;
+        const canvas = fabricRef.current;
+        if (!canvas) return;
+
+        const previewState = previewStateRef.current;
+        if (!previewState.visible || !previewState.anchor || !previewState.cursor) {
+            clearWallRubberBandPreview(canvas, true);
+            return;
+        }
+
+        renderWallRubberBandPreview(
+            canvas,
+            previewState.anchor,
+            previewState.cursor,
+            previewState.thickness,
+            displayUnit,
+            paperToRealRatio,
+            activeWallTypeId,
+            wallTypeRegistry,
+            zoomRef.current,
+            true
+        );
+    }, [fabricRef, zoomRef, displayUnit, paperToRealRatio, activeWallTypeId, wallTypeRegistry]);
+
+    const schedulePreviewFrame = useCallback(() => {
+        if (typeof window === 'undefined') return;
+        if (previewFrameRef.current !== null) return;
+        previewFrameRef.current = window.requestAnimationFrame(flushPreviewFrame);
+    }, [flushPreviewFrame]);
+
+    const setRubberBandPreview = useCallback(
+        (anchor: Point2D, cursor: Point2D, thickness: number, immediate = false) => {
+            previewStateRef.current = { anchor, cursor, thickness, visible: true };
+            if (immediate) {
+                cancelPreviewFrame();
+                flushPreviewFrame();
+                return;
+            }
+            schedulePreviewFrame();
+        },
+        [cancelPreviewFrame, flushPreviewFrame, schedulePreviewFrame]
+    );
+
+    const clearRubberBandPreview = useCallback(
+        (shouldRender = true) => {
+            previewStateRef.current = { anchor: null, cursor: null, thickness: 0, visible: false };
+            cancelPreviewFrame();
+            const canvas = fabricRef.current;
+            if (!canvas) return;
+            clearWallRubberBandPreview(canvas, shouldRender);
+        },
+        [cancelPreviewFrame, fabricRef]
+    );
+
+    useEffect(() => {
+        return () => {
+            cancelPreviewFrame();
+        };
+    }, [cancelPreviewFrame]);
 
     const clearWallTransientOverlays = useCallback(() => {
         const canvas = fabricRef.current;
         if (!canvas) return;
-        clearDrawingPreview(canvas);
-        clearSnapHighlight(canvas);
-    }, [fabricRef]);
+        clearRubberBandPreview(false);
+        clearSnapHighlight(canvas, false);
+        canvas.requestRenderAll();
+    }, [fabricRef, clearRubberBandPreview]);
 
     const endWallChain = useCallback(() => {
         wallChainStartRef.current = null;
         wallChainActiveRef.current = false;
         snapTargetRef.current = null;
+        hoverSnapTargetRef.current = null;
         clearWallTransientOverlays();
     }, [clearWallTransientOverlays]);
 
@@ -138,7 +223,17 @@ export function useWallMode({
 
             const chainStart = wallChainStartRef.current;
             const snapThresholdScene = WALL_SNAP_THRESHOLD_PX / Math.max(zoomRef.current, 0.01);
-            let snapTarget = findWallSnapTarget(point, wallsRef.current, snapThresholdScene);
+            const snapReleaseThresholdScene = snapThresholdScene * WALL_SNAP_RELEASE_MULTIPLIER;
+            const heldSnapTarget = hoverSnapTargetRef.current;
+            let snapTarget: WallSnapTarget | null = null;
+
+            if (heldSnapTarget && distanceBetween(point, heldSnapTarget.point) <= snapReleaseThresholdScene) {
+                snapTarget = heldSnapTarget;
+            } else {
+                snapTarget = findWallSnapTarget(point, wallsRef.current, snapThresholdScene);
+            }
+
+            hoverSnapTargetRef.current = snapTarget;
             let targetPoint = snapTarget ? snapTarget.point : point;
 
             if (chainStart && shiftKey) {
@@ -147,9 +242,11 @@ export function useWallMode({
                 if (orthogonalSnapTarget) {
                     snapTarget = orthogonalSnapTarget;
                     targetPoint = orthogonalSnapTarget.point;
+                    hoverSnapTargetRef.current = orthogonalSnapTarget;
                 } else {
                     snapTarget = null;
                     targetPoint = orthogonalPoint;
+                    hoverSnapTargetRef.current = null;
                 }
             }
 
@@ -157,17 +254,7 @@ export function useWallMode({
                 wallChainStartRef.current = targetPoint;
                 wallChainActiveRef.current = true;
                 snapTargetRef.current = snapTarget;
-                renderWallPreview(
-                    canvas,
-                    targetPoint,
-                    targetPoint,
-                    totalThickness,
-                    displayUnit,
-                    paperToRealRatio,
-                    activeWallTypeId,
-                    wallTypeRegistry,
-                    zoomRef.current
-                );
+                setRubberBandPreview(targetPoint, point, totalThickness, true);
                 if (snapTarget) {
                     renderSnapHighlight(canvas, snapTarget.point, zoomRef.current);
                 } else {
@@ -182,17 +269,7 @@ export function useWallMode({
                 wallChainStartRef.current = targetPoint;
                 wallChainActiveRef.current = true;
                 snapTargetRef.current = snapTarget;
-                renderWallPreview(
-                    canvas,
-                    targetPoint,
-                    targetPoint,
-                    totalThickness,
-                    displayUnit,
-                    paperToRealRatio,
-                    activeWallTypeId,
-                    wallTypeRegistry,
-                    zoomRef.current
-                );
+                setRubberBandPreview(targetPoint, point, totalThickness, true);
                 if (snapTarget) {
                     renderSnapHighlight(canvas, snapTarget.point, zoomRef.current);
                 } else {
@@ -207,10 +284,7 @@ export function useWallMode({
             zoomRef,
             commitWallSegment,
             endWallChain,
-            displayUnit,
-            paperToRealRatio,
-            activeWallTypeId,
-            wallTypeRegistry,
+            setRubberBandPreview,
         ]
     );
 
@@ -221,49 +295,52 @@ export function useWallMode({
 
             const chainStart = wallChainStartRef.current;
             const snapThresholdScene = WALL_SNAP_THRESHOLD_PX / Math.max(zoomRef.current, 0.01);
+            const snapReleaseThresholdScene = snapThresholdScene * WALL_SNAP_RELEASE_MULTIPLIER;
             let workingPoint = point;
-            let snapTarget = findWallSnapTarget(workingPoint, wallsRef.current, snapThresholdScene);
+            const heldSnapTarget = hoverSnapTargetRef.current;
+            let snapTarget: WallSnapTarget | null = null;
+            if (heldSnapTarget && distanceBetween(workingPoint, heldSnapTarget.point) <= snapReleaseThresholdScene) {
+                snapTarget = heldSnapTarget;
+            } else {
+                snapTarget = findWallSnapTarget(workingPoint, wallsRef.current, snapThresholdScene);
+            }
+            hoverSnapTargetRef.current = snapTarget;
             let targetPoint = snapTarget ? snapTarget.point : workingPoint;
 
             if (chainStart && shiftKey) {
                 const orthogonalPoint = applyOrthogonalConstraint(chainStart, targetPoint);
-                const orthogonalSnapTarget = findWallSnapTarget(orthogonalPoint, wallsRef.current, snapThresholdScene);
+                const heldOrthogonalSnap = hoverSnapTargetRef.current;
+                const orthogonalSnapTarget =
+                    heldOrthogonalSnap && distanceBetween(orthogonalPoint, heldOrthogonalSnap.point) <= snapReleaseThresholdScene
+                        ? heldOrthogonalSnap
+                        : findWallSnapTarget(orthogonalPoint, wallsRef.current, snapThresholdScene);
                 if (orthogonalSnapTarget) {
                     snapTarget = orthogonalSnapTarget;
                     targetPoint = orthogonalSnapTarget.point;
                     workingPoint = orthogonalPoint;
+                    hoverSnapTargetRef.current = orthogonalSnapTarget;
                 } else {
                     snapTarget = null;
                     targetPoint = orthogonalPoint;
                     workingPoint = orthogonalPoint;
+                    hoverSnapTargetRef.current = null;
                 }
             }
 
             if (snapTarget) {
-                renderSnapHighlight(canvas, snapTarget.point, zoomRef.current);
+                renderSnapHighlight(canvas, snapTarget.point, zoomRef.current, !chainStart);
             } else {
-                clearSnapHighlight(canvas);
+                clearSnapHighlight(canvas, !chainStart);
             }
 
             if (chainStart) {
-                const previewPoint =
-                    distanceBetween(chainStart, targetPoint) <= 0.001 ? workingPoint : targetPoint;
-                renderWallPreview(
-                    canvas,
-                    chainStart,
-                    previewPoint,
-                    totalThickness,
-                    displayUnit,
-                    paperToRealRatio,
-                    activeWallTypeId,
-                    wallTypeRegistry,
-                    zoomRef.current
-                );
+                // Preview endpoint tracks live cursor (or orthogonal-constrained cursor), while commit still uses snapped target.
+                setRubberBandPreview(chainStart, workingPoint, totalThickness, false);
             } else {
-                clearDrawingPreview(canvas);
+                clearRubberBandPreview(false);
             }
         },
-        [fabricRef, wallsRef, zoomRef, displayUnit, paperToRealRatio, activeWallTypeId, wallTypeRegistry]
+        [fabricRef, wallsRef, zoomRef, setRubberBandPreview, clearRubberBandPreview]
     );
 
     return {

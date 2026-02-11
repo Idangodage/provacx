@@ -10,7 +10,7 @@
 import type { Canvas as FabricCanvas } from 'fabric';
 import { useRef, useCallback } from 'react';
 
-import type { Point2D, Wall2D, Room2D, WallTypeDefinition } from '../../../types';
+import type { Point2D, Wall2D, Room2D, WallTypeDefinition, DisplayUnit } from '../../../types';
 import { detectRoomsFromWallGraph, validateNestedRooms } from '../../../utils/room-detection';
 import { createWallFromTypeDefaults } from '../../../utils/wall-types';
 import {
@@ -42,6 +42,8 @@ export interface UseRoomModeOptions {
     activeLayerId: string | null;
     activeWallTypeId: string;
     wallTypeRegistry: WallTypeDefinition[];
+    displayUnit: DisplayUnit;
+    paperToRealRatio: number;
     setWalls: (walls: Wall2D[], historyLabel?: string) => void;
     notifyRoomValidation: (messages: string[], title: string, blocking?: boolean) => void;
 }
@@ -54,6 +56,8 @@ export function useRoomMode({
     activeLayerId,
     activeWallTypeId,
     wallTypeRegistry,
+    displayUnit,
+    paperToRealRatio,
     setWalls,
     notifyRoomValidation,
 }: UseRoomModeOptions) {
@@ -113,6 +117,7 @@ export function useRoomMode({
             const vertices = buildRectangleVertices(startPoint, endPoint);
             commitRoomFromVertices(vertices);
             clearDrawingPreview(canvas);
+            clearSnapHighlight(canvas);
         },
         [fabricRef, commitRoomFromVertices]
     );
@@ -151,7 +156,17 @@ export function useRoomMode({
             if (polygonPoints.length === 0) {
                 roomPolygonPointsRef.current = [targetPoint];
                 roomPolygonHoverRef.current = targetPoint;
-                renderRoomPolygonPreview(canvas, roomPolygonPointsRef.current, roomPolygonHoverRef.current);
+                const previewDefaults = createWallFromTypeDefaults(activeWallTypeId, wallTypeRegistry);
+                renderRoomPolygonPreview(
+                    canvas,
+                    roomPolygonPointsRef.current,
+                    roomPolygonHoverRef.current,
+                    displayUnit,
+                    paperToRealRatio,
+                    previewDefaults.thickness,
+                    activeWallTypeId,
+                    wallTypeRegistry
+                );
                 return true;
             }
 
@@ -170,10 +185,30 @@ export function useRoomMode({
             const nextPolygon = [...polygonPoints, targetPoint];
             roomPolygonPointsRef.current = nextPolygon;
             roomPolygonHoverRef.current = targetPoint;
-            renderRoomPolygonPreview(canvas, nextPolygon, roomPolygonHoverRef.current);
+            const previewDefaults = createWallFromTypeDefaults(activeWallTypeId, wallTypeRegistry);
+            renderRoomPolygonPreview(
+                canvas,
+                nextPolygon,
+                roomPolygonHoverRef.current,
+                displayUnit,
+                paperToRealRatio,
+                previewDefaults.thickness,
+                activeWallTypeId,
+                wallTypeRegistry
+            );
             return true;
         },
-        [fabricRef, wallsRef, zoomRef, commitRoomFromVertices, clearRoomPolygonState]
+        [
+            fabricRef,
+            wallsRef,
+            zoomRef,
+            commitRoomFromVertices,
+            clearRoomPolygonState,
+            displayUnit,
+            paperToRealRatio,
+            activeWallTypeId,
+            wallTypeRegistry,
+        ]
     );
 
     const handleRectangleMouseDown = useCallback(
@@ -203,18 +238,34 @@ export function useRoomMode({
 
             const snapThresholdScene = WALL_SNAP_THRESHOLD_PX / Math.max(zoomRef.current, 0.01);
             const snapTarget = findWallSnapTarget(currentPoint, wallsRef.current, snapThresholdScene);
-            const targetPoint = snapTarget ? snapTarget.point : currentPoint;
+            const isAnchorSnap =
+                snapTarget && arePointsClose(snapTarget.point, startPoint, WALL_ENDPOINT_TOLERANCE);
+            const targetPoint = isAnchorSnap
+                ? currentPoint
+                : snapTarget
+                    ? snapTarget.point
+                    : currentPoint;
 
-            if (snapTarget) {
+            if (snapTarget && !isAnchorSnap) {
                 renderSnapHighlight(canvas, snapTarget.point, zoomRef.current);
             } else {
                 clearSnapHighlight(canvas);
             }
 
-            renderRoomRectanglePreview(canvas, startPoint, targetPoint);
+            const previewDefaults = createWallFromTypeDefaults(activeWallTypeId, wallTypeRegistry);
+            renderRoomRectanglePreview(
+                canvas,
+                startPoint,
+                targetPoint,
+                displayUnit,
+                paperToRealRatio,
+                previewDefaults.thickness,
+                activeWallTypeId,
+                wallTypeRegistry
+            );
             return targetPoint;
         },
-        [fabricRef, wallsRef, zoomRef]
+        [fabricRef, wallsRef, zoomRef, displayUnit, paperToRealRatio, activeWallTypeId, wallTypeRegistry]
     );
 
     const handlePolygonMouseMove = useCallback(
@@ -222,21 +273,40 @@ export function useRoomMode({
             const canvas = fabricRef.current;
             if (!canvas) return;
 
+            const polygonPoints = roomPolygonPointsRef.current;
+            const anchorPoint = polygonPoints[polygonPoints.length - 1];
             const snapThresholdScene = WALL_SNAP_THRESHOLD_PX / Math.max(zoomRef.current, 0.01);
             const snapTarget = findWallSnapTarget(point, wallsRef.current, snapThresholdScene);
-            const targetPoint = snapTarget ? snapTarget.point : point;
+            const isAnchorSnap =
+                anchorPoint !== undefined &&
+                snapTarget !== null &&
+                arePointsClose(snapTarget.point, anchorPoint, WALL_ENDPOINT_TOLERANCE);
+            const targetPoint = isAnchorSnap
+                ? point
+                : snapTarget
+                    ? snapTarget.point
+                    : point;
 
-            if (snapTarget) {
+            if (snapTarget && !isAnchorSnap) {
                 renderSnapHighlight(canvas, snapTarget.point, zoomRef.current);
             } else {
                 clearSnapHighlight(canvas);
             }
 
-            const polygonPoints = roomPolygonPointsRef.current;
             roomPolygonHoverRef.current = targetPoint;
-            renderRoomPolygonPreview(canvas, polygonPoints, targetPoint);
+            const previewDefaults = createWallFromTypeDefaults(activeWallTypeId, wallTypeRegistry);
+            renderRoomPolygonPreview(
+                canvas,
+                polygonPoints,
+                targetPoint,
+                displayUnit,
+                paperToRealRatio,
+                previewDefaults.thickness,
+                activeWallTypeId,
+                wallTypeRegistry
+            );
         },
-        [fabricRef, wallsRef, zoomRef]
+        [fabricRef, wallsRef, zoomRef, displayUnit, paperToRealRatio, activeWallTypeId, wallTypeRegistry]
     );
 
     return {
