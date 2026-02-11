@@ -28,18 +28,21 @@ const HANDLE_HIT_RADIUS = 7;
 
 interface WallHandleDragSession {
     wallId: string;
-    handleType: 'start' | 'end' | 'mid';
+    handleType: 'start' | 'end' | 'mid' | 'vertex';
     originalWalls: Wall2D[];
     originalRooms: Room2D[];
     originalStart: Point2D;
     originalEnd: Point2D;
+    sourceNode?: Point2D;
 }
 
 interface TargetMeta {
     name?: string;
     wallId?: string;
+    wallIds?: string[];
     roomId?: string;
-    handleType?: 'start' | 'end' | 'mid';
+    nodePoint?: Point2D;
+    handleType?: 'start' | 'end' | 'mid' | 'vertex';
 }
 
 export interface UseSelectModeOptions {
@@ -82,7 +85,9 @@ export function useSelectMode({
         return {
             name: typed?.name,
             wallId: typed?.wallId,
+            wallIds: typed?.wallIds,
             roomId: typed?.roomId,
+            nodePoint: typed?.nodePoint,
             handleType: typed?.handleType,
         };
     }, []);
@@ -100,6 +105,10 @@ export function useSelectMode({
             }
             if (meta.name === 'wall-handle' && meta.wallId) {
                 setSelectedIds([meta.wallId]);
+                return;
+            }
+            if (meta.name === 'wall-vertex-marker' && meta.wallIds && meta.wallIds.length > 0) {
+                setSelectedIds(meta.wallIds);
                 return;
             }
             if (!target) {
@@ -154,6 +163,65 @@ export function useSelectMode({
     const handleObjectMoving = useCallback(
         (target: FabricObject) => {
             const meta = getTargetMeta(target);
+            if (meta.name === 'wall-vertex-marker' && meta.nodePoint) {
+                const center = target.getCenterPoint();
+                const pointer = resolvedSnapToGrid
+                    ? snapPointToGrid({ x: center.x, y: center.y }, resolvedGridSize)
+                    : { x: center.x, y: center.y };
+                const markerWidth = Number(target.get('width')) || HANDLE_HIT_RADIUS;
+                const markerScaleX = Number(target.get('scaleX')) || 1;
+                const markerHalf = (markerWidth * markerScaleX) / 2;
+                target.set({
+                    left: pointer.x - markerHalf,
+                    top: pointer.y - markerHalf,
+                });
+                target.setCoords();
+
+                if (
+                    !wallHandleDragRef.current ||
+                    wallHandleDragRef.current.handleType !== 'vertex' ||
+                    !wallHandleDragRef.current.sourceNode ||
+                    distanceBetween(wallHandleDragRef.current.sourceNode, meta.nodePoint) > WALL_ENDPOINT_TOLERANCE
+                ) {
+                    const sourceWallId = meta.wallIds?.[0];
+                    if (!sourceWallId) return;
+                    wallHandleDragRef.current = {
+                        wallId: sourceWallId,
+                        handleType: 'vertex',
+                        originalWalls: wallsRef.current.map((item) => ({
+                            ...item,
+                            start: { ...item.start },
+                            end: { ...item.end },
+                        })),
+                        originalRooms: roomsRef.current.map((room) => ({
+                            ...room,
+                            vertices: room.vertices.map((vertex) => ({ ...vertex })),
+                            wallIds: [...room.wallIds],
+                            childRoomIds: [...room.childRoomIds],
+                        })),
+                        originalStart: { ...meta.nodePoint },
+                        originalEnd: { ...meta.nodePoint },
+                        sourceNode: { ...meta.nodePoint },
+                    };
+                }
+
+                const dragSession = wallHandleDragRef.current;
+                if (!dragSession?.sourceNode) return;
+                isWallHandleDraggingRef.current = true;
+
+                let nextWalls = moveConnectedNode(
+                    dragSession.originalWalls,
+                    dragSession.sourceNode,
+                    pointer,
+                    WALL_ENDPOINT_TOLERANCE
+                );
+                nextWalls = nextWalls.filter((candidate) => distanceBetween(candidate.start, candidate.end) > 0.001);
+                nextWalls = rebuildWallAdjacency(nextWalls, WALL_ENDPOINT_TOLERANCE);
+                applyTransientWallGraph(nextWalls);
+                setSelectedIds(meta.wallIds && meta.wallIds.length > 0 ? meta.wallIds : [dragSession.wallId]);
+                return;
+            }
+
             if (meta.name !== 'wall-handle' || !meta.wallId || !meta.handleType) return;
 
             const wall = wallsRef.current.find((item) => item.id === meta.wallId);
@@ -256,7 +324,7 @@ export function useSelectMode({
     const handleMouseDown = useCallback(
         (target: FabricObject | undefined | null, scenePoint: Point2D) => {
             const meta = getTargetMeta(target);
-            if (meta.name === 'wall-render' || meta.name === 'wall-handle') {
+            if (meta.name === 'wall-render' || meta.name === 'wall-handle' || meta.name === 'wall-vertex-marker') {
                 updateSelectionFromTarget(target);
                 return;
             }

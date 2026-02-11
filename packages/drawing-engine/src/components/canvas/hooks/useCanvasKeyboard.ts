@@ -22,6 +22,7 @@ export interface UseCanvasKeyboardOptions {
     clearRoomPolygonState: () => void;
     deleteSelected: () => void;
     setActiveWallTypeId: (id: string) => void;
+    flipSelectedWallInteriorExterior: () => void;
     setIsSpacePressed: (pressed: boolean) => void;
 }
 
@@ -33,6 +34,7 @@ export function useCanvasKeyboard({
     clearRoomPolygonState,
     deleteSelected,
     setActiveWallTypeId,
+    flipSelectedWallInteriorExterior,
     setIsSpacePressed,
 }: UseCanvasKeyboardOptions) {
     // Space key for panning
@@ -98,6 +100,24 @@ export function useCanvasKeyboard({
             window.removeEventListener('keydown', handleDeleteKey);
         };
     }, [selectedIds, deleteSelected]);
+
+    // Manual wall interior/exterior flip
+    useEffect(() => {
+        const handleOrientationFlip = (event: KeyboardEvent) => {
+            if (event.key.toLowerCase() !== 'f') return;
+            if (isEditableElement(event.target)) return;
+            if (event.ctrlKey || event.metaKey || event.altKey) return;
+            if (selectedIds.length === 0) return;
+            if (tool !== 'select' && tool !== 'wall') return;
+            event.preventDefault();
+            flipSelectedWallInteriorExterior();
+        };
+
+        window.addEventListener('keydown', handleOrientationFlip);
+        return () => {
+            window.removeEventListener('keydown', handleOrientationFlip);
+        };
+    }, [selectedIds, tool, flipSelectedWallInteriorExterior]);
 
     // Alt+number wall type shortcuts
     useEffect(() => {

@@ -19,6 +19,7 @@ import type {
 } from '../types';
 import { generateId } from '../utils/geometry';
 import { applyNestedRoomHierarchy, detectRoomsFromWallGraph } from '../utils/room-detection';
+import { applyWallOrientationMetadata } from '../utils/wall-orientation';
 import {
     BUILT_IN_WALL_TYPES,
     normalizeWallForTypeSystem,
@@ -242,8 +243,13 @@ export function withRebuiltAdjacency(
 ): Wall2D[] {
     const normalizedWalls = walls.map((wall) => normalizeWallForTypeSystem(wall, wallTypeRegistry));
     const adjacency = buildWallAdjacencyMap(normalizedWalls, WALL_NODE_TOLERANCE_PX);
-    return normalizedWalls.map((wall) => ({
+    const wallsWithAdjacency = normalizedWalls.map((wall) => ({
         ...wall,
         connectedWallIds: Array.from(adjacency.get(wall.id) ?? []),
     }));
+    return applyWallOrientationMetadata(wallsWithAdjacency, {
+        nodeTolerancePx: WALL_NODE_TOLERANCE_PX,
+        defaultInteriorSideForOpenChains: 'right',
+        probeOffsetPx: 6,
+    });
 }

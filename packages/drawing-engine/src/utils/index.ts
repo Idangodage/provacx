@@ -93,3 +93,18 @@ export {
   type WallLayerOperationResult,
   type LayerPresetType,
 } from './wall-types';
+
+// Wall orientation utilities
+export {
+  computeWallOrientation,
+  applyWallOrientationMetadata,
+  flipWallInteriorExteriorOverride,
+  type WallSide,
+  type WallOrientationSource,
+  type WallOrientationNode,
+  type WallOrientationComponent,
+  type WallOrientationGraph,
+  type WallOrientationData,
+  type WallOrientationComputeResult,
+  type WallOrientationOptions,
+} from './wall-orientation';

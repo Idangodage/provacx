@@ -543,7 +543,8 @@ function renderPreviewWallSegments(
             previewWall,
             unit,
             paperToRealRatio,
-            wallTypeRegistry
+            wallTypeRegistry,
+            { zoom: canvas.getZoom() }
         );
         (wallBody as unknown as { name?: string }).name = 'drawing-preview';
         wallBody.selectable = false;

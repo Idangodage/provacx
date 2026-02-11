@@ -37,6 +37,7 @@ interface RubberBandPreviewState {
     anchor: Point2D | null;
     cursor: Point2D | null;
     thickness: number;
+    interiorSideHint: 'left' | 'right' | null;
     visible: boolean;
 }
 
@@ -75,9 +76,11 @@ export function useWallMode({
         anchor: null,
         cursor: null,
         thickness: 0,
+        interiorSideHint: null,
         visible: false,
     });
     const previewFrameRef = useRef<number | null>(null);
+    const previousCommittedVectorRef = useRef<Point2D | null>(null);
 
     const cancelPreviewFrame = useCallback(() => {
         if (previewFrameRef.current === null || typeof window === 'undefined') return;
@@ -105,6 +108,7 @@ export function useWallMode({
             paperToRealRatio,
             activeWallTypeId,
             wallTypeRegistry,
+            previewState.interiorSideHint,
             zoomRef.current,
             true
         );
@@ -117,8 +121,14 @@ export function useWallMode({
     }, [flushPreviewFrame]);
 
     const setRubberBandPreview = useCallback(
-        (anchor: Point2D, cursor: Point2D, thickness: number, immediate = false) => {
-            previewStateRef.current = { anchor, cursor, thickness, visible: true };
+        (
+            anchor: Point2D,
+            cursor: Point2D,
+            thickness: number,
+            interiorSideHint: 'left' | 'right' | null,
+            immediate = false
+        ) => {
+            previewStateRef.current = { anchor, cursor, thickness, interiorSideHint, visible: true };
             if (immediate) {
                 cancelPreviewFrame();
                 flushPreviewFrame();
@@ -131,7 +141,13 @@ export function useWallMode({
 
     const clearRubberBandPreview = useCallback(
         (shouldRender = true) => {
-            previewStateRef.current = { anchor: null, cursor: null, thickness: 0, visible: false };
+            previewStateRef.current = {
+                anchor: null,
+                cursor: null,
+                thickness: 0,
+                interiorSideHint: null,
+                visible: false,
+            };
             cancelPreviewFrame();
             const canvas = fabricRef.current;
             if (!canvas) return;
@@ -159,6 +175,7 @@ export function useWallMode({
         wallChainActiveRef.current = false;
         snapTargetRef.current = null;
         hoverSnapTargetRef.current = null;
+        previousCommittedVectorRef.current = null;
         clearWallTransientOverlays();
     }, [clearWallTransientOverlays]);
 
@@ -254,7 +271,7 @@ export function useWallMode({
                 wallChainStartRef.current = targetPoint;
                 wallChainActiveRef.current = true;
                 snapTargetRef.current = snapTarget;
-                setRubberBandPreview(targetPoint, point, totalThickness, true);
+                setRubberBandPreview(targetPoint, point, totalThickness, null, true);
                 if (snapTarget) {
                     renderSnapHighlight(canvas, snapTarget.point, zoomRef.current);
                 } else {
@@ -266,10 +283,20 @@ export function useWallMode({
             const segmentLength = distanceBetween(chainStart, targetPoint);
             if (segmentLength > 0.001) {
                 commitWallSegment(chainStart, targetPoint, snapTargetRef.current, snapTarget);
+                previousCommittedVectorRef.current = {
+                    x: targetPoint.x - chainStart.x,
+                    y: targetPoint.y - chainStart.y,
+                };
                 wallChainStartRef.current = targetPoint;
                 wallChainActiveRef.current = true;
                 snapTargetRef.current = snapTarget;
-                setRubberBandPreview(targetPoint, point, totalThickness, true);
+                const previewVector = { x: point.x - targetPoint.x, y: point.y - targetPoint.y };
+                const previewCross =
+                    previousCommittedVectorRef.current.x * previewVector.y -
+                    previousCommittedVectorRef.current.y * previewVector.x;
+                const interiorSideHint =
+                    Math.abs(previewCross) <= 1e-6 ? 'right' : previewCross > 0 ? 'right' : 'left';
+                setRubberBandPreview(targetPoint, point, totalThickness, interiorSideHint, true);
                 if (snapTarget) {
                     renderSnapHighlight(canvas, snapTarget.point, zoomRef.current);
                 } else {
@@ -335,7 +362,20 @@ export function useWallMode({
 
             if (chainStart) {
                 // Preview endpoint tracks live cursor (or orthogonal-constrained cursor), while commit still uses snapped target.
-                setRubberBandPreview(chainStart, workingPoint, totalThickness, false);
+                const previousVector = previousCommittedVectorRef.current;
+                const previewVector = {
+                    x: workingPoint.x - chainStart.x,
+                    y: workingPoint.y - chainStart.y,
+                };
+                const interiorSideHint = (() => {
+                    if (!previousVector) return null;
+                    const crossValue = previousVector.x * previewVector.y - previousVector.y * previewVector.x;
+                    if (Math.abs(crossValue) <= 1e-6) {
+                        return 'right';
+                    }
+                    return crossValue > 0 ? 'right' : 'left';
+                })();
+                setRubberBandPreview(chainStart, workingPoint, totalThickness, interiorSideHint, false);
             } else {
                 clearRubberBandPreview(false);
             }

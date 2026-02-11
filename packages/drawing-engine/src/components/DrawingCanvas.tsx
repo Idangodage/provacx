@@ -13,6 +13,7 @@ import { useEffect, useRef, useCallback, useState, useMemo } from 'react';
 import { useSmartDrawingStore } from '../store';
 import type { DisplayUnit, Point2D, Wall2D, Room2D, WallTypeDefinition } from '../types';
 import { generateId } from '../utils/geometry';
+import { flipWallInteriorExteriorOverride } from '../utils/wall-orientation';
 import { BUILT_IN_WALL_TYPE_IDS, getWallTypeById } from '../utils/wall-types';
 
 import type { SceneBounds, TagBounds, RoomDrawMode } from './canvas';
@@ -27,6 +28,10 @@ import {
     WALL_SPATIAL_INDEX_CELL_PX,
     WALL_VIEWPORT_MARGIN_PX,
     createWallRenderObjects,
+    createWallJoinRenderObjects,
+    createWallChainDimensionObjects,
+    createWallOrientationIndicatorObjects,
+    resolveWallDimensionCollisions,
     createWallHandles,
     clearRenderedWalls,
     clearWallHandles,
@@ -219,8 +224,8 @@ export function DrawingCanvas({
     }, [panOffset.x, panOffset.y, zoom, hostWidth, hostHeight]);
 
     const wallSpatialIndex = useMemo(
-        () => buildWallSpatialIndex(walls, WALL_SPATIAL_INDEX_CELL_PX),
-        [walls]
+        () => buildWallSpatialIndex(walls, WALL_SPATIAL_INDEX_CELL_PX, realPerPaperRatio),
+        [walls, realPerPaperRatio]
     );
 
     const queueMousePositionUpdate = useCallback((position: Point2D) => {
@@ -309,6 +314,17 @@ export function DrawingCanvas({
         canvasStateRef,
     });
 
+    const flipSelectedWallInteriorExterior = useCallback(() => {
+        const selectedWallIdSet = new Set(selectedIds.filter((id) => walls.some((wall) => wall.id === id)));
+        if (selectedWallIdSet.size === 0) return;
+        const nextWalls = walls.map((wall) => (
+            selectedWallIdSet.has(wall.id)
+                ? flipWallInteriorExteriorOverride(wall)
+                : wall
+        ));
+        setWalls(nextWalls, 'Flip wall interior/exterior');
+    }, [selectedIds, walls, setWalls]);
+
     // Keyboard handling
     useCanvasKeyboard({
         tool,
@@ -318,6 +334,7 @@ export function DrawingCanvas({
         clearRoomPolygonState: roomMode.clearRoomPolygonState,
         deleteSelected,
         setActiveWallTypeId,
+        flipSelectedWallInteriorExterior,
         setIsSpacePressed,
     });
 
@@ -409,6 +426,9 @@ export function DrawingCanvas({
                 objectName === 'drawing-preview' ||
                 objectName === 'wall-snap-highlight' ||
                 objectName === 'wall-dimension' ||
+                objectName === 'wall-join-render' ||
+                objectName === 'wall-chain-dimension' ||
+                objectName === 'wall-orientation-indicator' ||
                 objectName === 'wall-override-indicator' ||
                 objectName === 'room-tag';
             if (isNonInteractive) {
@@ -435,29 +455,75 @@ export function DrawingCanvas({
         const selectedWallIdSet = new Set(selectedIds.filter((id) => wallIdSet.has(id)));
         const selectedRoom = rooms.find((r) => selectedIds.includes(r.id));
         const selectedRoomBoundarySet = new Set(selectedRoom?.wallIds ?? []);
-        const visibleWalls = queryWallsInBounds(wallSpatialIndex, visibleSceneBounds);
+        const wallLookup = new Map(walls.map((wall) => [wall.id, wall]));
+        const visibleWalls = queryWallsInBounds(
+            wallSpatialIndex,
+            visibleSceneBounds,
+            WALL_SPATIAL_INDEX_CELL_PX,
+            realPerPaperRatio
+        );
 
         clearRenderedWalls(canvas);
+        const renderedWallBodies: fabric.Object[] = [];
+        const renderedWallLabels: fabric.Object[] = [];
+        const renderedOverrideMarkers: fabric.Object[] = [];
         visibleWalls.forEach((wall) => {
             const { wallBody, dimensionLabel, overrideMarker } = createWallRenderObjects(
                 wall, displayUnit, realPerPaperRatio, wallTypeRegistry,
-                { selected: selectedWallIdSet.has(wall.id) || selectedRoomBoundarySet.has(wall.id) }
+                {
+                    selected: selectedWallIdSet.has(wall.id) || selectedRoomBoundarySet.has(wall.id),
+                    zoom,
+                    wallLookup,
+                }
             );
             wallBody.selectable = allowSelection;
             wallBody.evented = allowSelection;
             dimensionLabel.selectable = false;
             dimensionLabel.evented = false;
-            canvas.add(wallBody);
-            canvas.add(dimensionLabel);
+            renderedWallBodies.push(wallBody);
+            renderedWallLabels.push(dimensionLabel);
             if (overrideMarker) {
                 overrideMarker.selectable = false;
                 overrideMarker.evented = false;
-                canvas.add(overrideMarker);
+                renderedOverrideMarkers.push(overrideMarker);
             }
         });
+
+        renderedWallBodies.forEach((wallBody) => canvas.add(wallBody));
+        const wallJoinObjects = createWallJoinRenderObjects(
+            visibleWalls,
+            realPerPaperRatio,
+            wallTypeRegistry,
+            new Set([...selectedWallIdSet, ...selectedRoomBoundarySet])
+        );
+        wallJoinObjects.forEach((joinObject) => {
+            joinObject.selectable = false;
+            joinObject.evented = false;
+            canvas.add(joinObject);
+        });
+        const orientationIndicators = createWallOrientationIndicatorObjects(visibleWalls, zoom);
+        orientationIndicators.forEach((indicator) => {
+            indicator.selectable = false;
+            indicator.evented = false;
+            canvas.add(indicator);
+        });
+        const wallChainDimensions = createWallChainDimensionObjects(
+            visibleWalls,
+            displayUnit,
+            realPerPaperRatio,
+            zoom
+        );
+        const allDimensionObjects = [...renderedWallLabels, ...wallChainDimensions];
+        resolveWallDimensionCollisions(allDimensionObjects, zoom);
+        allDimensionObjects.forEach((dimensionObject) => {
+            dimensionObject.selectable = false;
+            dimensionObject.evented = false;
+            canvas.add(dimensionObject);
+        });
+        renderedOverrideMarkers.forEach((overrideMarker) => canvas.add(overrideMarker));
         bringTransientOverlaysToFront(canvas);
         canvas.requestRenderAll();
-    }, [walls, rooms, selectedIds, displayUnit, tool, isSpacePressed, wallSpatialIndex, visibleSceneBounds, wallTypeRegistry]);
+    }, [walls, rooms, selectedIds, displayUnit, tool, isSpacePressed, wallSpatialIndex, visibleSceneBounds, wallTypeRegistry, realPerPaperRatio, zoom]);
 
     // Room rendering
     useEffect(() => {
@@ -809,7 +875,9 @@ export function DrawingCanvas({
         const handleObjectModified = (event: fabric.CanvasEvents['object:modified']) => {
             if (!event.target) return;
             const meta = selectMode.getTargetMeta(event.target);
-            if (meta.name === 'wall-handle') selectMode.finalizeHandleDrag();
+            if (meta.name === 'wall-handle') {
+                selectMode.finalizeHandleDrag();
+            }
         };
 
         const handleWindowBlur = () => {

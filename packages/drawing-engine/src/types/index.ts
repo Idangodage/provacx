@@ -189,6 +189,14 @@ export interface Wall2D {
   color?: string;
   layer?: string;
   connectedWallIds?: string[];
+  interiorSide?: 'left' | 'right';
+  exteriorSide?: 'left' | 'right';
+  interiorNormal?: Point2D;
+  exteriorNormal?: Point2D;
+  interiorSideOverride?: 'left' | 'right' | null;
+  orientationSource?: 'auto-cycle' | 'auto-chain' | 'manual';
+  orientationComponentId?: string;
+  dimensionAnchor?: Point2D;
   openings: Opening2D[];
 }
 
