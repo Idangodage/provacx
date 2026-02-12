@@ -108,3 +108,63 @@ export {
   type WallOrientationComputeResult,
   type WallOrientationOptions,
 } from './wall-orientation';
+
+// Spatial index utilities
+export {
+  PackedRTree,
+  boundsIntersect,
+  inflateBounds,
+  type RTreeBounds,
+  type RTreeEntry,
+} from './rtree';
+
+// Professional wall editing engine
+export {
+  WallEditorEngine,
+  type WallEndpoint,
+  type RotationPivot,
+  type ThicknessAnchorMode,
+  type CollisionPolicy,
+  type SelectionMergeMode,
+  type SelectionHitMode,
+  type DirtyFlags,
+  type WallEditorState,
+  type WallCollision,
+  type WallEditOperationResult,
+  type SelectionVisualInfo,
+  type WallValidationIssue,
+  type CommandLifecycleEvent,
+  type WallEditorEvents,
+  type WallEditCommand,
+  type MutationOptions,
+  type MoveWallOptions,
+  type ResizeWallOptions,
+  type RotateWallOptions,
+  type AdjustThicknessOptions,
+  type RectangleSelectionOptions,
+  type PolygonSelectionOptions,
+  type GroupTransformOptions,
+  type ParallelMoveOptions,
+  type ChainSelectionOptions,
+  type ChainTransformOptions,
+  type WallEditorEngineOptions,
+  type WallEditorEngineInit,
+} from './wall-editing';
+
+// Corner constraints and editing
+export {
+  applyCornerAngleInput,
+  applyCornerAngleDrag,
+  suggestRectangularCorner,
+  snapAngle,
+  solveConstraints,
+  buildGraphFromWalls,
+  detectWallIntersections,
+  type Constraint,
+  type ConstraintKind,
+  type ConstraintViolation,
+  type AngleSolveMode,
+  type CornerEditInput,
+  type CornerEditOptions,
+  type SolveResult,
+} from './corner-constraints';

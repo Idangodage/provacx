@@ -8,6 +8,7 @@
 import { create } from 'zustand';
 import { devtools } from 'zustand/middleware';
 
+import { autoCleanWallNetwork, detectAndLabelRooms } from '../professional/wall-network';
 import type {
   Point2D,
   DisplayUnit,
@@ -33,7 +34,7 @@ import type {
   SplineMethod,
 } from '../types';
 import { generateId } from '../utils/geometry';
-import { applyNestedRoomHierarchy, detectRoomsFromWallGraph } from '../utils/room-detection';
+import { applyNestedRoomHierarchy } from '../utils/room-detection';
 import { DEFAULT_SPLINE_SETTINGS } from '../utils/spline';
 import {
   DEFAULT_WALL_TYPE_ID,
@@ -663,9 +664,9 @@ export const useDrawingStore = create<DrawingState>()(
       addRoom: (room) => {
         void room;
         const { walls, rooms } = get();
-        const derivedRooms = detectRoomsFromWallGraph(walls, rooms);
-        set({ rooms: derivedRooms });
-        return derivedRooms[0]?.id ?? '';
+        const detected = detectAndLabelRooms(walls, rooms);
+        set({ rooms: detected.rooms });
+        return detected.rooms[0]?.id ?? '';
       },
 
       updateRoom: (id, data) => {
@@ -739,15 +740,29 @@ export const useDrawingStore = create<DrawingState>()(
 
       deleteRoom: (id) => {
         void id;
-        set((state) => ({
-          rooms: detectRoomsFromWallGraph(state.walls, state.rooms),
-        }));
+        set((state) => {
+          const detected = detectAndLabelRooms(state.walls, state.rooms);
+          return { rooms: detected.rooms };
+        });
       },
 
       detectRoomsFromWalls: () => {
-        set((state) => ({
-          rooms: detectRoomsFromWallGraph(state.walls, state.rooms),
-        }));
+        set((state) => {
+          const cleaned = autoCleanWallNetwork(state.walls, {
+            endpointTolerance: 0.5,
+            collinearAngleToleranceDeg: 1.5,
+            enableGapHealing: true,
+            enableTJunctionFix: true,
+            enableIntersectionHealing: true,
+            enableCollinearMerge: true,
+          });
+          const detected = detectAndLabelRooms(cleaned.walls, state.rooms);
+          return {
+            walls: cleaned.walls,
+            rooms: detected.rooms,
+          };
+        });
+        get().saveToHistory('Detect rooms from walls');
       },
 
       // Dimension Actions
@@ -1156,10 +1171,18 @@ export const useDrawingStore = create<DrawingState>()(
             get().wallTypeRegistry
           );
           const importedRooms: Room2D[] = data.rooms || [];
-          const derivedRooms = detectRoomsFromWallGraph(importedWalls, importedRooms);
+          const cleaned = autoCleanWallNetwork(importedWalls, {
+            endpointTolerance: 0.5,
+            collinearAngleToleranceDeg: 1.5,
+            enableGapHealing: true,
+            enableTJunctionFix: true,
+            enableIntersectionHealing: true,
+            enableCollinearMerge: true,
+          });
+          const detected = detectAndLabelRooms(cleaned.walls, importedRooms);
           set({
-            walls: importedWalls,
-            rooms: derivedRooms,
+            walls: cleaned.walls,
+            rooms: detected.rooms,
             dimensions: data.dimensions || [],
             annotations: data.annotations || [],
             sketches: data.sketches || [],

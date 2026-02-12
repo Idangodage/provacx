@@ -272,6 +272,7 @@ export function DrawingCanvas({
         roomsRef,
         resolvedSnapToGrid,
         resolvedGridSize: effectiveSnapGridSize,
+        paperToRealRatio: realPerPaperRatio,
         setSelectedIds,
         notifyRoomValidation,
         setHoveredRoomInfo,
@@ -589,7 +590,7 @@ export function DrawingCanvas({
             return;
         }
 
-        const handles = createWallHandles(selectedWall, zoom);
+        const handles = createWallHandles(selectedWall, zoom, walls, rooms, realPerPaperRatio);
         handles.forEach((handle) => {
             handle.selectable = true;
             handle.evented = true;
@@ -597,7 +598,7 @@ export function DrawingCanvas({
         });
         bringTransientOverlaysToFront(canvas);
         canvas.requestRenderAll();
-    }, [tool, walls, selectedIds, zoom, selectMode.isWallHandleDraggingRef]);
+    }, [tool, walls, rooms, selectedIds, zoom, realPerPaperRatio, selectMode.isWallHandleDraggingRef]);
 
     // Tool state cleanup
     useEffect(() => {

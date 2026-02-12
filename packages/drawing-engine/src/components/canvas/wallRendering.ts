@@ -7,9 +7,14 @@
 
 import * as fabric from 'fabric';
 
-import type { Point2D, Wall2D, DisplayUnit, WallTypeDefinition } from '../../types';
+import type { Point2D, Wall2D, Room2D, DisplayUnit, WallTypeDefinition } from '../../types';
 import { getWallTypeById, resolveWallLayers } from '../../utils/wall-types';
 
+import {
+    buildInteractionScene,
+    createWallManipulationHandles,
+    type ManipulationHandle,
+} from './cad-interaction';
 import { formatDistance, normalizeHexColor, tintHexColor, withPatternAlpha } from './formatting';
 import { PX_TO_MM } from './scale';
 import { wallThicknessToCanvasPx } from './spatial-index';
@@ -1750,26 +1755,78 @@ export function createWallChainDimensionObjects(
 // =============================================================================
 
 const HANDLE_HIT_RADIUS = 7;
+const HANDLE_ANGLE_RADIUS_SCREEN_PX = 28;
 
-export function createWallHandles(wall: Wall2D, zoom: number): fabric.Circle[] {
-    const radius = Math.max(HANDLE_HIT_RADIUS / Math.max(zoom, 0.01), 3);
-    const midpoint = {
-        x: (wall.start.x + wall.end.x) / 2,
-        y: (wall.start.y + wall.end.y) / 2,
-    };
-    return [
-        createWallHandleCircle(wall.id, 'start', wall.start, radius, '#2563eb'),
-        createWallHandleCircle(wall.id, 'end', wall.end, radius, '#2563eb'),
-        createWallHandleCircle(wall.id, 'mid', midpoint, radius, '#f59e0b'),
-    ];
+export function createWallHandles(
+    wall: Wall2D,
+    zoom: number,
+    walls: Wall2D[] = [wall],
+    rooms: Room2D[] = [],
+    paperToRealRatio = 1
+): fabric.Circle[] {
+    const safeZoom = Math.max(zoom, 0.01);
+    const endpointRadius = Math.max(HANDLE_HIT_RADIUS / safeZoom, 3);
+    const midpointRadius = Math.max(6 / safeZoom, 2.5);
+    const thicknessRadius = Math.max(5.5 / safeZoom, 2.25);
+    const cornerRadius = Math.max(5 / safeZoom, 2.2);
+
+    const interactionWalls = walls.map((candidate) => ({
+        ...candidate,
+        thickness: wallThicknessToCanvasPx(candidate.thickness, paperToRealRatio),
+    }));
+    const interactionScene = buildInteractionScene(interactionWalls, rooms, {
+        endpointMergeTolerance: 0.5,
+        hashCellSize: 64,
+    });
+    const handles = createWallManipulationHandles(interactionScene, wall.id, {
+        angleHandleRadius: HANDLE_ANGLE_RADIUS_SCREEN_PX / safeZoom,
+    });
+
+    if (handles.length === 0) {
+        const midpoint = {
+            x: (wall.start.x + wall.end.x) / 2,
+            y: (wall.start.y + wall.end.y) / 2,
+        };
+        return [
+            createWallHandleCircle(wall.id, 'start', wall.start, endpointRadius, '#2563eb', 'crosshair'),
+            createWallHandleCircle(wall.id, 'end', wall.end, endpointRadius, '#2563eb', 'crosshair'),
+            createWallHandleCircle(wall.id, 'mid', midpoint, midpointRadius, '#f59e0b', 'move'),
+        ];
+    }
+
+    return handles.map((handle) => {
+        const radius = handle.type === 'corner-angle'
+            ? cornerRadius
+            : (handle.type === 'wall-thickness-positive' || handle.type === 'wall-thickness-negative')
+                ? thicknessRadius
+                : handle.type === 'wall-midpoint'
+                    ? midpointRadius
+                    : endpointRadius;
+        const color = getWallHandleColor(handle.type);
+        const metadata = {
+            ...(handle.metadata ?? {}),
+            ...(handle.type === 'corner-angle' ? getCornerHandleMetadata(interactionScene, handle) : {}),
+        };
+        return createWallHandleCircle(
+            handle.wallId,
+            normalizeWallHandleType(handle.type),
+            handle.position,
+            radius,
+            color,
+            handle.cursor,
+            metadata
+        );
+    });
 }
 
 function createWallHandleCircle(
     wallId: string,
-    handleType: 'start' | 'end' | 'mid',
+    handleType: string,
     point: Point2D,
     radius: number,
-    color: string
+    color: string,
+    cursor = 'grab',
+    handleMeta?: Record<string, unknown>
 ): fabric.Circle {
     const handle = new fabric.Circle({
         left: point.x - radius,
@@ -1786,12 +1843,45 @@ function createWallHandleCircle(
         lockScalingY: true,
         lockRotation: true,
         objectCaching: false,
-        hoverCursor: 'grab',
+        hoverCursor: cursor,
     });
     (handle as unknown as { name?: string }).name = 'wall-handle';
     (handle as unknown as { wallId?: string }).wallId = wallId;
     (handle as unknown as { handleType?: string }).handleType = handleType;
+    if (handleMeta && Object.keys(handleMeta).length > 0) {
+        (handle as unknown as { handleMeta?: Record<string, unknown> }).handleMeta = handleMeta;
+    }
     return handle;
+}
+
+function normalizeWallHandleType(type: ManipulationHandle['type']): string {
+    if (type === 'wall-start') return 'start';
+    if (type === 'wall-end') return 'end';
+    if (type === 'wall-midpoint') return 'mid';
+    if (type === 'wall-thickness-positive') return 'thickness-positive';
+    if (type === 'wall-thickness-negative') return 'thickness-negative';
+    return 'corner-angle';
+}
+
+function getWallHandleColor(type: ManipulationHandle['type']): string {
+    if (type === 'wall-start' || type === 'wall-end') return '#2563eb';
+    if (type === 'wall-midpoint') return '#f59e0b';
+    if (type === 'wall-thickness-positive' || type === 'wall-thickness-negative') return '#14b8a6';
+    return '#8b5cf6';
+}
+
+function getCornerHandleMetadata(
+    scene: ReturnType<typeof buildInteractionScene>,
+    handle: ManipulationHandle
+): Record<string, unknown> {
+    const cornerVertexId =
+        typeof handle.metadata?.cornerVertexId === 'string' ? handle.metadata.cornerVertexId : null;
+    if (!cornerVertexId) return {};
+    const cornerVertex = scene.vertices.get(cornerVertexId);
+    if (!cornerVertex) return {};
+    return {
+        cornerPoint: { ...cornerVertex.position },
+    };
 }
 
 // =============================================================================

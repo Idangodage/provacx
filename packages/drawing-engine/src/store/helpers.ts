@@ -5,6 +5,7 @@
  * Extracted for better organization and testability.
  */
 
+import { detectAndLabelRooms } from '../professional/wall-network';
 import type {
     Point2D,
     Wall2D,
@@ -18,7 +19,7 @@ import type {
     WallTypeDefinition,
 } from '../types';
 import { generateId } from '../utils/geometry';
-import { applyNestedRoomHierarchy, detectRoomsFromWallGraph } from '../utils/room-detection';
+import { applyNestedRoomHierarchy } from '../utils/room-detection';
 import { applyWallOrientationMetadata } from '../utils/wall-orientation';
 import {
     BUILT_IN_WALL_TYPES,
@@ -171,66 +172,10 @@ export function detectRoomsIncremental(
     nextWalls: Wall2D[],
     previousRooms: Room2D[]
 ): Room2D[] {
+    void previousWalls;
     if (nextWalls.length < 3) return [];
-
-    const previousById = new Map(previousWalls.map((wall) => [wall.id, wall]));
-    const nextById = new Map(nextWalls.map((wall) => [wall.id, wall]));
-    const changedWallIds = new Set<string>();
-
-    nextById.forEach((nextWall, wallId) => {
-        const previousWall = previousById.get(wallId);
-        if (!previousWall || wallGeometryChanged(previousWall, nextWall)) {
-            changedWallIds.add(wallId);
-        }
-    });
-
-    previousById.forEach((_previousWall, wallId) => {
-        if (!nextById.has(wallId)) {
-            changedWallIds.add(wallId);
-        }
-    });
-
-    if (changedWallIds.size === 0) {
-        return sortRoomsForDisplay(applyNestedRoomHierarchy(previousRooms));
-    }
-
-    const previousAdjacency = buildWallAdjacencyMap(previousWalls, WALL_NODE_TOLERANCE_PX);
-    const nextAdjacency = buildWallAdjacencyMap(nextWalls, WALL_NODE_TOLERANCE_PX);
-    const affectedWallIds = new Set<string>();
-    const queue = Array.from(changedWallIds);
-
-    while (queue.length > 0) {
-        const wallId = queue.shift();
-        if (!wallId || affectedWallIds.has(wallId)) continue;
-        affectedWallIds.add(wallId);
-
-        const previousNeighbors = previousAdjacency.get(wallId);
-        previousNeighbors?.forEach((neighborId) => {
-            if (!affectedWallIds.has(neighborId)) {
-                queue.push(neighborId);
-            }
-        });
-
-        const nextNeighbors = nextAdjacency.get(wallId);
-        nextNeighbors?.forEach((neighborId) => {
-            if (!affectedWallIds.has(neighborId)) {
-                queue.push(neighborId);
-            }
-        });
-    }
-
-    if (affectedWallIds.size === 0) {
-        return sortRoomsForDisplay(detectRoomsFromWallGraph(nextWalls, previousRooms));
-    }
-
-    const nextWallIdSet = new Set(nextWalls.map((wall) => wall.id));
-    const unaffectedRooms = previousRooms.filter((room) =>
-        room.wallIds.every((wallId) => nextWallIdSet.has(wallId) && !affectedWallIds.has(wallId))
-    );
-    const affectedWalls = nextWalls.filter((wall) => affectedWallIds.has(wall.id));
-    const recalculatedRooms = detectRoomsFromWallGraph(affectedWalls, previousRooms);
-
-    return sortRoomsForDisplay(applyNestedRoomHierarchy([...unaffectedRooms, ...recalculatedRooms]));
+    const detected = detectAndLabelRooms(nextWalls, previousRooms);
+    return sortRoomsForDisplay(applyNestedRoomHierarchy(detected.rooms));
 }
 
 // =============================================================================

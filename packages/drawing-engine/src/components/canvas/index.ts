@@ -14,6 +14,7 @@ export * from './formatting';
 
 // Spatial index utilities
 export * from './spatial-index';
+export * from './spatial-hash';
 
 // Wall rendering
 export * from './wallRendering';
@@ -23,6 +24,7 @@ export * from './roomRendering';
 
 // Wall operations
 export * from './wallOperations';
+export * from './cad-interaction';
 
 // Tool utilities
 export * from './toolUtils';

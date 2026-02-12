@@ -12,8 +12,11 @@ import { useRef, useCallback } from 'react';
 
 import { useSmartDrawingStore } from '../../../store';
 import type { Point2D, Wall2D, Room2D } from '../../../types';
+import { applyCornerAngleDrag } from '../../../utils/corner-constraints';
 import { detectRoomsFromWallGraph, validateNestedRooms } from '../../../utils/room-detection';
+import { WallEditorEngine } from '../../../utils/wall-editing';
 import {
+    MM_TO_PX,
     distanceBetween,
     deriveNestedRelationWarnings,
     pickSmallestRoomAtPoint,
@@ -25,15 +28,29 @@ import {
 
 const WALL_ENDPOINT_TOLERANCE = 0.5;
 const HANDLE_HIT_RADIUS = 7;
+const MIN_WALL_THICKNESS_MM = 1;
+const ANGLE_SNAP_VALUES = [90, 45, 30, 60, 120, 135, 150];
+
+type WallHandleType =
+    | 'start'
+    | 'end'
+    | 'mid'
+    | 'vertex'
+    | 'thickness-positive'
+    | 'thickness-negative'
+    | 'corner-angle';
 
 interface WallHandleDragSession {
     wallId: string;
-    handleType: 'start' | 'end' | 'mid' | 'vertex';
+    handleType: WallHandleType;
     originalWalls: Wall2D[];
     originalRooms: Room2D[];
     originalStart: Point2D;
     originalEnd: Point2D;
+    originalMid: Point2D;
+    originalThickness: number;
     sourceNode?: Point2D;
+    handleMeta?: Record<string, unknown>;
 }
 
 interface TargetMeta {
@@ -42,7 +59,8 @@ interface TargetMeta {
     wallIds?: string[];
     roomId?: string;
     nodePoint?: Point2D;
-    handleType?: 'start' | 'end' | 'mid' | 'vertex';
+    handleType?: string;
+    handleMeta?: Record<string, unknown>;
 }
 
 export interface UseSelectModeOptions {
@@ -51,6 +69,7 @@ export interface UseSelectModeOptions {
     roomsRef: React.MutableRefObject<Room2D[]>;
     resolvedSnapToGrid: boolean;
     resolvedGridSize: number;
+    paperToRealRatio: number;
     setSelectedIds: (ids: string[]) => void;
     notifyRoomValidation: (messages: string[], title: string, blocking?: boolean) => void;
     setHoveredRoomInfo: React.Dispatch<React.SetStateAction<{
@@ -71,6 +90,7 @@ export function useSelectMode({
     roomsRef,
     resolvedSnapToGrid,
     resolvedGridSize,
+    paperToRealRatio,
     setSelectedIds,
     notifyRoomValidation,
     setHoveredRoomInfo,
@@ -89,7 +109,69 @@ export function useSelectMode({
             roomId: typed?.roomId,
             nodePoint: typed?.nodePoint,
             handleType: typed?.handleType,
+            handleMeta: typed?.handleMeta,
         };
+    }, []);
+
+    const cloneWalls = useCallback((input: Wall2D[]): Wall2D[] => (
+        input.map((item) => ({
+            ...item,
+            start: { ...item.start },
+            end: { ...item.end },
+            connectedWallIds: item.connectedWallIds ? [...item.connectedWallIds] : item.connectedWallIds,
+            openings: item.openings.map((opening) => ({ ...opening })),
+            wallLayers: item.wallLayers ? item.wallLayers.map((layer) => ({ ...layer })) : item.wallLayers,
+        }))
+    ), []);
+
+    const cloneRooms = useCallback((input: Room2D[]): Room2D[] => (
+        input.map((room) => ({
+            ...room,
+            vertices: room.vertices.map((vertex) => ({ ...vertex })),
+            wallIds: [...room.wallIds],
+            childRoomIds: [...room.childRoomIds],
+        }))
+    ), []);
+
+    const normalizeWallHandleType = useCallback((value?: string): WallHandleType | null => {
+        if (!value) return null;
+        if (value === 'start' || value === 'wall-start') return 'start';
+        if (value === 'end' || value === 'wall-end') return 'end';
+        if (value === 'mid' || value === 'wall-midpoint') return 'mid';
+        if (value === 'thickness-positive' || value === 'wall-thickness-positive') return 'thickness-positive';
+        if (value === 'thickness-negative' || value === 'wall-thickness-negative') return 'thickness-negative';
+        if (value === 'corner-angle') return 'corner-angle';
+        if (value === 'vertex') return 'vertex';
+        return null;
+    }, []);
+
+    const wallDirectionNormal = useCallback((start: Point2D, end: Point2D): Point2D | null => {
+        const dx = end.x - start.x;
+        const dy = end.y - start.y;
+        const length = Math.hypot(dx, dy);
+        if (length <= 0.000001) return null;
+        return { x: -dy / length, y: dx / length };
+    }, []);
+
+    const projectionOnNormal = useCallback((origin: Point2D, target: Point2D, normal: Point2D): number => (
+        (target.x - origin.x) * normal.x + (target.y - origin.y) * normal.y
+    ), []);
+
+    const thicknessMmToScenePx = useCallback((thicknessMm: number): number => {
+        const safeRatio = Number.isFinite(paperToRealRatio) && paperToRealRatio > 0 ? paperToRealRatio : 1;
+        return (Math.max(thicknessMm, MIN_WALL_THICKNESS_MM) / safeRatio) * MM_TO_PX;
+    }, [paperToRealRatio]);
+
+    const thicknessScenePxToMm = useCallback((thicknessScenePx: number): number => {
+        const safeRatio = Number.isFinite(paperToRealRatio) && paperToRealRatio > 0 ? paperToRealRatio : 1;
+        return Math.max((thicknessScenePx / MM_TO_PX) * safeRatio, MIN_WALL_THICKNESS_MM);
+    }, [paperToRealRatio]);
+
+    const readPointFromMeta = useCallback((value: unknown): Point2D | null => {
+        if (!value || typeof value !== 'object') return null;
+        const point = value as { x?: unknown; y?: unknown };
+        if (typeof point.x !== 'number' || typeof point.y !== 'number') return null;
+        return { x: point.x, y: point.y };
     }, []);
 
     const updateSelectionFromTarget = useCallback(
@@ -155,7 +237,7 @@ export function useSelectMode({
             notifyRoomValidation(warningMessages, 'Room warning:');
         }
 
-        useSmartDrawingStore.getState().saveToHistory('Edit wall');
+        useSmartDrawingStore.getState().setWalls(wallsRef.current, 'Edit wall');
         wallHandleDragRef.current = null;
         isWallHandleDraggingRef.current = false;
     }, [wallsRef, roomsRef, notifyRoomValidation]);
@@ -188,19 +270,12 @@ export function useSelectMode({
                     wallHandleDragRef.current = {
                         wallId: sourceWallId,
                         handleType: 'vertex',
-                        originalWalls: wallsRef.current.map((item) => ({
-                            ...item,
-                            start: { ...item.start },
-                            end: { ...item.end },
-                        })),
-                        originalRooms: roomsRef.current.map((room) => ({
-                            ...room,
-                            vertices: room.vertices.map((vertex) => ({ ...vertex })),
-                            wallIds: [...room.wallIds],
-                            childRoomIds: [...room.childRoomIds],
-                        })),
+                        originalWalls: cloneWalls(wallsRef.current),
+                        originalRooms: cloneRooms(roomsRef.current),
                         originalStart: { ...meta.nodePoint },
                         originalEnd: { ...meta.nodePoint },
+                        originalMid: { ...meta.nodePoint },
+                        originalThickness: MIN_WALL_THICKNESS_MM,
                         sourceNode: { ...meta.nodePoint },
                     };
                 }
@@ -222,44 +297,53 @@ export function useSelectMode({
                 return;
             }
 
-            if (meta.name !== 'wall-handle' || !meta.wallId || !meta.handleType) return;
+            if (meta.name !== 'wall-handle' || !meta.wallId) return;
+            const normalizedType = normalizeWallHandleType(meta.handleType);
+            if (!normalizedType || normalizedType === 'vertex') return;
 
             const wall = wallsRef.current.find((item) => item.id === meta.wallId);
             if (!wall) return;
 
             const center = target.getCenterPoint();
-            const pointer = resolvedSnapToGrid
-                ? snapPointToGrid({ x: center.x, y: center.y }, resolvedGridSize)
-                : { x: center.x, y: center.y };
+            const rawPointer = { x: center.x, y: center.y };
+            const snappedPointer = resolvedSnapToGrid
+                ? snapPointToGrid(rawPointer, resolvedGridSize)
+                : rawPointer;
+            const pointer =
+                normalizedType === 'thickness-positive' ||
+                normalizedType === 'thickness-negative' ||
+                normalizedType === 'corner-angle'
+                    ? rawPointer
+                    : snappedPointer;
 
             const targetRadius = Number((target as FabricCircle).get('radius')) || HANDLE_HIT_RADIUS;
-            target.set({
-                left: pointer.x - targetRadius,
-                top: pointer.y - targetRadius,
-            });
-            target.setCoords();
+            const setTargetPoint = (point: Point2D): void => {
+                target.set({
+                    left: point.x - targetRadius,
+                    top: point.y - targetRadius,
+                });
+                target.setCoords();
+            };
+            setTargetPoint(pointer);
 
             if (
                 !wallHandleDragRef.current ||
                 wallHandleDragRef.current.wallId !== meta.wallId ||
-                wallHandleDragRef.current.handleType !== meta.handleType
+                wallHandleDragRef.current.handleType !== normalizedType
             ) {
                 wallHandleDragRef.current = {
                     wallId: meta.wallId,
-                    handleType: meta.handleType,
-                    originalWalls: wallsRef.current.map((item) => ({
-                        ...item,
-                        start: { ...item.start },
-                        end: { ...item.end },
-                    })),
-                    originalRooms: roomsRef.current.map((room) => ({
-                        ...room,
-                        vertices: room.vertices.map((vertex) => ({ ...vertex })),
-                        wallIds: [...room.wallIds],
-                        childRoomIds: [...room.childRoomIds],
-                    })),
+                    handleType: normalizedType,
+                    originalWalls: cloneWalls(wallsRef.current),
+                    originalRooms: cloneRooms(roomsRef.current),
                     originalStart: { ...wall.start },
                     originalEnd: { ...wall.end },
+                    originalMid: {
+                        x: (wall.start.x + wall.end.x) / 2,
+                        y: (wall.start.y + wall.end.y) / 2,
+                    },
+                    originalThickness: wall.thickness,
+                    handleMeta: meta.handleMeta,
                 };
             }
 
@@ -272,24 +356,122 @@ export function useSelectMode({
                 nextWalls = moveConnectedNode(nextWalls, dragSession.originalStart, pointer, WALL_ENDPOINT_TOLERANCE);
             } else if (dragSession.handleType === 'end') {
                 nextWalls = moveConnectedNode(nextWalls, dragSession.originalEnd, pointer, WALL_ENDPOINT_TOLERANCE);
-            } else {
-                const originalMid = {
-                    x: (dragSession.originalStart.x + dragSession.originalEnd.x) / 2,
-                    y: (dragSession.originalStart.y + dragSession.originalEnd.y) / 2,
-                };
-                const delta = { x: pointer.x - originalMid.x, y: pointer.y - originalMid.y };
-                nextWalls = moveConnectedNode(
-                    nextWalls,
-                    dragSession.originalStart,
-                    { x: dragSession.originalStart.x + delta.x, y: dragSession.originalStart.y + delta.y },
-                    WALL_ENDPOINT_TOLERANCE
-                );
-                nextWalls = moveConnectedNode(
-                    nextWalls,
-                    dragSession.originalEnd,
-                    { x: dragSession.originalEnd.x + delta.x, y: dragSession.originalEnd.y + delta.y },
-                    WALL_ENDPOINT_TOLERANCE
-                );
+            } else if (dragSession.handleType === 'mid') {
+                const normal = wallDirectionNormal(dragSession.originalStart, dragSession.originalEnd);
+                if (normal) {
+                    const offset = projectionOnNormal(dragSession.originalMid, pointer, normal);
+                    const constrainedMid = {
+                        x: dragSession.originalMid.x + normal.x * offset,
+                        y: dragSession.originalMid.y + normal.y * offset,
+                    };
+                    setTargetPoint(constrainedMid);
+
+                    const editor = new WallEditorEngine({
+                        walls: dragSession.originalWalls,
+                        rooms: dragSession.originalRooms,
+                        selectedWallIds: [dragSession.wallId],
+                        options: { nodeTolerance: WALL_ENDPOINT_TOLERANCE },
+                    });
+                    const moveResult = editor.moveWallPerpendicular(dragSession.wallId, offset, {
+                        propagateToAdjacent: true,
+                        collisionPolicy: 'allow',
+                    });
+                    if (moveResult.ok) {
+                        nextWalls = moveResult.state.walls;
+                    }
+                }
+            } else if (
+                dragSession.handleType === 'thickness-positive' ||
+                dragSession.handleType === 'thickness-negative'
+            ) {
+                const normal = wallDirectionNormal(dragSession.originalStart, dragSession.originalEnd);
+                if (normal) {
+                    const sideSign = dragSession.handleType === 'thickness-positive' ? 1 : -1;
+                    const originalHalfPx = thicknessMmToScenePx(dragSession.originalThickness) / 2;
+                    const originalHandlePoint = {
+                        x: dragSession.originalMid.x + normal.x * originalHalfPx * sideSign,
+                        y: dragSession.originalMid.y + normal.y * originalHalfPx * sideSign,
+                    };
+                    const deltaSigned = projectionOnNormal(originalHandlePoint, pointer, normal);
+                    const nextHalfPx = Math.max(0.5, originalHalfPx + deltaSigned * sideSign);
+                    const constrainedPointer = {
+                        x: dragSession.originalMid.x + normal.x * nextHalfPx * sideSign,
+                        y: dragSession.originalMid.y + normal.y * nextHalfPx * sideSign,
+                    };
+                    setTargetPoint(constrainedPointer);
+
+                    const nextThickness = thicknessScenePxToMm(nextHalfPx * 2);
+                    const editor = new WallEditorEngine({
+                        walls: dragSession.originalWalls,
+                        rooms: dragSession.originalRooms,
+                        selectedWallIds: [dragSession.wallId],
+                        options: { nodeTolerance: WALL_ENDPOINT_TOLERANCE },
+                    });
+                    const thicknessResult = editor.adjustWallThickness(dragSession.wallId, nextThickness, {
+                        mode: 'centerline',
+                        propagateToAdjacent: false,
+                        collisionPolicy: 'allow',
+                    });
+                    if (thicknessResult.ok) {
+                        nextWalls = thicknessResult.state.walls;
+                    }
+                }
+            } else if (dragSession.handleType === 'corner-angle') {
+                const cornerPoint = readPointFromMeta(dragSession.handleMeta?.cornerPoint);
+                const neighborWallId =
+                    typeof dragSession.handleMeta?.neighborWallId === 'string'
+                        ? dragSession.handleMeta.neighborWallId
+                        : null;
+                const sourceWall = dragSession.originalWalls.find((candidate) => candidate.id === dragSession.wallId);
+                if (cornerPoint && neighborWallId && sourceWall) {
+                    const connectedToStart =
+                        distanceBetween(sourceWall.start, cornerPoint) <=
+                        distanceBetween(sourceWall.end, cornerPoint);
+                    const fixedEndpoint = connectedToStart ? sourceWall.end : sourceWall.start;
+                    const referenceVector = {
+                        x: fixedEndpoint.x - cornerPoint.x,
+                        y: fixedEndpoint.y - cornerPoint.y,
+                    };
+                    const dragVector = {
+                        x: pointer.x - cornerPoint.x,
+                        y: pointer.y - cornerPoint.y,
+                    };
+                    const refLength = Math.hypot(referenceVector.x, referenceVector.y);
+                    const dragLength = Math.hypot(dragVector.x, dragVector.y);
+                    if (refLength > 0.001 && dragLength > 0.001) {
+                        const dotValue =
+                            (referenceVector.x * dragVector.x + referenceVector.y * dragVector.y) /
+                            (refLength * dragLength);
+                        const clamped = Math.max(-1, Math.min(1, dotValue));
+                        const targetAngleDeg = (Math.acos(clamped) * 180) / Math.PI;
+                        const solve = applyCornerAngleDrag(
+                            dragSession.originalWalls,
+                            {
+                                wallAId: dragSession.wallId,
+                                wallBId: neighborWallId,
+                                corner: cornerPoint,
+                                targetAngleDeg,
+                                mode: 'min-movement',
+                            },
+                            {
+                                tolerance: WALL_ENDPOINT_TOLERANCE,
+                                maxIterations: 32,
+                                snapAngles: ANGLE_SNAP_VALUES,
+                                snapToleranceDeg: 3,
+                                minAngleDeg: 5,
+                                maxAngleDeg: 175,
+                                hardAngle: true,
+                                preventIntersections: true,
+                            }
+                        );
+                        const hasHardViolation = solve.violations.some(
+                            (violation) => violation.severity === 'error'
+                        );
+                        if (!hasHardViolation) {
+                            nextWalls = solve.walls;
+                        }
+                    }
+                }
             }
 
             nextWalls = nextWalls.filter((candidate) => distanceBetween(candidate.start, candidate.end) > 0.001);
@@ -297,7 +479,23 @@ export function useSelectMode({
             applyTransientWallGraph(nextWalls);
             setSelectedIds([meta.wallId]);
         },
-        [wallsRef, roomsRef, resolvedSnapToGrid, resolvedGridSize, getTargetMeta, applyTransientWallGraph, setSelectedIds]
+        [
+            wallsRef,
+            roomsRef,
+            resolvedSnapToGrid,
+            resolvedGridSize,
+            getTargetMeta,
+            normalizeWallHandleType,
+            cloneWalls,
+            cloneRooms,
+            wallDirectionNormal,
+            projectionOnNormal,
+            thicknessMmToScenePx,
+            thicknessScenePxToMm,
+            readPointFromMeta,
+            applyTransientWallGraph,
+            setSelectedIds,
+        ]
     );
 
     const handleDoubleClick = useCallback(
