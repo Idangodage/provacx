@@ -29,7 +29,9 @@
   "scripts": {
     "lint": "eslint src/",
     "type-check": "tsc --noEmit",
-    "typecheck": "pnpm run type-check"
+    "typecheck": "pnpm run type-check",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@provacx/shared": "workspace:*",
@@ -43,9 +45,11 @@
     "@provacx/eslint-config": "workspace:*",
     "@provacx/typescript-config": "workspace:*",
     "@types/react": "^18.2.0",
+    "@types/node": "^22.10.2",
     "eslint": "^8.57.0",
     "react": "^18.2.0",
-    "typescript": "^5.4.5"
+    "typescript": "^5.4.5",
+    "vitest": "^2.1.8"
   },
   "peerDependencies": {
     "react": "^18.2.0"

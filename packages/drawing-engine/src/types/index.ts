@@ -197,6 +197,9 @@ export interface Wall2D {
   orientationSource?: 'auto-cycle' | 'auto-chain' | 'manual';
   orientationComponentId?: string;
   dimensionAnchor?: Point2D;
+  isBevelSegment?: boolean;
+  bevelNodeKey?: string;
+  bevelSourceWallIds?: string[];
   openings: Opening2D[];
 }
 

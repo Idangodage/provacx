@@ -10,6 +10,7 @@ import * as fabric from 'fabric';
 import type { Point2D, Wall2D, DisplayUnit, WallTypeDefinition } from '../../types';
 import { getWallTypeById, resolveWallLayers } from '../../utils/wall-types';
 
+import { createWallControlPointsForWall } from './control-point-factory';
 import { formatDistance, normalizeHexColor, tintHexColor, withPatternAlpha } from './formatting';
 import { PX_TO_MM } from './scale';
 import { wallThicknessToCanvasPx } from './spatial-index';
@@ -691,6 +692,14 @@ export function createWallRenderObjects(
         boundary
     );
     const isSelected = options.selected === true;
+    const selectedShadow = isSelected
+        ? new fabric.Shadow({
+            color: 'rgba(37, 99, 235, 0.35)',
+            blur: 12,
+            offsetX: 0,
+            offsetY: 0,
+        })
+        : undefined;
 
     const patternOrigin = { x: 0, y: 0 };
     const fillStyle = createWallFillStyle(wall, wallTypeRegistry, patternOrigin);
@@ -746,6 +755,7 @@ export function createWallRenderObjects(
             selectable: true,
             evented: true,
             objectCaching: false,
+            shadow: selectedShadow,
         });
     } else {
         wallBody = new fabric.Circle({
@@ -758,6 +768,7 @@ export function createWallRenderObjects(
             objectCaching: false,
             selectable: true,
             evented: true,
+            shadow: selectedShadow,
         });
     }
     (wallBody as unknown as { name?: string }).name = 'wall-render';
@@ -1749,49 +1760,12 @@ export function createWallChainDimensionObjects(
 // Wall Handles
 // =============================================================================
 
-const HANDLE_HIT_RADIUS = 7;
-
-export function createWallHandles(wall: Wall2D, zoom: number): fabric.Circle[] {
-    const radius = Math.max(HANDLE_HIT_RADIUS / Math.max(zoom, 0.01), 3);
-    const midpoint = {
-        x: (wall.start.x + wall.end.x) / 2,
-        y: (wall.start.y + wall.end.y) / 2,
-    };
-    return [
-        createWallHandleCircle(wall.id, 'start', wall.start, radius, '#2563eb'),
-        createWallHandleCircle(wall.id, 'end', wall.end, radius, '#2563eb'),
-        createWallHandleCircle(wall.id, 'mid', midpoint, radius, '#f59e0b'),
-    ];
-}
-
-function createWallHandleCircle(
-    wallId: string,
-    handleType: 'start' | 'end' | 'mid',
-    point: Point2D,
-    radius: number,
-    color: string
-): fabric.Circle {
-    const handle = new fabric.Circle({
-        left: point.x - radius,
-        top: point.y - radius,
-        radius,
-        fill: color,
-        stroke: '#ffffff',
-        strokeWidth: Math.max(radius * 0.18, 1),
-        selectable: true,
-        evented: true,
-        hasControls: false,
-        hasBorders: false,
-        lockScalingX: true,
-        lockScalingY: true,
-        lockRotation: true,
-        objectCaching: false,
-        hoverCursor: 'grab',
-    });
-    (handle as unknown as { name?: string }).name = 'wall-handle';
-    (handle as unknown as { wallId?: string }).wallId = wallId;
-    (handle as unknown as { handleType?: string }).handleType = handleType;
-    return handle;
+export function createWallHandles(
+    wall: Wall2D,
+    zoom: number,
+    paperToRealRatio: number
+): fabric.Circle[] {
+    return createWallControlPointsForWall(wall, zoom, paperToRealRatio);
 }
 
 // =============================================================================
@@ -1819,7 +1793,10 @@ export function clearRenderedWalls(canvas: fabric.Canvas): void {
 export function clearWallHandles(canvas: fabric.Canvas): void {
     const handles = canvas
         .getObjects()
-        .filter((obj) => (obj as unknown as { name?: string }).name === 'wall-handle');
+        .filter((obj) => {
+            const name = (obj as unknown as { name?: string }).name;
+            return name === 'wall-handle' || name === 'wall-corner-handle';
+        });
     handles.forEach((obj) => canvas.remove(obj));
 }
 
@@ -2246,7 +2223,11 @@ export function renderSnapHighlight(
 export function bringTransientOverlaysToFront(canvas: fabric.Canvas): void {
     const transientObjects = canvas.getObjects().filter((obj) => {
         const name = (obj as unknown as { name?: string }).name;
-        return name === 'drawing-preview' || name === 'wall-snap-highlight';
+        return (
+            name === 'drawing-preview' ||
+            name === 'wall-snap-highlight' ||
+            name === 'wall-selection-rect'
+        );
     });
     const canvasWithBring = canvas as unknown as { bringObjectToFront?: (obj: fabric.Object) => void };
     transientObjects.forEach((obj) => {

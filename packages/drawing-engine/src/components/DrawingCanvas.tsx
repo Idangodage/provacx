@@ -34,6 +34,7 @@ import {
     createWallOrientationIndicatorObjects,
     resolveWallDimensionCollisions,
     createWallHandles,
+    createWallCornerControlPoints,
     clearRenderedWalls,
     clearWallHandles,
     clearDrawingPreview,
@@ -41,6 +42,7 @@ import {
     createRoomRenderObjects,
     clearRenderedRooms,
     getRoomHierarchyDepth,
+    createObserverHub,
     getToolCursor,
     isDrawingTool,
     renderDrawingPreview,
@@ -82,6 +84,15 @@ export interface DrawingCanvasProps {
     gridSubdivisions?: number;
     backgroundColor?: string;
     onCanvasReady?: (canvas: fabric.Canvas) => void;
+    onSelectionChange?: (detail: DrawingCanvasSelectionDetail) => void;
+}
+
+export interface DrawingCanvasSelectionDetail {
+    selectedIds: string[];
+    wallIds: string[];
+    roomIds: string[];
+    wallCount: number;
+    roomCount: number;
 }
 
 interface CanvasState {
@@ -118,6 +129,7 @@ export function DrawingCanvas({
     gridSubdivisions = 10,
     backgroundColor = 'transparent',
     onCanvasReady,
+    onSelectionChange,
 }: DrawingCanvasProps) {
     // Core refs
     const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -130,6 +142,7 @@ export function DrawingCanvas({
     const roomsRef = useRef<Room2D[]>([]);
     const mousePositionRef = useRef<Point2D>({ x: 0, y: 0 });
     const mousePositionFrameRef = useRef<number | null>(null);
+    const selectionObserverHubRef = useRef(createObserverHub<DrawingCanvasSelectionDetail>());
     const canvasStateRef = useRef<CanvasState>({
         isPanning: false,
         lastPanPoint: null,
@@ -156,6 +169,7 @@ export function DrawingCanvas({
         isDrawing: false,
         drawingPoints: [],
     });
+    const [selectionContextMenu, setSelectionContextMenu] = useState<{ x: number; y: number } | null>(null);
 
     // Store
     const {
@@ -265,18 +279,35 @@ export function DrawingCanvas({
         []
     );
 
+    const selectionStatePort = useMemo(
+        () => ({
+            getSelectedIds: () => useSmartDrawingStore.getState().selectedElementIds,
+            setSelectedIds: (ids: string[]) => setSelectedIds(ids),
+            setWallRoomState: (nextWalls: Wall2D[], nextRooms: Room2D[]) => {
+                useSmartDrawingStore.setState({ walls: nextWalls, rooms: nextRooms });
+            },
+            saveToHistory: (action: string) => useSmartDrawingStore.getState().saveToHistory(action),
+        }),
+        [setSelectedIds]
+    );
+
     // Mode hooks
     const selectMode = useSelectMode({
         fabricRef,
+        zoomRef,
         wallsRef,
         roomsRef,
+        statePort: selectionStatePort,
+        wallSpatialIndex,
+        wallSpatialCellSize: WALL_SPATIAL_INDEX_CELL_PX,
+        paperToRealRatio: realPerPaperRatio,
         resolvedSnapToGrid,
         resolvedGridSize: effectiveSnapGridSize,
-        setSelectedIds,
         notifyRoomValidation,
         setHoveredRoomInfo,
         setHoveredElement,
         originOffset,
+        wallSelectionTolerancePx: 8,
     });
 
     const wallMode = useWallMode({
@@ -315,6 +346,11 @@ export function DrawingCanvas({
         canvasStateRef,
     });
 
+    const selectAllWalls = useCallback(() => {
+        const wallIds = walls.map((wall) => wall.id);
+        setSelectedIds(wallIds);
+    }, [walls, setSelectedIds]);
+
     const flipSelectedWallInteriorExterior = useCallback(() => {
         const selectedWallIdSet = new Set(selectedIds.filter((id) => walls.some((wall) => wall.id === id)));
         if (selectedWallIdSet.size === 0) return;
@@ -334,6 +370,7 @@ export function DrawingCanvas({
         endWallChain: wallMode.endWallChain,
         clearRoomPolygonState: roomMode.clearRoomPolygonState,
         deleteSelected,
+        selectAllWalls,
         setActiveWallTypeId,
         flipSelectedWallInteriorExterior,
         setIsSpacePressed,
@@ -352,7 +389,7 @@ export function DrawingCanvas({
             width: host.clientWidth,
             height: host.clientHeight,
             backgroundColor,
-            selection: tool === 'select',
+            selection: false,
             preserveObjectStacking: true,
             enableRetinaScaling: true,
         });
@@ -405,6 +442,54 @@ export function DrawingCanvas({
     useEffect(() => { wallsRef.current = walls; }, [walls]);
     useEffect(() => { roomsRef.current = rooms; }, [rooms]);
 
+    useEffect(() => {
+        if (!onSelectionChange) return;
+        return selectionObserverHubRef.current.subscribe(onSelectionChange);
+    }, [onSelectionChange]);
+
+    useEffect(() => {
+        return () => {
+            selectionObserverHubRef.current.clear();
+        };
+    }, []);
+
+    useEffect(() => {
+        const wallIdSet = new Set(walls.map((wall) => wall.id));
+        const roomIdSet = new Set(rooms.map((room) => room.id));
+        const wallIds = selectedIds.filter((id) => wallIdSet.has(id));
+        const roomIds = selectedIds.filter((id) => roomIdSet.has(id));
+        selectionObserverHubRef.current.notify({
+            selectedIds: [...selectedIds],
+            wallIds,
+            roomIds,
+            wallCount: wallIds.length,
+            roomCount: roomIds.length,
+        });
+    }, [selectedIds, walls, rooms]);
+
+    useEffect(() => {
+        if (!selectionContextMenu) return;
+
+        const closeContextMenu = () => setSelectionContextMenu(null);
+        const handleEscape = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') {
+                setSelectionContextMenu(null);
+            }
+        };
+
+        window.addEventListener('mousedown', closeContextMenu);
+        window.addEventListener('scroll', closeContextMenu, true);
+        window.addEventListener('blur', closeContextMenu);
+        window.addEventListener('keydown', handleEscape);
+
+        return () => {
+            window.removeEventListener('mousedown', closeContextMenu);
+            window.removeEventListener('scroll', closeContextMenu, true);
+            window.removeEventListener('blur', closeContextMenu);
+            window.removeEventListener('keydown', handleEscape);
+        };
+    }, [selectionContextMenu]);
+
     // ---------------------------------------------------------------------------
     // Tool Change Handler
     // ---------------------------------------------------------------------------
@@ -417,7 +502,7 @@ export function DrawingCanvas({
         const allowSelection = effectiveTool === 'select';
         const pointerCursor = canvasState.isPanning ? 'grabbing' : getToolCursor(effectiveTool);
 
-        canvas.selection = allowSelection;
+        canvas.selection = false;
         canvas.defaultCursor = pointerCursor;
         canvas.hoverCursor = pointerCursor;
 
@@ -431,6 +516,7 @@ export function DrawingCanvas({
                 objectName === 'wall-chain-dimension' ||
                 objectName === 'wall-orientation-indicator' ||
                 objectName === 'wall-override-indicator' ||
+                objectName === 'wall-selection-rect' ||
                 objectName === 'room-tag';
             if (isNonInteractive) {
                 obj.selectable = false;
@@ -583,25 +669,44 @@ export function DrawingCanvas({
             return;
         }
 
-        const selectedWall = walls.find((w) => selectedIds.includes(w.id));
-        if (!selectedWall) {
+        const selectedWallIdSet = new Set(selectedIds.filter((id) => walls.some((wall) => wall.id === id)));
+        if (selectedWallIdSet.size === 0) {
             canvas.requestRenderAll();
             return;
         }
 
-        const handles = createWallHandles(selectedWall, zoom);
-        handles.forEach((handle) => {
+        walls.forEach((wall) => {
+            if (!selectedWallIdSet.has(wall.id)) return;
+            const handles = createWallHandles(wall, zoom, realPerPaperRatio);
+            handles.forEach((handle) => {
+                handle.selectable = true;
+                handle.evented = true;
+                canvas.add(handle);
+            });
+        });
+
+        const cornerHandles = createWallCornerControlPoints(
+            walls,
+            zoom,
+            realPerPaperRatio,
+            selectedWallIdSet
+        );
+        cornerHandles.forEach((handle) => {
             handle.selectable = true;
             handle.evented = true;
             canvas.add(handle);
         });
         bringTransientOverlaysToFront(canvas);
         canvas.requestRenderAll();
-    }, [tool, walls, selectedIds, zoom, selectMode.isWallHandleDraggingRef]);
+    }, [tool, walls, selectedIds, zoom, realPerPaperRatio, selectMode.isWallHandleDraggingRef]);
 
     // Tool state cleanup
     useEffect(() => {
         if (tool !== 'wall') wallMode.endWallChain();
+        if (tool !== 'select') {
+            selectMode.clearBoxSelection();
+            setSelectionContextMenu(null);
+        }
         if (tool !== 'room') {
             roomMode.clearRoomPolygonState();
             const currentState = canvasStateRef.current;
@@ -611,7 +716,7 @@ export function DrawingCanvas({
                 setCanvasState(nextState);
             }
         }
-    }, [tool, wallMode, roomMode]);
+    }, [tool, wallMode, roomMode, selectMode]);
 
     useEffect(() => {
         if (tool === 'room') setRoomDrawMode('rectangle');
@@ -665,6 +770,9 @@ export function DrawingCanvas({
                 mouseEvent.preventDefault();
                 return;
             }
+            if (selectionContextMenu !== null && mouseEvent.button !== 2) {
+                setSelectionContextMenu(null);
+            }
 
             const shouldPan = tool === 'pan' || isSpacePressed;
             if (shouldPan) {
@@ -708,7 +816,7 @@ export function DrawingCanvas({
                 setCanvasState(nextState);
             }
         },
-        [tool, roomDrawMode, resolvedSnapToGrid, effectiveSnapGridSize, isSpacePressed, wallMode, roomMode, activeWallType.totalThickness, queueMousePositionUpdate]
+        [tool, roomDrawMode, resolvedSnapToGrid, effectiveSnapGridSize, isSpacePressed, wallMode, roomMode, activeWallType.totalThickness, queueMousePositionUpdate, selectionContextMenu]
     );
 
     const handleMouseMove = useCallback(
@@ -736,6 +844,16 @@ export function DrawingCanvas({
                 const nextState: CanvasState = { ...currentState, lastPanPoint: { x: viewportPoint.x, y: viewportPoint.y } };
                 canvasStateRef.current = nextState;
                 setCanvasState(nextState);
+                return;
+            }
+
+            if (tool === 'select' && !isSpacePressed && selectMode.handleSelectionBoxPointerMove(rawPoint)) {
+                if (hoveredRoomInfo !== null) {
+                    setHoveredRoomInfo(null);
+                }
+                if (hoveredElementId !== null) {
+                    setHoveredElement(null);
+                }
                 return;
             }
 
@@ -794,6 +912,10 @@ export function DrawingCanvas({
             return;
         }
 
+        if (tool === 'select' && !isSpacePressed && selectMode.handleSelectionBoxPointerUp()) {
+            return;
+        }
+
         if (tool === 'room' && roomDrawMode === 'rectangle') {
             // Rectangle room mode is click-click based: commit is handled on second click in mouse down.
             return;
@@ -809,7 +931,7 @@ export function DrawingCanvas({
         const nextState: CanvasState = { ...currentState, isDrawing: false, drawingPoints: [] };
         canvasStateRef.current = nextState;
         setCanvasState(nextState);
-    }, [tool, roomDrawMode, roomMode, addSketch]);
+    }, [tool, roomDrawMode, roomMode, addSketch, isSpacePressed, selectMode]);
 
     const handleWheel = useCallback(
         (e: fabric.TPointerEventInfo<WheelEvent>) => {
@@ -853,38 +975,36 @@ export function DrawingCanvas({
             }
         };
 
-        const handleSelectionCreated = (event: fabric.CanvasEvents['selection:created']) => {
-            if (tool === 'select') selectMode.updateSelectionFromTarget(event.selected?.[0] ?? null);
-        };
-
-        const handleSelectionUpdated = (event: fabric.CanvasEvents['selection:updated']) => {
-            if (tool === 'select') selectMode.updateSelectionFromTarget(event.selected?.[0] ?? null);
-        };
-
-        const handleSelectionCleared = () => {
-            if (!selectMode.isWallHandleDraggingRef.current) setSelectedIds([]);
-        };
-
         const handleCanvasMouseDown = (event: fabric.CanvasEvents['mouse:down']) => {
             if (tool !== 'select') return;
+            const pointerEvent = event.e as MouseEvent | undefined;
+            if (pointerEvent?.button === 2) return;
             const scenePoint = event.e ? canvas.getScenePoint(event.e) : null;
             if (scenePoint) {
-                selectMode.handleMouseDown(event.target ?? null, { x: scenePoint.x, y: scenePoint.y });
+                selectMode.handleMouseDown(
+                    event.target ?? null,
+                    { x: scenePoint.x, y: scenePoint.y },
+                    pointerEvent ?? null
+                );
             } else {
-                selectMode.updateSelectionFromTarget(event.target ?? null);
+                selectMode.updateSelectionFromTarget(event.target ?? null, pointerEvent ?? null);
             }
         };
 
         const handleObjectMoving = (event: fabric.CanvasEvents['object:moving']) => {
             if (event.target && tool === 'select') {
-                selectMode.handleObjectMoving(event.target);
+                selectMode.handleObjectMoving(event.target, (event.e as MouseEvent | undefined) ?? null);
             }
         };
 
         const handleObjectModified = (event: fabric.CanvasEvents['object:modified']) => {
             if (!event.target) return;
             const meta = selectMode.getTargetMeta(event.target);
-            if (meta.name === 'wall-handle') {
+            if (
+                meta.name === 'wall-handle' ||
+                meta.name === 'wall-corner-handle' ||
+                meta.name === 'wall-vertex-marker'
+            ) {
                 selectMode.finalizeHandleDrag();
             }
         };
@@ -892,20 +1012,33 @@ export function DrawingCanvas({
         const handleWindowBlur = () => {
             middlePan.stopMiddlePan();
             selectMode.finalizeHandleDrag();
+            selectMode.clearBoxSelection();
+            setSelectionContextMenu(null);
         };
 
         const handleCanvasMouseLeave = () => {
             setHoveredRoomInfo(null);
             setHoveredElement(null);
+            if (tool === 'select') {
+                selectMode.clearBoxSelection();
+            }
+        };
+
+        const handleContextMenu = (event: MouseEvent) => {
+            if (tool !== 'select') return;
+            event.preventDefault();
+            const outerRect = outerRef.current?.getBoundingClientRect();
+            if (!outerRect) return;
+            setSelectionContextMenu({
+                x: event.clientX - outerRect.left,
+                y: event.clientY - outerRect.top,
+            });
         };
 
         canvas.on('mouse:down', handleMouseDown);
         canvas.on('mouse:move', handleMouseMove);
         canvas.on('mouse:up', handleMouseUp);
         canvas.on('mouse:wheel', handleWheel);
-        canvas.on('selection:created', handleSelectionCreated);
-        canvas.on('selection:updated', handleSelectionUpdated);
-        canvas.on('selection:cleared', handleSelectionCleared);
         canvas.on('mouse:down', handleCanvasMouseDown);
         canvas.on('object:moving', handleObjectMoving);
         canvas.on('object:modified', handleObjectModified);
@@ -915,6 +1048,7 @@ export function DrawingCanvas({
         upperCanvasEl?.addEventListener('auxclick', middlePan.preventMiddleAuxClick);
         upperCanvasEl?.addEventListener('dblclick', handleCanvasDoubleClick);
         upperCanvasEl?.addEventListener('mouseleave', handleCanvasMouseLeave);
+        upperCanvasEl?.addEventListener('contextmenu', handleContextMenu);
         window.addEventListener('mousemove', middlePan.handleMiddleMouseMove, { passive: false });
         window.addEventListener('mouseup', middlePan.handleMiddleMouseUp);
         window.addEventListener('blur', handleWindowBlur);
@@ -924,9 +1058,6 @@ export function DrawingCanvas({
             canvas.off('mouse:move', handleMouseMove);
             canvas.off('mouse:up', handleMouseUp);
             canvas.off('mouse:wheel', handleWheel);
-            canvas.off('selection:created', handleSelectionCreated);
-            canvas.off('selection:updated', handleSelectionUpdated);
-            canvas.off('selection:cleared', handleSelectionCleared);
             canvas.off('mouse:down', handleCanvasMouseDown);
             canvas.off('object:moving', handleObjectMoving);
             canvas.off('object:modified', handleObjectModified);
@@ -935,12 +1066,14 @@ export function DrawingCanvas({
             upperCanvasEl?.removeEventListener('auxclick', middlePan.preventMiddleAuxClick);
             upperCanvasEl?.removeEventListener('dblclick', handleCanvasDoubleClick);
             upperCanvasEl?.removeEventListener('mouseleave', handleCanvasMouseLeave);
+            upperCanvasEl?.removeEventListener('contextmenu', handleContextMenu);
             window.removeEventListener('mousemove', middlePan.handleMiddleMouseMove);
             window.removeEventListener('mouseup', middlePan.handleMiddleMouseUp);
             window.removeEventListener('blur', handleWindowBlur);
+            selectMode.clearBoxSelection();
             selectMode.finalizeHandleDrag();
         };
-    }, [handleMouseDown, handleMouseMove, handleMouseUp, handleWheel, tool, wallMode, selectMode, middlePan, setSelectedIds, setHoveredElement]);
+    }, [handleMouseDown, handleMouseMove, handleMouseUp, handleWheel, tool, wallMode, selectMode, middlePan, setHoveredElement]);
 
     // ---------------------------------------------------------------------------
     // Custom Wall Type Creation
@@ -1014,6 +1147,36 @@ export function DrawingCanvas({
                     displayUnit={displayUnit}
                     paperToRealRatio={realPerPaperRatio}
                 />
+            )}
+
+            {selectionContextMenu && tool === 'select' && !isSpacePressed && (
+                <div
+                    className="absolute z-30 min-w-[170px] overflow-hidden rounded-md border border-slate-200 bg-white shadow-lg"
+                    style={{ left: selectionContextMenu.x, top: selectionContextMenu.y }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onContextMenu={(event) => event.preventDefault()}
+                >
+                    <button
+                        type="button"
+                        className="block w-full px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
+                        onClick={() => {
+                            selectAllWalls();
+                            setSelectionContextMenu(null);
+                        }}
+                    >
+                        Select all walls (Ctrl/Cmd + A)
+                    </button>
+                    <button
+                        type="button"
+                        className="block w-full px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
+                        onClick={() => {
+                            setSelectedIds([]);
+                            setSelectionContextMenu(null);
+                        }}
+                    >
+                        Clear selection
+                    </button>
+                </div>
             )}
 
             <Rulers
