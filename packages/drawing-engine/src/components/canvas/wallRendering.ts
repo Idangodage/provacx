@@ -13,8 +13,6 @@ import { getWallTypeById, resolveWallLayers } from '../../utils/wall-types';
 import { formatDistance, normalizeHexColor, tintHexColor, withPatternAlpha } from './formatting';
 import { PX_TO_MM } from './scale';
 import { wallThicknessToCanvasPx } from './spatial-index';
-import type { WallCornerEndpointSeed } from './corner-geometry';
-import { resolveWallCornerPair } from './corner-geometry';
 
 // =============================================================================
 // Constants
@@ -25,8 +23,6 @@ const WALL_PATTERN_SIZE = 16;
 const WALL_JOIN_NODE_TOLERANCE_PX = 0.5;
 const WALL_JOIN_COLLINEAR_EPSILON = 0.03;
 const WALL_JOIN_PATCH_OVERDRAW_PX = 1.2;
-const WALL_JOIN_BEVEL_MIN_SPAN_PX = 0.35;
-const WALL_JOIN_BEVEL_SIDE_MARGIN_PX = 0.05;
 const DIMENSION_OFFSET_SCREEN_PX = 14;
 const DIMENSION_CHAIN_EXTRA_OFFSET_SCREEN_PX = 16;
 const DIMENSION_TICK_SCREEN_PX = 8;
@@ -964,7 +960,15 @@ function getDirectionFromNode(wall: Wall2D, node: Point2D): Point2D | null {
     return { x: dx / length, y: dy / length };
 }
 
-interface WallEndpointBoundarySeed extends WallCornerEndpointSeed {}
+interface WallEndpointBoundarySeed {
+    wallId: string;
+    endpoint: 'start' | 'end';
+    nodePoint: Point2D;
+    dirAway: Point2D;
+    halfThickness: number;
+    interiorNormal: Point2D;
+    exteriorNormal: Point2D;
+}
 
 function assignBoundaryPoint(
     lookup: Map<string, WallBoundaryPoints>,
@@ -1023,46 +1027,6 @@ function resolveCornerPointFromEndpoints(
     return intersection;
 }
 
-function isFinitePoint(point: Point2D): boolean {
-    return Number.isFinite(point.x) && Number.isFinite(point.y);
-}
-
-function directionsAreNearlyCollinear(a: Point2D, b: Point2D): boolean {
-    const dot = a.x * b.x + a.y * b.y;
-    return Math.abs(dot + 1) <= WALL_JOIN_COLLINEAR_EPSILON || Math.abs(dot - 1) <= 0.02;
-}
-
-function resolveCornerPairWithFallback(
-    first: WallEndpointBoundarySeed,
-    second: WallEndpointBoundarySeed
-): {
-    interiorFirst: Point2D;
-    interiorSecond: Point2D;
-    exteriorFirst: Point2D;
-    exteriorSecond: Point2D;
-} {
-    const legacyInterior = resolveCornerPointFromEndpoints(first, second, 'interior');
-    const legacyExterior = resolveCornerPointFromEndpoints(first, second, 'exterior');
-
-    // Straight-through connections should keep stable midpoint-style joins.
-    if (directionsAreNearlyCollinear(first.dirAway, second.dirAway)) {
-        return {
-            interiorFirst: legacyInterior,
-            interiorSecond: legacyInterior,
-            exteriorFirst: legacyExterior,
-            exteriorSecond: legacyExterior,
-        };
-    }
-
-    const corner = resolveWallCornerPair(first, second);
-    return {
-        interiorFirst: isFinitePoint(corner.interior.pointA) ? corner.interior.pointA : legacyInterior,
-        interiorSecond: isFinitePoint(corner.interior.pointB) ? corner.interior.pointB : legacyInterior,
-        exteriorFirst: isFinitePoint(corner.exterior.pointA) ? corner.exterior.pointA : legacyExterior,
-        exteriorSecond: isFinitePoint(corner.exterior.pointB) ? corner.exterior.pointB : legacyExterior,
-    };
-}
-
 export function buildWallBoundaryLookup(
     walls: Wall2D[],
     paperToRealRatio: number,
@@ -1108,7 +1072,6 @@ export function buildWallBoundaryLookup(
             endpoint: 'start',
             nodePoint: wall.start,
             dirAway: direction,
-            thicknessPx,
             halfThickness,
             interiorNormal,
             exteriorNormal,
@@ -1121,7 +1084,6 @@ export function buildWallBoundaryLookup(
             endpoint: 'end',
             nodePoint: wall.end,
             dirAway: { x: -direction.x, y: -direction.y },
-            thicknessPx,
             halfThickness,
             interiorNormal,
             exteriorNormal,
@@ -1136,11 +1098,12 @@ export function buildWallBoundaryLookup(
         if (!first || !second) return;
         if (first.wallId === second.wallId) return;
 
-        const corner = resolveCornerPairWithFallback(first, second);
-        assignBoundaryPoint(boundaryLookup, first, 'interior', corner.interiorFirst);
-        assignBoundaryPoint(boundaryLookup, second, 'interior', corner.interiorSecond);
-        assignBoundaryPoint(boundaryLookup, first, 'exterior', corner.exteriorFirst);
-        assignBoundaryPoint(boundaryLookup, second, 'exterior', corner.exteriorSecond);
+        const interiorCorner = resolveCornerPointFromEndpoints(first, second, 'interior');
+        const exteriorCorner = resolveCornerPointFromEndpoints(first, second, 'exterior');
+        assignBoundaryPoint(boundaryLookup, first, 'interior', interiorCorner);
+        assignBoundaryPoint(boundaryLookup, second, 'interior', interiorCorner);
+        assignBoundaryPoint(boundaryLookup, first, 'exterior', exteriorCorner);
+        assignBoundaryPoint(boundaryLookup, second, 'exterior', exteriorCorner);
     });
 
     // Keep existing component-aware fallback for isolated/complex nodes.
@@ -1355,35 +1318,6 @@ function getDegreeTwoJoinPatchPoints(
     return ordered;
 }
 
-function getDegreeTwoExteriorBevelSegment(
-    nodePoint: Point2D,
-    attachments: WallJoinAttachment[]
-): { start: Point2D; end: Point2D } | null {
-    if (attachments.length !== 2) return null;
-    const firstCorners = getNodeSideCorners(attachments[0]!, nodePoint);
-    const secondCorners = getNodeSideCorners(attachments[1]!, nodePoint);
-    if (!firstCorners || !secondCorners) return null;
-
-    const interiorSpan = Math.hypot(
-        secondCorners.interior.x - firstCorners.interior.x,
-        secondCorners.interior.y - firstCorners.interior.y
-    );
-    const exteriorSpan = Math.hypot(
-        secondCorners.exterior.x - firstCorners.exterior.x,
-        secondCorners.exterior.y - firstCorners.exterior.y
-    );
-
-    // Draw the bevel edge only when exterior side is the dominant flat span.
-    if (!Number.isFinite(interiorSpan) || !Number.isFinite(exteriorSpan)) return null;
-    if (exteriorSpan < WALL_JOIN_BEVEL_MIN_SPAN_PX) return null;
-    if (exteriorSpan <= interiorSpan + WALL_JOIN_BEVEL_SIDE_MARGIN_PX) return null;
-
-    return {
-        start: firstCorners.exterior,
-        end: secondCorners.exterior,
-    };
-}
-
 function getJoinPatchPoints(nodePoint: Point2D, attachments: WallJoinAttachment[]): Point2D[] {
     const radialPoints: Point2D[] = [];
 
@@ -1422,7 +1356,7 @@ export function createWallJoinRenderObjects(
     walls: Wall2D[],
     paperToRealRatio: number,
     wallTypeRegistry: WallTypeDefinition[],
-    selectedWallIds: Set<string> = new Set(),
+    _selectedWallIds: Set<string> = new Set(),
     wallBoundaryLookup?: Map<string, WallBoundaryPoints>
 ): fabric.Object[] {
     if (walls.length === 0) return [];
@@ -1485,9 +1419,6 @@ export function createWallJoinRenderObjects(
                 getJoinPatchPoints(point, node.attachments)
             );
         if (patchPoints.length < 3) return;
-        const isSelectedJoin = node.attachments.some((attachment) => selectedWallIds.has(attachment.wall.id));
-        const joinBoundaryColor = isSelectedJoin ? '#2563eb' : '#475569';
-        const joinBoundaryWidth = isSelectedJoin ? 2 : 1;
 
         const joinCap = new fabric.Polygon(patchPoints, {
             fill: dominantAttachment.joinFill,
@@ -1501,23 +1432,6 @@ export function createWallJoinRenderObjects(
         });
         (joinCap as unknown as { name?: string }).name = 'wall-join-render';
         objects.push(joinCap);
-
-        const bevelSegment = getDegreeTwoExteriorBevelSegment(point, node.attachments);
-        if (bevelSegment) {
-            const bevelEdge = new fabric.Line(
-                [bevelSegment.start.x, bevelSegment.start.y, bevelSegment.end.x, bevelSegment.end.y],
-                {
-                    stroke: joinBoundaryColor,
-                    strokeWidth: joinBoundaryWidth,
-                    strokeLineCap: 'butt',
-                    selectable: false,
-                    evented: false,
-                    objectCaching: false,
-                }
-            );
-            (bevelEdge as unknown as { name?: string }).name = 'wall-join-render';
-            objects.push(bevelEdge);
-        }
     });
 
     return objects;
