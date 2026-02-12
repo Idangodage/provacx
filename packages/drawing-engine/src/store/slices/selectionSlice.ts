@@ -62,17 +62,6 @@ interface SliceDependencies {
     saveToHistory: (action: string) => void;
 }
 
-function dedupeSelectionIds(ids: string[]): string[] {
-    const seen = new Set<string>();
-    const deduped: string[] = [];
-    ids.forEach((id) => {
-        if (!id || seen.has(id)) return;
-        seen.add(id);
-        deduped.push(id);
-    });
-    return deduped;
-}
-
 // =============================================================================
 // Slice Creator
 // =============================================================================
@@ -96,10 +85,10 @@ export const createSelectionSlice: StateCreator<
     selectElement: (id, addToSelection = false) =>
         set((state) => ({
             selectedElementIds: addToSelection
-                ? dedupeSelectionIds([...state.selectedElementIds, id])
+                ? [...state.selectedElementIds, id]
                 : [id],
             selectedIds: addToSelection
-                ? dedupeSelectionIds([...state.selectedElementIds, id])
+                ? [...state.selectedElementIds, id]
                 : [id],
         })),
 
@@ -188,10 +177,7 @@ export const createSelectionSlice: StateCreator<
     setActiveLayer: (id) => set({ activeLayerId: id }),
 
     // Aliases
-    setSelectedIds: (ids) => {
-        const deduped = dedupeSelectionIds(ids);
-        set({ selectedElementIds: deduped, selectedIds: deduped });
-    },
+    setSelectedIds: (ids) => set({ selectedElementIds: ids, selectedIds: ids }),
     deleteSelected: () => get().deleteSelectedElements(),
     setTool: (tool) => get().setActiveTool(tool),
 });

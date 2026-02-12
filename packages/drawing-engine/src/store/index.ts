@@ -298,17 +298,6 @@ export interface DrawingState {
 // Store Implementation
 // =============================================================================
 
-function dedupeSelectionIds(ids: string[]): string[] {
-  const seen = new Set<string>();
-  const deduped: string[] = [];
-  ids.forEach((id) => {
-    if (!id || seen.has(id)) return;
-    seen.add(id);
-    deduped.push(id);
-  });
-  return deduped;
-}
-
 export const useDrawingStore = create<DrawingState>()(
   devtools(
     (set, get) => ({
@@ -844,10 +833,10 @@ export const useDrawingStore = create<DrawingState>()(
       // Selection Actions
       selectElement: (id, addToSelection = false) => set((state) => ({
         selectedElementIds: addToSelection
-          ? dedupeSelectionIds([...state.selectedElementIds, id])
+          ? [...state.selectedElementIds, id]
           : [id],
         selectedIds: addToSelection
-          ? dedupeSelectionIds([...state.selectedElementIds, id])
+          ? [...state.selectedElementIds, id]
           : [id],
       })),
 
@@ -936,10 +925,7 @@ export const useDrawingStore = create<DrawingState>()(
       },
 
       // Alias methods for backward compatibility
-      setSelectedIds: (ids) => {
-        const deduped = dedupeSelectionIds(ids);
-        set({ selectedElementIds: deduped, selectedIds: deduped });
-      },
+      setSelectedIds: (ids) => set({ selectedElementIds: ids, selectedIds: ids }),
       deleteSelected: () => get().deleteSelectedElements(),
       setTool: (tool) => set({ activeTool: tool, tool }),
       loadData: (data) => { void data; },

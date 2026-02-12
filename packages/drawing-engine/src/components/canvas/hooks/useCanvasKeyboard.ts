@@ -21,7 +21,6 @@ export interface UseCanvasKeyboardOptions {
     endWallChain: () => void;
     clearRoomPolygonState: () => void;
     deleteSelected: () => void;
-    selectAllWalls: () => void;
     setActiveWallTypeId: (id: string) => void;
     flipSelectedWallInteriorExterior: () => void;
     setIsSpacePressed: (pressed: boolean) => void;
@@ -34,7 +33,6 @@ export function useCanvasKeyboard({
     endWallChain,
     clearRoomPolygonState,
     deleteSelected,
-    selectAllWalls,
     setActiveWallTypeId,
     flipSelectedWallInteriorExterior,
     setIsSpacePressed,
@@ -102,23 +100,6 @@ export function useCanvasKeyboard({
             window.removeEventListener('keydown', handleDeleteKey);
         };
     }, [selectedIds, deleteSelected]);
-
-    // Select all walls
-    useEffect(() => {
-        const handleSelectAllWalls = (event: KeyboardEvent) => {
-            if (event.key.toLowerCase() !== 'a') return;
-            if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
-            if (isEditableElement(event.target)) return;
-            if (tool !== 'select') return;
-            event.preventDefault();
-            selectAllWalls();
-        };
-
-        window.addEventListener('keydown', handleSelectAllWalls);
-        return () => {
-            window.removeEventListener('keydown', handleSelectAllWalls);
-        };
-    }, [tool, selectAllWalls]);
 
     // Manual wall interior/exterior flip
     useEffect(() => {
