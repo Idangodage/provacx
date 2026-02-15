@@ -10,8 +10,6 @@ export { useCanvasKeyboard, type UseCanvasKeyboardOptions } from './useCanvasKey
 
 // Tool mode hooks
 export { useSelectMode, type UseSelectModeOptions } from './useSelectMode';
-export { useWallMode, type UseWallModeOptions } from './useWallMode';
-export { useRoomMode, type UseRoomModeOptions, type RoomDrawMode } from './useRoomMode';
 
 // Pan handling
 export { useMiddlePan, type UseMiddlePanOptions, type MiddlePanState } from './useMiddlePan';

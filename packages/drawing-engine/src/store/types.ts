@@ -1,6 +1,6 @@
 /**
  * Store Types
- * 
+ *
  * Type definitions for the drawing store.
  * Extracted for cleaner imports and better separation of concerns.
  */
@@ -8,12 +8,6 @@
 import type {
     Point2D,
     DisplayUnit,
-    Wall2D,
-    WallLayer,
-    WallTypeDefinition,
-    MaterialType,
-    Room2D,
-    Opening2D,
     Dimension2D,
     Annotation2D,
     Sketch2D,
@@ -25,7 +19,6 @@ import type {
     DetectedElement,
     PageConfig,
     HistoryEntry,
-    FloorPlanData,
     SplineSettings,
     SplineMethod,
 } from '../types';
@@ -36,8 +29,6 @@ import type {
 
 export interface DrawingState {
     // Drawing Elements
-    walls: Wall2D[];
-    rooms: Room2D[];
     dimensions: Dimension2D[];
     annotations: Annotation2D[];
     sketches: Sketch2D[];
@@ -54,8 +45,6 @@ export interface DrawingState {
 
     // Tool State
     activeTool: DrawingTool;
-    activeWallTypeId: string;
-    wallTypeRegistry: WallTypeDefinition[];
     activeLayerId: string | null;
     selectedElementIds: string[];
     hoveredElementId: string | null;
@@ -89,13 +78,6 @@ export interface DrawingState {
     history: HistoryEntry[];
     historyIndex: number;
 
-    // Element Defaults
-    defaultWallThickness: number;
-    defaultWallHeight: number;
-    defaultWindowHeight: number;
-    defaultWindowSillHeight: number;
-    defaultDoorHeight: number;
-
     // Spline Settings
     splineSettings: SplineSettings;
     splineEditMode: 'draw' | 'edit-points' | 'add-point' | 'remove-point';
@@ -104,7 +86,6 @@ export interface DrawingState {
     // Computed properties
     canUndo: boolean;
     canRedo: boolean;
-    hvacLayout: unknown | null;
 }
 
 // =============================================================================
@@ -125,45 +106,6 @@ export interface DetectionActions {
     rejectDetectedElement: (id: string) => void;
     acceptAllDetectedElements: () => void;
     clearDetectedElements: () => void;
-}
-
-export interface WallActions {
-    setWalls: (walls: Wall2D[], historyAction?: string) => void;
-    addWall: (wall: Omit<Wall2D, 'id' | 'openings'>) => string;
-    updateWall: (id: string, data: Partial<Wall2D>) => void;
-    deleteWall: (id: string) => void;
-    setActiveWallTypeId: (wallTypeId: string) => void;
-    setWallTypeRegistry: (customWallTypes: WallTypeDefinition[]) => void;
-    setWallTotalThickness: (wallId: string, totalThickness: number) => string[];
-    addWallLayerToWall: (wallId: string, layer: WallLayer, index: number) => string[];
-    removeWallLayerFromWall: (wallId: string, layerId: string) => string[];
-    reorderWallLayerInWall: (wallId: string, fromIndex: number, toIndex: number) => string[];
-    updateWallLayerThicknessInWall: (wallId: string, layerId: string, thickness: number) => string[];
-    convertWallCoreMaterialForWall: (wallId: string, material: MaterialType) => string[];
-    resetWallLayerOverrides: (wallId: string) => void;
-    addOpeningToWall: (wallId: string, opening: Omit<Opening2D, 'id' | 'wallId'>) => string;
-    updateOpening: (wallId: string, openingId: string, data: Partial<Opening2D>) => void;
-    deleteOpening: (wallId: string, openingId: string) => void;
-}
-
-export interface RoomActions {
-    addRoom: (
-        room: Omit<
-            Room2D,
-            | 'id'
-            | 'area'
-            | 'perimeter'
-            | 'grossArea'
-            | 'netArea'
-            | 'parentRoomId'
-            | 'childRoomIds'
-            | 'roomType'
-        >
-    ) => string;
-    updateRoom: (id: string, data: Partial<Room2D>) => void;
-    reparentRoom: (roomId: string, parentRoomId: string | null) => boolean;
-    deleteRoom: (id: string) => void;
-    detectRoomsFromWalls: () => void;
 }
 
 export interface AnnotationActions {
@@ -249,7 +191,6 @@ export interface HistoryActions {
 export interface DataActions {
     exportToJSON: () => string;
     importFromJSON: (json: string) => void;
-    getFloorPlanData: () => FloorPlanData;
     loadData: (data: unknown) => void;
     exportData: () => unknown;
 }
@@ -269,8 +210,6 @@ export interface SplineActions {
 export type DrawingStore = DrawingState &
     ImportActions &
     DetectionActions &
-    WallActions &
-    RoomActions &
     AnnotationActions &
     SelectionActions &
     ToolActions &

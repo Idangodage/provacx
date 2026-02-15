@@ -5,36 +5,23 @@
  * - Space key for panning mode
  * - Escape for canceling current operation
  * - Delete/Backspace for deleting selected elements
- * - Alt+number shortcuts for wall types
  */
 
 import { useEffect } from 'react';
 
 import type { DrawingTool } from '../../../types';
-import { BUILT_IN_WALL_TYPE_IDS } from '../../../utils/wall-types';
 import { isEditableElement } from '../toolUtils';
 
 export interface UseCanvasKeyboardOptions {
     tool: DrawingTool;
-    roomDrawMode: 'rectangle' | 'polygon';
     selectedIds: string[];
-    endWallChain: () => void;
-    clearRoomPolygonState: () => void;
     deleteSelected: () => void;
-    setActiveWallTypeId: (id: string) => void;
-    flipSelectedWallInteriorExterior: () => void;
     setIsSpacePressed: (pressed: boolean) => void;
 }
 
 export function useCanvasKeyboard({
-    tool,
-    roomDrawMode,
     selectedIds,
-    endWallChain,
-    clearRoomPolygonState,
     deleteSelected,
-    setActiveWallTypeId,
-    flipSelectedWallInteriorExterior,
     setIsSpacePressed,
 }: UseCanvasKeyboardOptions) {
     // Space key for panning
@@ -64,27 +51,6 @@ export function useCanvasKeyboard({
         };
     }, [setIsSpacePressed]);
 
-    // Escape key handler
-    useEffect(() => {
-        const handleEscape = (event: KeyboardEvent) => {
-            if (event.key !== 'Escape') return;
-            if (tool === 'wall') {
-                event.preventDefault();
-                endWallChain();
-                return;
-            }
-            if (tool === 'room' && roomDrawMode === 'polygon') {
-                event.preventDefault();
-                clearRoomPolygonState();
-            }
-        };
-
-        window.addEventListener('keydown', handleEscape);
-        return () => {
-            window.removeEventListener('keydown', handleEscape);
-        };
-    }, [tool, roomDrawMode, endWallChain, clearRoomPolygonState]);
-
     // Delete/Backspace key handler
     useEffect(() => {
         const handleDeleteKey = (event: KeyboardEvent) => {
@@ -100,43 +66,4 @@ export function useCanvasKeyboard({
             window.removeEventListener('keydown', handleDeleteKey);
         };
     }, [selectedIds, deleteSelected]);
-
-    // Manual wall interior/exterior flip
-    useEffect(() => {
-        const handleOrientationFlip = (event: KeyboardEvent) => {
-            if (event.key.toLowerCase() !== 'f') return;
-            if (isEditableElement(event.target)) return;
-            if (event.ctrlKey || event.metaKey || event.altKey) return;
-            if (selectedIds.length === 0) return;
-            if (tool !== 'select' && tool !== 'wall') return;
-            event.preventDefault();
-            flipSelectedWallInteriorExterior();
-        };
-
-        window.addEventListener('keydown', handleOrientationFlip);
-        return () => {
-            window.removeEventListener('keydown', handleOrientationFlip);
-        };
-    }, [selectedIds, tool, flipSelectedWallInteriorExterior]);
-
-    // Alt+number wall type shortcuts
-    useEffect(() => {
-        const handleWallTypeShortcut = (event: KeyboardEvent) => {
-            if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-            if (isEditableElement(event.target)) return;
-            const keyIndex = Number.parseInt(event.key, 10);
-            if (!Number.isFinite(keyIndex) || keyIndex < 1 || keyIndex > BUILT_IN_WALL_TYPE_IDS.length) {
-                return;
-            }
-            const wallTypeId = BUILT_IN_WALL_TYPE_IDS[keyIndex - 1];
-            if (!wallTypeId) return;
-            event.preventDefault();
-            setActiveWallTypeId(wallTypeId);
-        };
-
-        window.addEventListener('keydown', handleWallTypeShortcut);
-        return () => {
-            window.removeEventListener('keydown', handleWallTypeShortcut);
-        };
-    }, [setActiveWallTypeId]);
 }

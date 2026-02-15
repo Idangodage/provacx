@@ -32,8 +32,6 @@ import {
   Toolbar,
   PropertiesPanel,
   SymbolPalette,
-  LayersPanel,
-  RoomHierarchyPanel,
   ZoomIndicator,
   CoordinatesDisplay,
 } from './components';
@@ -427,14 +425,11 @@ export function SmartDrawingEditor({
 
   const store = useSmartDrawingStore();
   const {
-    walls,
-    rooms,
     sketches,
     annotations,
     dimensions,
     symbols,
     guides,
-    hvacLayout,
     loadData,
     exportData,
     setTool,
@@ -450,7 +445,6 @@ export function SmartDrawingEditor({
     setZoom,
     setPanOffset,
     displayUnit,
-    setWalls,
   } = store;
 
   const quickActions: { id: DrawingTool; label: string; icon: React.ReactNode }[] = [
@@ -471,31 +465,11 @@ export function SmartDrawingEditor({
   }, []);
 
   // Calculate total element count
-  type HVACLayoutType = { indoorUnits?: unknown[]; ductSegments?: unknown[] } | null;
-  const layout = hvacLayout as HVACLayoutType;
-  const elementCount =
-    walls.length +
-    rooms.length +
-    sketches.length +
-    (layout?.indoorUnits?.length || 0) +
-    (layout?.ductSegments?.length || 0);
+  const elementCount = sketches.length + annotations.length + dimensions.length + symbols.length;
 
   const areaSummary = useMemo(() => {
-    const topLevelRooms = rooms.filter((room) => !room.parentRoomId);
-    const totalFloorArea = topLevelRooms.reduce((sum, room) => {
-      const grossArea = Number.isFinite(room.grossArea) ? room.grossArea : room.area;
-      return sum + Math.max(grossArea, 0);
-    }, 0);
-    const circulationPattern = /corridor|hall|lobby|passage|circulation|foyer/i;
-    const circulationArea = topLevelRooms.reduce((sum, room) => {
-      const label = `${room.name} ${room.spaceType}`;
-      if (!circulationPattern.test(label)) return sum;
-      const roomArea = Number.isFinite(room.netArea) ? room.netArea : room.area;
-      return sum + Math.max(roomArea, 0);
-    }, 0);
-    const usableArea = Math.max(totalFloorArea - circulationArea, 0);
-    return { totalFloorArea, usableArea, circulationArea };
-  }, [rooms]);
+    return { totalFloorArea: 0, usableArea: 0, circulationArea: 0 };
+  }, []);
 
   // Load initial data
   useEffect(() => {
@@ -510,12 +484,12 @@ export function SmartDrawingEditor({
       const data = exportData();
       onDataChange(data);
     }
-  }, [walls, rooms, sketches, hvacLayout, exportData, onDataChange]);
+  }, [sketches, exportData, onDataChange]);
 
   useEffect(() => {
     if (!onSave || saveState === 'saving' || saveState === 'idle') return;
     setSaveState('idle');
-  }, [walls, rooms, sketches, hvacLayout, onSave, saveState]);
+  }, [sketches, onSave, saveState]);
 
   // Keep paper size fixed; only scale drawn content when drawing scale changes.
   useEffect(() => {
@@ -538,7 +512,6 @@ export function SmartDrawingEditor({
     previousPaperScaleRef.current = nextPaperScale;
 
     const hasDrawableContent =
-      walls.length > 0 ||
       sketches.length > 0 ||
       annotations.length > 0 ||
       dimensions.length > 0 ||
@@ -550,22 +523,6 @@ export function SmartDrawingEditor({
       x: point.x * scaleFactor,
       y: point.y * scaleFactor,
     });
-
-    if (walls.length > 0) {
-      const scaledWalls = walls.map((wall) => ({
-        ...wall,
-        start: scalePoint(wall.start),
-        end: scalePoint(wall.end),
-        thickness: wall.thickness * scaleFactor,
-        openings: wall.openings.map((opening) => ({
-          ...opening,
-          width: opening.width * scaleFactor,
-          height: opening.height * scaleFactor,
-          sillHeight: opening.sillHeight * scaleFactor,
-        })),
-      }));
-      setWalls(scaledWalls, `Scale drawing ${scaleDrawing}:${scaleReal}`);
-    }
 
     useSmartDrawingStore.setState((state) => ({
       sketches: state.sketches.map((sketch) => ({
@@ -605,10 +562,8 @@ export function SmartDrawingEditor({
     guides.length,
     scaleDrawing,
     scaleReal,
-    setWalls,
     sketches.length,
     symbols.length,
-    walls,
   ]);
 
   useEffect(() => {
@@ -1025,12 +980,6 @@ export function SmartDrawingEditor({
           <aside className="flex flex-col w-80 bg-[#fbf7ee] border-l border-amber-200/70 overflow-hidden">
             <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain scrollbar-thin scrollbar-thumb-amber-300">
               <PropertiesPanel className="!w-full !border-l-0" />
-              <div className="p-3">
-                <RoomHierarchyPanel />
-              </div>
-              <div className="p-3">
-                <LayersPanel className="h-64" />
-              </div>
             </div>
           </aside>
         )}

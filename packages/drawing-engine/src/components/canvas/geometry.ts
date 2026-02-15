@@ -4,7 +4,7 @@
  * Core geometry functions for point, polygon, and segment operations.
  */
 
-import type { Point2D, Room2D } from '../../types';
+import type { Point2D } from '../../types';
 
 // =============================================================================
 // Point Operations
@@ -182,63 +182,3 @@ export function projectPointToSegment(
     };
 }
 
-// =============================================================================
-// Room Utilities
-// =============================================================================
-
-export function pickSmallestRoomAtPoint(point: Point2D, rooms: Room2D[]): Room2D | null {
-    if (rooms.length === 0) return null;
-    const roomById = new Map(rooms.map((room) => [room.id, room]));
-    const containingRooms = rooms.filter((room) => isPointInsidePolygon(point, room.vertices));
-    if (containingRooms.length === 0) return null;
-
-    containingRooms.sort((a, b) => {
-        const areaA = Number.isFinite(a.grossArea) ? a.grossArea : a.area;
-        const areaB = Number.isFinite(b.grossArea) ? b.grossArea : b.area;
-        if (Math.abs(areaA - areaB) > 1e-6) return areaA - areaB;
-
-        const depthA = getRoomHierarchyDepth(a, roomById);
-        const depthB = getRoomHierarchyDepth(b, roomById);
-        if (depthA !== depthB) return depthB - depthA;
-
-        return a.name.localeCompare(b.name);
-    });
-
-    return containingRooms[0] ?? null;
-}
-
-export function getRoomHierarchyDepth(room: Room2D, roomById: Map<string, Room2D>): number {
-    let depth = 0;
-    let cursor = room.parentRoomId ? roomById.get(room.parentRoomId) ?? null : null;
-    let guard = 0;
-    while (cursor && guard < 32) {
-        depth += 1;
-        cursor = cursor.parentRoomId ? roomById.get(cursor.parentRoomId) ?? null : null;
-        guard += 1;
-    }
-    return depth;
-}
-
-export function deriveNestedRelationWarnings(previousRooms: Room2D[], nextRooms: Room2D[]): string[] {
-    const warnings: string[] = [];
-    const previousById = new Map(previousRooms.map((room) => [room.id, room]));
-    const nextById = new Map(nextRooms.map((room) => [room.id, room]));
-
-    nextById.forEach((nextRoom) => {
-        const previousRoom = previousById.get(nextRoom.id);
-        if (!previousRoom) return;
-
-        if (previousRoom.parentRoomId && !nextRoom.parentRoomId) {
-            warnings.push(
-                `"${nextRoom.name}" moved outside its parent and is now treated as an adjacent/top-level room.`
-            );
-            return;
-        }
-
-        if (previousRoom.parentRoomId && nextRoom.parentRoomId && previousRoom.parentRoomId !== nextRoom.parentRoomId) {
-            warnings.push(`"${nextRoom.name}" changed parent room relationship.`);
-        }
-    });
-
-    return warnings;
-}

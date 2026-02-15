@@ -18,8 +18,6 @@ export function getToolCursor(tool: DrawingTool): string {
             return 'default';
         case 'pan':
             return 'grab';
-        case 'wall':
-        case 'room':
         case 'dimension':
             return 'crosshair';
         case 'pencil':
@@ -71,7 +69,6 @@ export function renderDrawingPreview(
     let previewObject: fabric.Object | null = null;
 
     switch (tool) {
-        case 'wall':
         case 'line':
             previewObject = new fabric.Line(
                 [firstPoint.x, firstPoint.y, lastPoint.x, lastPoint.y],
@@ -86,7 +83,6 @@ export function renderDrawingPreview(
             );
             break;
 
-        case 'room':
         case 'pencil':
         case 'spline':
             previewObject = new fabric.Polyline(

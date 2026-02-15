@@ -2,7 +2,7 @@
  * Floor plan file schema, migration, and exchange format adapters.
  */
 
-import type { FloorPlanData, Room2D, Wall2D } from '../types';
+import type { FloorPlanData, Room2D, Wall2D } from './internal-types';
 import { generateId } from '../utils/geometry';
 
 // =============================================================================
@@ -176,8 +176,8 @@ function migrateV1ToV2(file: FloorPlanFileEnvelopeV1): FloorPlanFileEnvelopeV2 {
 // =============================================================================
 
 export function exportFloorPlanToSvg(data: FloorPlanData): string {
-    const width = Number.isFinite(data.width) && data.width > 0 ? data.width : 1000;
-    const height = Number.isFinite(data.height) && data.height > 0 ? data.height : 1000;
+    const width = Number.isFinite(data.width) && (data.width as number) > 0 ? (data.width as number) : 1000;
+    const height = Number.isFinite(data.height) && (data.height as number) > 0 ? (data.height as number) : 1000;
 
     const wallLines = data.walls
         .map((wall) => {
@@ -240,8 +240,8 @@ export interface PdfExportModel {
 export function exportFloorPlanToPdfModel(data: FloorPlanData): PdfExportModel {
     return {
         title: 'Floor Plan',
-        width: data.width,
-        height: data.height,
+        width: data.width ?? 1000,
+        height: data.height ?? 1000,
         walls: data.walls.map((wall) => ({
             x1: wall.start.x,
             y1: wall.start.y,

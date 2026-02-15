@@ -5,7 +5,7 @@
  * controlled by dimensions, formulas, and chain constraints.
  */
 
-import type { Wall2D } from '../types';
+import type { Wall2D } from './internal-types';
 import { distance } from '../utils/geometry';
 
 // =============================================================================

@@ -1,46 +1,23 @@
 /**
  * Drawing Canvas Component
  *
- * Main Fabric.js canvas wrapper for HVAC smart drawing.
+ * Main Fabric.js canvas wrapper for smart drawing.
  * Uses mode-specific hooks following industry best practices.
  */
 
 'use client';
 
 import * as fabric from 'fabric';
-import { useEffect, useRef, useCallback, useState, useMemo } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
 
 import { useSmartDrawingStore } from '../store';
-import type { DisplayUnit, Point2D, Wall2D, Room2D, WallTypeDefinition } from '../types';
-import { generateId } from '../utils/geometry';
-import { flipWallInteriorExteriorOverride } from '../utils/wall-orientation';
-import { BUILT_IN_WALL_TYPE_IDS, getWallTypeById } from '../utils/wall-types';
+import type { DisplayUnit, Point2D } from '../types';
 
-import type { SceneBounds, TagBounds, RoomDrawMode } from './canvas';
 import {
     Grid,
     PageLayout,
     Rulers,
     snapPointToGrid,
-    buildWallSpatialIndex,
-    queryWallsInBounds,
-    roomIntersectsBounds,
-    WALL_SPATIAL_INDEX_CELL_PX,
-    WALL_VIEWPORT_MARGIN_PX,
-    createWallRenderObjects,
-    buildWallBoundaryLookup,
-    createWallJoinRenderObjects,
-    createWallChainDimensionObjects,
-    createWallOrientationIndicatorObjects,
-    resolveWallDimensionCollisions,
-    createWallHandles,
-    clearRenderedWalls,
-    clearWallHandles,
-    clearDrawingPreview,
-    bringTransientOverlaysToFront,
-    createRoomRenderObjects,
-    clearRenderedRooms,
-    getRoomHierarchyDepth,
     getToolCursor,
     isDrawingTool,
     renderDrawingPreview,
@@ -50,13 +27,7 @@ import {
     // Hooks
     useCanvasKeyboard,
     useSelectMode,
-    useWallMode,
-    useRoomMode,
     useMiddlePan,
-    // UI
-    WallTypeSelector,
-    RoomModeSelector,
-    HoveredRoomTooltip,
 } from './canvas';
 
 // =============================================================================
@@ -126,8 +97,6 @@ export function DrawingCanvas({
     const fabricRef = useRef<fabric.Canvas | null>(null);
     const zoomRef = useRef(1);
     const panOffsetRef = useRef<Point2D>({ x: 0, y: 0 });
-    const wallsRef = useRef<Wall2D[]>([]);
-    const roomsRef = useRef<Room2D[]>([]);
     const mousePositionRef = useRef<Point2D>({ x: 0, y: 0 });
     const mousePositionFrameRef = useRef<number | null>(null);
     const canvasStateRef = useRef<CanvasState>({
@@ -141,15 +110,6 @@ export function DrawingCanvas({
     const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
     const [mousePosition, setMousePosition] = useState<Point2D>({ x: 0, y: 0 });
     const [isSpacePressed, setIsSpacePressed] = useState(false);
-    const [roomDrawMode, setRoomDrawMode] = useState<RoomDrawMode>('rectangle');
-    const [hoveredRoomInfo, setHoveredRoomInfo] = useState<{
-        id: string;
-        name: string;
-        area: number;
-        perimeter: number;
-        screenX: number;
-        screenY: number;
-    } | null>(null);
     const [canvasState, setCanvasState] = useState<CanvasState>({
         isPanning: false,
         lastPanPoint: null,
@@ -160,16 +120,10 @@ export function DrawingCanvas({
     // Store
     const {
         activeTool: tool,
-        activeWallTypeId,
-        wallTypeRegistry,
         zoom,
         panOffset,
         displayUnit,
-        walls,
-        rooms,
         selectedElementIds: selectedIds,
-        hoveredElementId,
-        activeLayerId,
         pageConfig,
         gridSize: storeGridSize,
         showGrid: storeShowGrid,
@@ -179,18 +133,11 @@ export function DrawingCanvas({
         setViewTransform,
         setSelectedIds,
         setHoveredElement,
-        setActiveWallTypeId,
-        setWallTypeRegistry,
-        setWalls,
         addSketch,
         deleteSelected,
     } = useSmartDrawingStore();
 
     // Derived values
-    const activeWallType = useMemo(
-        () => getWallTypeById(activeWallTypeId, wallTypeRegistry),
-        [activeWallTypeId, wallTypeRegistry]
-    );
     const resolvedRealWorldUnit = realWorldUnit ?? displayUnit;
     const resolvedGridSize = gridSize ?? storeGridSize ?? 20;
     const resolvedShowGrid = showGrid ?? storeShowGrid ?? true;
@@ -199,7 +146,6 @@ export function DrawingCanvas({
     const safeScaleDrawing = Number.isFinite(scaleDrawing) && scaleDrawing > 0 ? scaleDrawing : 1;
     const safeScaleReal = Number.isFinite(scaleReal) && scaleReal > 0 ? scaleReal : 1;
     const paperPerRealRatio = safeScaleDrawing / safeScaleReal;
-    const realPerPaperRatio = safeScaleReal / safeScaleDrawing;
     const safeGridSubdivisions = Number.isFinite(gridSubdivisions) && gridSubdivisions >= 1
         ? Math.max(1, Math.floor(gridSubdivisions))
         : 1;
@@ -214,20 +160,8 @@ export function DrawingCanvas({
     const hostWidth = Math.max(1, viewportSize.width - originOffset.x);
     const hostHeight = Math.max(1, viewportSize.height - originOffset.y);
 
-    const visibleSceneBounds = useMemo<SceneBounds>(() => {
-        const safeZoom = Math.max(zoom, 0.01);
-        return {
-            left: panOffset.x - WALL_VIEWPORT_MARGIN_PX / safeZoom,
-            top: panOffset.y - WALL_VIEWPORT_MARGIN_PX / safeZoom,
-            right: panOffset.x + hostWidth / safeZoom + WALL_VIEWPORT_MARGIN_PX / safeZoom,
-            bottom: panOffset.y + hostHeight / safeZoom + WALL_VIEWPORT_MARGIN_PX / safeZoom,
-        };
-    }, [panOffset.x, panOffset.y, zoom, hostWidth, hostHeight]);
-
-    const wallSpatialIndex = useMemo(
-        () => buildWallSpatialIndex(walls, WALL_SPATIAL_INDEX_CELL_PX, realPerPaperRatio),
-        [walls, realPerPaperRatio]
-    );
+    void selectedIds;
+    void MM_TO_PX;
 
     const queueMousePositionUpdate = useCallback((position: Point2D) => {
         mousePositionRef.current = position;
@@ -248,64 +182,12 @@ export function DrawingCanvas({
         };
     }, []);
 
-    // Helper callback
-    const notifyRoomValidation = useCallback(
-        (messages: string[], title: string, blocking = false) => {
-            if (messages.length === 0) return;
-            const formatted = `${title}\n${messages.slice(0, 3).join('\n')}`;
-            console.warn(formatted);
-            if (typeof window !== 'undefined') {
-                window.alert(formatted);
-            }
-            if (blocking) {
-                const canvas = fabricRef.current;
-                if (canvas) clearDrawingPreview(canvas, false);
-            }
-        },
-        []
-    );
-
     // Mode hooks
     const selectMode = useSelectMode({
         fabricRef,
-        wallsRef,
-        roomsRef,
-        resolvedSnapToGrid,
-        resolvedGridSize: effectiveSnapGridSize,
-        paperToRealRatio: realPerPaperRatio,
         setSelectedIds,
-        notifyRoomValidation,
-        setHoveredRoomInfo,
         setHoveredElement,
         originOffset,
-    });
-
-    const wallMode = useWallMode({
-        fabricRef,
-        wallsRef,
-        roomsRef,
-        zoomRef,
-        activeLayerId,
-        activeWallTypeId,
-        wallTypeRegistry,
-        displayUnit,
-        paperToRealRatio: realPerPaperRatio,
-        setWalls,
-        notifyRoomValidation,
-    });
-
-    const roomMode = useRoomMode({
-        fabricRef,
-        wallsRef,
-        roomsRef,
-        zoomRef,
-        activeLayerId,
-        activeWallTypeId,
-        wallTypeRegistry,
-        displayUnit,
-        paperToRealRatio: realPerPaperRatio,
-        setWalls,
-        notifyRoomValidation,
     });
 
     const middlePan = useMiddlePan({
@@ -316,27 +198,11 @@ export function DrawingCanvas({
         canvasStateRef,
     });
 
-    const flipSelectedWallInteriorExterior = useCallback(() => {
-        const selectedWallIdSet = new Set(selectedIds.filter((id) => walls.some((wall) => wall.id === id)));
-        if (selectedWallIdSet.size === 0) return;
-        const nextWalls = walls.map((wall) => (
-            selectedWallIdSet.has(wall.id)
-                ? flipWallInteriorExteriorOverride(wall)
-                : wall
-        ));
-        setWalls(nextWalls, 'Flip wall interior/exterior');
-    }, [selectedIds, walls, setWalls]);
-
     // Keyboard handling
     useCanvasKeyboard({
         tool,
-        roomDrawMode,
         selectedIds,
-        endWallChain: wallMode.endWallChain,
-        clearRoomPolygonState: roomMode.clearRoomPolygonState,
         deleteSelected,
-        setActiveWallTypeId,
-        flipSelectedWallInteriorExterior,
         setIsSpacePressed,
     });
 
@@ -391,7 +257,7 @@ export function DrawingCanvas({
         canvas.renderAll();
     }, [backgroundColor]);
 
-    // Sync refs with store
+    // Sync view transform
     useEffect(() => {
         const canvas = fabricRef.current;
         if (!canvas) return;
@@ -403,8 +269,6 @@ export function DrawingCanvas({
     }, [zoom, panOffset]);
 
     useEffect(() => { canvasStateRef.current = canvasState; }, [canvasState]);
-    useEffect(() => { wallsRef.current = walls; }, [walls]);
-    useEffect(() => { roomsRef.current = rooms; }, [rooms]);
 
     // ---------------------------------------------------------------------------
     // Tool Change Handler
@@ -423,226 +287,11 @@ export function DrawingCanvas({
         canvas.hoverCursor = pointerCursor;
 
         canvas.forEachObject((obj) => {
-            const objectName = (obj as unknown as { name?: string }).name;
-            const isNonInteractive =
-                objectName === 'drawing-preview' ||
-                objectName === 'wall-snap-highlight' ||
-                objectName === 'wall-dimension' ||
-                objectName === 'wall-join-render' ||
-                objectName === 'wall-chain-dimension' ||
-                objectName === 'wall-orientation-indicator' ||
-                objectName === 'wall-override-indicator' ||
-                objectName === 'room-tag';
-            if (isNonInteractive) {
-                obj.selectable = false;
-                obj.evented = false;
-                return;
-            }
             obj.selectable = allowSelection;
             obj.evented = allowSelection;
         });
         canvas.renderAll();
     }, [tool, isSpacePressed, canvasState.isPanning]);
-
-    // ---------------------------------------------------------------------------
-    // Rendering Effects
-    // ---------------------------------------------------------------------------
-
-    // Wall rendering
-    useEffect(() => {
-        const canvas = fabricRef.current;
-        if (!canvas) return;
-        const allowSelection = (isSpacePressed ? 'pan' : tool) === 'select';
-        const wallIdSet = new Set(walls.map((w) => w.id));
-        const selectedWallIdSet = new Set(selectedIds.filter((id) => wallIdSet.has(id)));
-        const selectedRoom = rooms.find((r) => selectedIds.includes(r.id));
-        const selectedRoomBoundarySet = new Set(selectedRoom?.wallIds ?? []);
-        const wallLookup = new Map(walls.map((wall) => [wall.id, wall]));
-        const roomPolygons = rooms
-            .map((room) => room.vertices)
-            .filter((vertices) => vertices.length >= 3);
-        const wallBoundaryLookup = buildWallBoundaryLookup(walls, realPerPaperRatio, roomPolygons);
-        const visibleWalls = queryWallsInBounds(
-            wallSpatialIndex,
-            visibleSceneBounds,
-            WALL_SPATIAL_INDEX_CELL_PX,
-            realPerPaperRatio
-        );
-
-        clearRenderedWalls(canvas);
-        const renderedWallBodies: fabric.Object[] = [];
-        const renderedWallLabels: fabric.Object[] = [];
-        const renderedOverrideMarkers: fabric.Object[] = [];
-        visibleWalls.forEach((wall) => {
-            const { wallBody, dimensionLabel, overrideMarker } = createWallRenderObjects(
-                wall, displayUnit, realPerPaperRatio, wallTypeRegistry,
-                {
-                    selected: selectedWallIdSet.has(wall.id) || selectedRoomBoundarySet.has(wall.id),
-                    zoom,
-                    wallLookup,
-                    roomPolygons,
-                    wallBoundaryLookup,
-                }
-            );
-            wallBody.selectable = allowSelection;
-            wallBody.evented = allowSelection;
-            dimensionLabel.selectable = false;
-            dimensionLabel.evented = false;
-            renderedWallBodies.push(wallBody);
-            renderedWallLabels.push(dimensionLabel);
-            if (overrideMarker) {
-                overrideMarker.selectable = false;
-                overrideMarker.evented = false;
-                renderedOverrideMarkers.push(overrideMarker);
-            }
-        });
-
-        renderedWallBodies.forEach((wallBody) => canvas.add(wallBody));
-        const wallJoinObjects = createWallJoinRenderObjects(
-            visibleWalls,
-            realPerPaperRatio,
-            wallTypeRegistry,
-            new Set([...selectedWallIdSet, ...selectedRoomBoundarySet]),
-            wallBoundaryLookup
-        );
-        wallJoinObjects.forEach((joinObject) => {
-            joinObject.selectable = false;
-            joinObject.evented = false;
-            canvas.add(joinObject);
-        });
-        const orientationIndicators = createWallOrientationIndicatorObjects(visibleWalls, zoom);
-        orientationIndicators.forEach((indicator) => {
-            indicator.selectable = false;
-            indicator.evented = false;
-            canvas.add(indicator);
-        });
-        const wallChainDimensions = createWallChainDimensionObjects(
-            visibleWalls,
-            displayUnit,
-            realPerPaperRatio,
-            zoom,
-            roomPolygons
-        );
-        const allDimensionObjects = [...renderedWallLabels, ...wallChainDimensions];
-        resolveWallDimensionCollisions(allDimensionObjects, zoom);
-        allDimensionObjects.forEach((dimensionObject) => {
-            dimensionObject.selectable = false;
-            dimensionObject.evented = false;
-            canvas.add(dimensionObject);
-        });
-        renderedOverrideMarkers.forEach((overrideMarker) => canvas.add(overrideMarker));
-        bringTransientOverlaysToFront(canvas);
-        canvas.requestRenderAll();
-    }, [walls, rooms, selectedIds, displayUnit, tool, isSpacePressed, wallSpatialIndex, visibleSceneBounds, wallTypeRegistry, realPerPaperRatio, zoom]);
-
-    // Room rendering
-    useEffect(() => {
-        const canvas = fabricRef.current;
-        if (!canvas) return;
-        const allowSelection = (isSpacePressed ? 'pan' : tool) === 'select';
-        const selectedRoomId = rooms.find((r) => selectedIds.includes(r.id))?.id ?? null;
-        const hoveredRoomId = hoveredRoomInfo?.id ?? null;
-        const roomById = new Map(rooms.map((r) => [r.id, r]));
-        const visibleRooms = rooms.filter((r) => selectedRoomId === r.id || roomIntersectsBounds(r, visibleSceneBounds));
-        const orderedRooms = [...visibleRooms].sort((a, b) => {
-            const depthDelta = getRoomHierarchyDepth(a, roomById) - getRoomHierarchyDepth(b, roomById);
-            if (depthDelta !== 0) return depthDelta;
-            return (b.grossArea ?? b.area) - (a.grossArea ?? a.area);
-        });
-        const occupiedTagBounds: TagBounds[] = [];
-
-        clearRenderedRooms(canvas);
-        orderedRooms.forEach((room) => {
-            const { roomFill, roomTag, tagBounds } = createRoomRenderObjects(
-                room, zoom, displayUnit, realPerPaperRatio, roomById, occupiedTagBounds,
-                { selected: selectedRoomId === room.id, hovered: hoveredRoomId === room.id }
-            );
-            roomFill.selectable = allowSelection;
-            roomFill.evented = allowSelection;
-            canvas.add(roomFill);
-            canvas.sendObjectToBack(roomFill);
-            if (roomTag && tagBounds) {
-                roomTag.selectable = false;
-                roomTag.evented = false;
-                canvas.add(roomTag);
-                occupiedTagBounds.push(tagBounds);
-            }
-        });
-        bringTransientOverlaysToFront(canvas);
-        canvas.requestRenderAll();
-    }, [rooms, selectedIds, hoveredRoomInfo?.id, zoom, displayUnit, tool, isSpacePressed, visibleSceneBounds]);
-
-    // Wall handles
-    useEffect(() => {
-        const canvas = fabricRef.current;
-        if (!canvas) return;
-        if (selectMode.isWallHandleDraggingRef.current) return;
-        clearWallHandles(canvas);
-
-        if (tool !== 'select') {
-            canvas.requestRenderAll();
-            return;
-        }
-
-        const selectedWall = walls.find((w) => selectedIds.includes(w.id));
-        if (!selectedWall) {
-            canvas.requestRenderAll();
-            return;
-        }
-
-        const handles = createWallHandles(selectedWall, zoom, walls, rooms, realPerPaperRatio);
-        handles.forEach((handle) => {
-            handle.selectable = true;
-            handle.evented = true;
-            canvas.add(handle);
-        });
-        bringTransientOverlaysToFront(canvas);
-        canvas.requestRenderAll();
-    }, [tool, walls, rooms, selectedIds, zoom, realPerPaperRatio, selectMode.isWallHandleDraggingRef]);
-
-    // Tool state cleanup
-    useEffect(() => {
-        if (tool !== 'wall') wallMode.endWallChain();
-        if (tool !== 'room') {
-            roomMode.clearRoomPolygonState();
-            const currentState = canvasStateRef.current;
-            if (currentState.isDrawing) {
-                const nextState: CanvasState = { ...currentState, isDrawing: false, drawingPoints: [] };
-                canvasStateRef.current = nextState;
-                setCanvasState(nextState);
-            }
-        }
-    }, [tool, wallMode, roomMode]);
-
-    useEffect(() => {
-        if (tool === 'room') setRoomDrawMode('rectangle');
-    }, [tool]);
-
-    useEffect(() => {
-        if (tool === 'select' && !isSpacePressed) return;
-        if (hoveredRoomInfo !== null) {
-            setHoveredRoomInfo(null);
-        }
-        if (hoveredElementId !== null) {
-            setHoveredElement(null);
-        }
-    }, [tool, isSpacePressed, hoveredRoomInfo, hoveredElementId, setHoveredElement]);
-
-    useEffect(() => {
-        if (tool !== 'room') return;
-        if (roomDrawMode === 'rectangle') {
-            roomMode.clearRoomPolygonState();
-            return;
-        }
-        const currentState = canvasStateRef.current;
-        if (currentState.isDrawing) {
-            const nextState: CanvasState = { ...currentState, isDrawing: false, drawingPoints: [] };
-            canvasStateRef.current = nextState;
-            setCanvasState(nextState);
-            const canvas = fabricRef.current;
-            if (canvas) clearDrawingPreview(canvas);
-        }
-    }, [tool, roomDrawMode, roomMode]);
 
     // ---------------------------------------------------------------------------
     // Mouse Event Handlers
@@ -675,41 +324,13 @@ export function DrawingCanvas({
                 return;
             }
 
-            if (tool === 'room') {
-                if (roomDrawMode === 'rectangle') {
-                    const targetPoint = roomMode.handleRectangleMouseDown(point);
-                    const currentState = canvasStateRef.current;
-                    const startPoint = currentState.drawingPoints[0];
-
-                    if (!currentState.isDrawing || !startPoint) {
-                        const nextState: CanvasState = { ...currentState, isDrawing: true, drawingPoints: [targetPoint, targetPoint] };
-                        canvasStateRef.current = nextState;
-                        setCanvasState(nextState);
-                        roomMode.handleRectangleMouseMove(targetPoint, targetPoint);
-                    } else {
-                        roomMode.handleRectangleMouseUp(startPoint, targetPoint);
-                        const nextState: CanvasState = { ...currentState, isDrawing: false, drawingPoints: [] };
-                        canvasStateRef.current = nextState;
-                        setCanvasState(nextState);
-                    }
-                } else {
-                    roomMode.handlePolygonMouseDown(point, mouseEvent.detail >= 2);
-                }
-                return;
-            }
-
-            if (tool === 'wall') {
-                wallMode.handleMouseDown(rawPoint, mouseEvent.detail >= 2, mouseEvent.shiftKey, activeWallType.totalThickness);
-                return;
-            }
-
             if (isDrawingTool(tool)) {
                 const nextState: CanvasState = { ...canvasStateRef.current, isDrawing: true, drawingPoints: [point] };
                 canvasStateRef.current = nextState;
                 setCanvasState(nextState);
             }
         },
-        [tool, roomDrawMode, resolvedSnapToGrid, effectiveSnapGridSize, isSpacePressed, wallMode, roomMode, activeWallType.totalThickness, queueMousePositionUpdate]
+        [tool, resolvedSnapToGrid, effectiveSnapGridSize, isSpacePressed, queueMousePositionUpdate]
     );
 
     const handleMouseMove = useCallback(
@@ -740,39 +361,6 @@ export function DrawingCanvas({
                 return;
             }
 
-            // Room hover (select mode)
-            if (tool === 'select' && !isSpacePressed && !currentState.isDrawing) {
-                selectMode.handleRoomHover(point, { x: viewportPoint.x, y: viewportPoint.y });
-            } else {
-                if (hoveredRoomInfo !== null) {
-                    setHoveredRoomInfo(null);
-                }
-                if (hoveredElementId !== null) {
-                    setHoveredElement(null);
-                }
-            }
-
-            if (tool === 'room') {
-                if (roomDrawMode === 'rectangle') {
-                    if (currentState.isDrawing && currentState.drawingPoints[0]) {
-                        const targetPoint = roomMode.handleRectangleMouseMove(currentState.drawingPoints[0], rawPoint);
-                        const nextState: CanvasState = { ...currentState, drawingPoints: [currentState.drawingPoints[0], targetPoint] };
-                        canvasStateRef.current = nextState;
-                        setCanvasState(nextState);
-                    }
-                } else {
-                    roomMode.handlePolygonMouseMove(rawPoint);
-                }
-                return;
-            }
-
-            if (tool === 'wall') {
-                const mouseEvent = e.e as MouseEvent;
-                // Use raw cursor position for smooth rubber-band preview from pivot to pointer.
-                wallMode.handleMouseMove(rawPoint, mouseEvent.shiftKey, activeWallType.totalThickness);
-                return;
-            }
-
             if (!currentState.isDrawing) return;
             const nextPoints = [...currentState.drawingPoints, point];
             const nextState: CanvasState = { ...currentState, drawingPoints: nextPoints };
@@ -780,7 +368,7 @@ export function DrawingCanvas({
             setCanvasState(nextState);
             renderDrawingPreview(canvas, nextPoints, tool);
         },
-        [tool, roomDrawMode, resolvedSnapToGrid, effectiveSnapGridSize, setPanOffset, activeWallType.totalThickness, isSpacePressed, selectMode, wallMode, roomMode, setHoveredElement, hoveredRoomInfo, hoveredElementId, queueMousePositionUpdate]
+        [tool, resolvedSnapToGrid, effectiveSnapGridSize, setPanOffset, queueMousePositionUpdate, middlePan.middlePanRef]
     );
 
     const handleMouseUp = useCallback(() => {
@@ -795,22 +383,16 @@ export function DrawingCanvas({
             return;
         }
 
-        if (tool === 'room' && roomDrawMode === 'rectangle') {
-            // Rectangle room mode is click-click based: commit is handled on second click in mouse down.
-            return;
-        }
-
         if (currentState.isDrawing && currentState.drawingPoints.length > 1) {
             if (tool === 'pencil' || tool === 'spline') {
                 addSketch({ points: currentState.drawingPoints, type: tool === 'spline' ? 'spline' : 'freehand' });
             }
-            clearDrawingPreview(canvas);
         }
 
         const nextState: CanvasState = { ...currentState, isDrawing: false, drawingPoints: [] };
         canvasStateRef.current = nextState;
         setCanvasState(nextState);
-    }, [tool, roomDrawMode, roomMode, addSketch]);
+    }, [tool, addSketch]);
 
     const handleWheel = useCallback(
         (e: fabric.TPointerEventInfo<WheelEvent>) => {
@@ -844,11 +426,6 @@ export function DrawingCanvas({
         const upperCanvasEl = canvas.upperCanvasEl;
 
         const handleCanvasDoubleClick = (event: MouseEvent) => {
-            if (tool === 'wall') {
-                event.preventDefault();
-                wallMode.endWallChain();
-                return;
-            }
             if (tool === 'select') {
                 selectMode.handleDoubleClick(event);
             }
@@ -863,17 +440,19 @@ export function DrawingCanvas({
         };
 
         const handleSelectionCleared = () => {
-            if (!selectMode.isWallHandleDraggingRef.current) setSelectedIds([]);
+            if (!selectMode.isWallHandleDraggingRef.current) {
+                setSelectedIds([]);
+            }
         };
 
         const handleCanvasMouseDown = (event: fabric.CanvasEvents['mouse:down']) => {
             if (tool !== 'select') return;
             const scenePoint = event.e ? canvas.getScenePoint(event.e) : null;
-            if (scenePoint) {
-                selectMode.handleMouseDown(event.target ?? null, { x: scenePoint.x, y: scenePoint.y });
-            } else {
+            if (!scenePoint) {
                 selectMode.updateSelectionFromTarget(event.target ?? null);
+                return;
             }
+            selectMode.handleMouseDown(event.target ?? null, scenePoint);
         };
 
         const handleObjectMoving = (event: fabric.CanvasEvents['object:moving']) => {
@@ -884,10 +463,7 @@ export function DrawingCanvas({
 
         const handleObjectModified = (event: fabric.CanvasEvents['object:modified']) => {
             if (!event.target) return;
-            const meta = selectMode.getTargetMeta(event.target);
-            if (meta.name === 'wall-handle') {
-                selectMode.finalizeHandleDrag();
-            }
+            selectMode.finalizeHandleDrag();
         };
 
         const handleWindowBlur = () => {
@@ -896,7 +472,6 @@ export function DrawingCanvas({
         };
 
         const handleCanvasMouseLeave = () => {
-            setHoveredRoomInfo(null);
             setHoveredElement(null);
         };
 
@@ -941,30 +516,7 @@ export function DrawingCanvas({
             window.removeEventListener('blur', handleWindowBlur);
             selectMode.finalizeHandleDrag();
         };
-    }, [handleMouseDown, handleMouseMove, handleMouseUp, handleWheel, tool, wallMode, selectMode, middlePan, setSelectedIds, setHoveredElement]);
-
-    // ---------------------------------------------------------------------------
-    // Custom Wall Type Creation
-    // ---------------------------------------------------------------------------
-
-    const createCustomWallType = useCallback(() => {
-        if (typeof window === 'undefined') return;
-        const rawName = window.prompt('New wall type name', `${activeWallType.name} (Custom)`);
-        const nextName = rawName?.trim();
-        if (!nextName) return;
-
-        const slug = nextName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'custom-wall';
-        const id = `${slug}-${Date.now().toString(36)}`;
-        const customTypes = wallTypeRegistry.filter((wt) => !BUILT_IN_WALL_TYPE_IDS.includes(wt.id));
-        const customWallType: WallTypeDefinition = {
-            ...activeWallType,
-            id,
-            name: nextName,
-            layers: activeWallType.layers.map((layer, index) => ({ ...layer, id: generateId(), order: index })),
-        };
-        setWallTypeRegistry([...customTypes, customWallType]);
-        setActiveWallTypeId(id);
-    }, [activeWallType, wallTypeRegistry, setWallTypeRegistry, setActiveWallTypeId]);
+    }, [handleMouseDown, handleMouseMove, handleMouseUp, handleWheel, tool, selectMode, middlePan, setSelectedIds, setHoveredElement]);
 
     // ---------------------------------------------------------------------------
     // Render
@@ -997,25 +549,6 @@ export function DrawingCanvas({
                 />
                 <canvas ref={canvasRef} className="relative z-[2] block" />
             </div>
-
-            {(tool === 'wall' || tool === 'room') && (
-                <WallTypeSelector
-                    wallTypeRegistry={wallTypeRegistry}
-                    activeWallTypeId={activeWallTypeId}
-                    onSelectWallType={setActiveWallTypeId}
-                    onCreateCustomType={createCustomWallType}
-                />
-            )}
-
-            {tool === 'room' && <RoomModeSelector roomDrawMode={roomDrawMode} onModeChange={setRoomDrawMode} />}
-
-            {hoveredRoomInfo && tool === 'select' && !isSpacePressed && (
-                <HoveredRoomTooltip
-                    roomInfo={hoveredRoomInfo}
-                    displayUnit={displayUnit}
-                    paperToRealRatio={realPerPaperRatio}
-                />
-            )}
 
             <Rulers
                 pageWidth={pageConfig.width}

@@ -9,8 +9,6 @@ import type { StateCreator } from 'zustand';
 
 import type {
     DrawingTool,
-    Wall2D,
-    Room2D,
     Dimension2D,
     Annotation2D,
     Sketch2D,
@@ -53,8 +51,6 @@ export type SelectionSlice = SelectionSliceState & SelectionSliceActions;
 // =============================================================================
 
 interface SliceDependencies {
-    walls: Wall2D[];
-    rooms: Room2D[];
     dimensions: Dimension2D[];
     annotations: Annotation2D[];
     sketches: Sketch2D[];
@@ -103,8 +99,6 @@ export const createSelectionSlice: StateCreator<
     selectAll: () =>
         set((state) => {
             const allIds = [
-                ...state.walls.map((w) => w.id),
-                ...state.rooms.map((r) => r.id),
                 ...state.dimensions.map((d) => d.id),
                 ...state.annotations.map((a) => a.id),
                 ...state.sketches.map((s) => s.id),
@@ -119,43 +113,9 @@ export const createSelectionSlice: StateCreator<
     setHoveredElement: (id) => set({ hoveredElementId: id }),
 
     deleteSelectedElements: () => {
-        const { selectedElementIds, walls, rooms, dimensions, annotations, sketches, symbols } = get();
-        const wallIdSet = new Set(walls.map((wall) => wall.id));
-        const roomById = new Map(rooms.map((room) => [room.id, room]));
-        const wallUsageCount = new Map<string, number>();
-
-        rooms.forEach((room) => {
-            room.wallIds.forEach((wallId) => {
-                wallUsageCount.set(wallId, (wallUsageCount.get(wallId) ?? 0) + 1);
-            });
-        });
-
-        const explicitlySelectedWallIds = new Set(
-            selectedElementIds.filter((id) => wallIdSet.has(id))
-        );
-        const selectedRoomIds = selectedElementIds.filter((id) => roomById.has(id));
-        const roomDerivedWallIds = new Set<string>();
-
-        selectedRoomIds.forEach((roomId) => {
-            const room = roomById.get(roomId);
-            if (!room) return;
-            room.wallIds.forEach((wallId) => {
-                if (explicitlySelectedWallIds.has(wallId)) {
-                    roomDerivedWallIds.add(wallId);
-                    return;
-                }
-                const usageCount = wallUsageCount.get(wallId) ?? 0;
-                if (usageCount <= 1) {
-                    roomDerivedWallIds.add(wallId);
-                }
-            });
-        });
-
-        const wallIdsToRemove = new Set([...explicitlySelectedWallIds, ...roomDerivedWallIds]);
+        const { selectedElementIds, dimensions, annotations, sketches, symbols } = get();
 
         set({
-            walls: walls.filter((wall) => !wallIdsToRemove.has(wall.id)),
-            rooms: rooms.filter((room) => !selectedElementIds.includes(room.id)),
             dimensions: dimensions.filter((d) => !selectedElementIds.includes(d.id)),
             annotations: annotations.filter((a) => !selectedElementIds.includes(a.id)),
             sketches: sketches.filter((s) => !selectedElementIds.includes(s.id)),

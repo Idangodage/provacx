@@ -1,15 +1,12 @@
 /**
  * History Slice
- * 
+ *
  * Domain-specific slice for history/undo state and actions.
- * Uses Zustand slice pattern for composition.
  */
 
 import type { StateCreator } from 'zustand';
 
 import type {
-    Wall2D,
-    Room2D,
     DetectedElement,
     Dimension2D,
     Annotation2D,
@@ -44,8 +41,6 @@ export type HistorySlice = HistorySliceState & HistorySliceActions;
 // =============================================================================
 
 interface SliceDependencies {
-    walls: Wall2D[];
-    rooms: Room2D[];
     detectedElements: DetectedElement[];
     dimensions: Dimension2D[];
     annotations: Annotation2D[];
@@ -73,8 +68,6 @@ export const createHistorySlice: StateCreator<
     saveToHistory: (action) => {
         const state = get();
         const snapshot = createHistorySnapshot({
-            walls: state.walls,
-            rooms: state.rooms,
             detectedElements: state.detectedElements,
             dimensions: state.dimensions,
             annotations: state.annotations,
@@ -101,8 +94,6 @@ export const createHistorySlice: StateCreator<
         const snapshot = history[targetIndex]?.snapshot;
         if (!snapshot) return;
         set({
-            walls: snapshot.walls,
-            rooms: snapshot.rooms,
             detectedElements: snapshot.detectedElements,
             dimensions: snapshot.dimensions,
             annotations: snapshot.annotations,
@@ -121,8 +112,6 @@ export const createHistorySlice: StateCreator<
         const snapshot = history[targetIndex]?.snapshot;
         if (!snapshot) return;
         set({
-            walls: snapshot.walls,
-            rooms: snapshot.rooms,
             detectedElements: snapshot.detectedElements,
             dimensions: snapshot.dimensions,
             annotations: snapshot.annotations,

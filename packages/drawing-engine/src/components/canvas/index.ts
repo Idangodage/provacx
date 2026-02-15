@@ -16,16 +16,6 @@ export * from './formatting';
 export * from './spatial-index';
 export * from './spatial-hash';
 
-// Wall rendering
-export * from './wallRendering';
-
-// Room rendering
-export * from './roomRendering';
-
-// Wall operations
-export * from './wallOperations';
-export * from './cad-interaction';
-
 // Tool utilities
 export * from './toolUtils';
 

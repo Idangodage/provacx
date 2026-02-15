@@ -5,7 +5,7 @@
  * Industry-standard implementations for 2D geometry.
  */
 
-import type { Point2D, Bounds, Wall2D } from '../types';
+import type { Point2D, Bounds } from '../types';
 
 // =============================================================================
 // ID Generation
@@ -315,27 +315,6 @@ export function simplifyPolyline(points: Point2D[], epsilon: number): Point2D[] 
   }
   
   return [first, last];
-}
-
-// =============================================================================
-// Wall Operations
-// =============================================================================
-
-export function findNearestWall(
-  point: Point2D, 
-  walls: Wall2D[], 
-  threshold: number
-): { wall: Wall2D; position: number; distance: number } | null {
-  let best: { wall: Wall2D; position: number; distance: number } | null = null;
-  
-  walls.forEach((wall) => {
-    const hit = distancePointToSegment(point, wall.start, wall.end);
-    if (hit.distance <= threshold && (!best || hit.distance < best.distance)) {
-      best = { wall, position: hit.t, distance: hit.distance };
-    }
-  });
-  
-  return best;
 }
 
 // =============================================================================

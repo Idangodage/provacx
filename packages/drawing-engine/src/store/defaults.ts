@@ -19,18 +19,6 @@ export const DEFAULT_PAGE_CONFIG: PageConfig = {
 };
 
 // =============================================================================
-// Element Defaults
-// =============================================================================
-
-export const DEFAULT_ELEMENT_SETTINGS = {
-    defaultWallThickness: 1,
-    defaultWallHeight: 3.0,
-    defaultWindowHeight: 1.2,
-    defaultWindowSillHeight: 0.9,
-    defaultDoorHeight: 2.1,
-} as const;
-
-// =============================================================================
 // Layer Defaults
 // =============================================================================
 

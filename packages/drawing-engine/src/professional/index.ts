@@ -5,7 +5,7 @@
  * single kernel and progressively adopt modules.
  */
 
-import type { FloorPlanData, Room2D, Wall2D } from '../types';
+import type { FloorPlanData, Room2D, Wall2D } from './internal-types';
 import {
     ParametricModelEngine,
     solveParametricModel,
@@ -14,12 +14,6 @@ import {
     type DimensionChainConstraint,
     type ParameterDefinition,
 } from './parametric';
-import {
-    autoCleanWallNetwork,
-    detectAndLabelRooms,
-    validateRoomTopologyDetailed,
-    type WallNetworkCleanupResult,
-} from './wall-network';
 import {
     PrecisionToolkit,
     parseCoordinateInput,
@@ -86,30 +80,6 @@ export class ProfessionalFloorPlanKernel {
             parameters,
             contextValues,
         });
-    }
-
-    cleanAndDetectRooms(walls: Wall2D[], previousRooms: Room2D[] = []): {
-        cleanup: WallNetworkCleanupResult;
-        rooms: Room2D[];
-        diagnostics: string[];
-    } {
-        const cleanup = this.options.autoCleanup === false
-            ? { walls, report: {
-                removedDuplicates: 0,
-                mergedCollinearWalls: 0,
-                splitAtTJunctions: 0,
-                splitAtIntersections: 0,
-                healedEndpointGaps: 0,
-            } }
-            : autoCleanWallNetwork(walls);
-
-        const roomDetection = detectAndLabelRooms(cleanup.walls, previousRooms);
-        const topologyDiagnostics = validateRoomTopologyDetailed(roomDetection.rooms);
-        return {
-            cleanup,
-            rooms: roomDetection.rooms,
-            diagnostics: [...roomDetection.diagnostics, ...topologyDiagnostics],
-        };
     }
 
     rebuildSpatialIndex(walls: Wall2D[]): void {
@@ -201,7 +171,6 @@ function deepClone<T>(value: T): T {
 }
 
 export * from './parametric';
-export * from './wall-network';
 export * from './precision';
 export * from './performance';
 export * from './history';
