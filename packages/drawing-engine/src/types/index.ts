@@ -6,6 +6,9 @@
 
 import type { ReactNode } from 'react';
 
+// Re-export wall types
+export * from './wall';
+
 // =============================================================================
 // Geometry Types
 // =============================================================================
@@ -253,12 +256,15 @@ export interface PageLayout {
 // History Types
 // =============================================================================
 
+import type { Wall } from './wall';
+
 export interface HistorySnapshot {
   detectedElements: DetectedElement[];
   dimensions: Dimension2D[];
   annotations: Annotation2D[];
   sketches: Sketch2D[];
   symbols: SymbolInstance2D[];
+  walls: Wall[];
 }
 
 export interface HistoryEntry {

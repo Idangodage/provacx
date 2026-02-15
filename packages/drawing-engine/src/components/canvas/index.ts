@@ -35,5 +35,8 @@ export {
 // Custom hooks
 export * from './hooks';
 
+// Wall module
+export * from './wall';
+
 // UI Components
 export * from './ui';

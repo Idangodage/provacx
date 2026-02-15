@@ -13,6 +13,7 @@ import type {
     Sketch2D,
     SymbolInstance2D,
     HistoryEntry,
+    Wall,
 } from '../../types';
 import { createHistoryEntry, createHistorySnapshot } from '../helpers';
 
@@ -46,6 +47,7 @@ interface SliceDependencies {
     annotations: Annotation2D[];
     sketches: Sketch2D[];
     symbols: SymbolInstance2D[];
+    walls: Wall[];
 }
 
 // =============================================================================
@@ -73,6 +75,7 @@ export const createHistorySlice: StateCreator<
             annotations: state.annotations,
             sketches: state.sketches,
             symbols: state.symbols,
+            walls: state.walls,
         });
         const entry = createHistoryEntry(action, snapshot);
         const trimmedHistory = state.history.slice(0, state.historyIndex + 1);
@@ -99,6 +102,7 @@ export const createHistorySlice: StateCreator<
             annotations: snapshot.annotations,
             sketches: snapshot.sketches,
             symbols: snapshot.symbols,
+            walls: snapshot.walls ?? [],
             historyIndex: targetIndex,
             canUndo: targetIndex > 0,
             canRedo: true,
@@ -117,6 +121,7 @@ export const createHistorySlice: StateCreator<
             annotations: snapshot.annotations,
             sketches: snapshot.sketches,
             symbols: snapshot.symbols,
+            walls: snapshot.walls ?? [],
             historyIndex: targetIndex,
             canUndo: true,
             canRedo: targetIndex < history.length - 1,

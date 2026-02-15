@@ -13,3 +13,9 @@ export { useSelectMode, type UseSelectModeOptions } from './useSelectMode';
 
 // Pan handling
 export { useMiddlePan, type UseMiddlePanOptions, type MiddlePanState } from './useMiddlePan';
+
+// Wall tool
+export { useWallTool, type UseWallToolOptions, type UseWallToolResult } from './useWallTool';
+
+// Room tool
+export { useRoomTool, type UseRoomToolOptions, type UseRoomToolResult } from './useRoomTool';

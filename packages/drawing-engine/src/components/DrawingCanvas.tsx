@@ -28,7 +28,10 @@ import {
     useCanvasKeyboard,
     useSelectMode,
     useMiddlePan,
+    useWallTool,
+    useRoomTool,
 } from './canvas';
+import { RoomConfigPopup } from './canvas/wall';
 
 // =============================================================================
 // Types & Constants
@@ -110,6 +113,7 @@ export function DrawingCanvas({
     const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
     const [mousePosition, setMousePosition] = useState<Point2D>({ x: 0, y: 0 });
     const [isSpacePressed, setIsSpacePressed] = useState(false);
+    const [fabricCanvas, setFabricCanvas] = useState<fabric.Canvas | null>(null);
     const [canvasState, setCanvasState] = useState<CanvasState>({
         isPanning: false,
         lastPanPoint: null,
@@ -135,6 +139,16 @@ export function DrawingCanvas({
         setHoveredElement,
         addSketch,
         deleteSelected,
+        // Wall state and actions
+        walls,
+        wallDrawingState,
+        wallSettings,
+        startWallDrawing,
+        updateWallPreview,
+        commitWall,
+        cancelWallDrawing,
+        connectWalls,
+        createRoomWalls,
     } = useSmartDrawingStore();
 
     // Derived values
@@ -198,6 +212,28 @@ export function DrawingCanvas({
         canvasStateRef,
     });
 
+    // Wall tool hook
+    const wallTool = useWallTool({
+        fabricRef,
+        canvas: fabricCanvas,
+        walls,
+        wallDrawingState,
+        wallSettings,
+        zoom,
+        pageHeight: pageConfig.height,
+        startWallDrawing,
+        updateWallPreview,
+        commitWall,
+        cancelWallDrawing,
+        connectWalls,
+    });
+
+    // Room tool hook
+    const roomTool = useRoomTool({
+        gridSize: wallSettings.gridSize,
+        createRoomWalls,
+    });
+
     // Keyboard handling
     useCanvasKeyboard({
         tool,
@@ -225,6 +261,7 @@ export function DrawingCanvas({
         });
 
         fabricRef.current = canvas;
+        setFabricCanvas(canvas);
         onCanvasReady?.(canvas);
         setViewportSize({ width: outer.clientWidth, height: outer.clientHeight });
 
@@ -247,6 +284,7 @@ export function DrawingCanvas({
             resizeObserver.disconnect();
             canvas.dispose();
             fabricRef.current = null;
+            setFabricCanvas(null);
         };
     }, [onCanvasReady]);
 
@@ -324,13 +362,33 @@ export function DrawingCanvas({
                 return;
             }
 
+            // Handle wall tool - convert from pixels to mm with Y-flip
+            if (tool === 'wall') {
+                const wallPoint = {
+                    x: rawPoint.x / MM_TO_PX,
+                    y: pageConfig.height - rawPoint.y / MM_TO_PX,
+                };
+                wallTool.handleMouseDown(wallPoint);
+                return;
+            }
+
+            // Handle room tool - convert from pixels to mm with Y-flip
+            if (tool === 'room') {
+                const roomPoint = {
+                    x: rawPoint.x / MM_TO_PX,
+                    y: pageConfig.height - rawPoint.y / MM_TO_PX,
+                };
+                roomTool.handleMouseDown(roomPoint);
+                return;
+            }
+
             if (isDrawingTool(tool)) {
                 const nextState: CanvasState = { ...canvasStateRef.current, isDrawing: true, drawingPoints: [point] };
                 canvasStateRef.current = nextState;
                 setCanvasState(nextState);
             }
         },
-        [tool, resolvedSnapToGrid, effectiveSnapGridSize, isSpacePressed, queueMousePositionUpdate]
+        [tool, resolvedSnapToGrid, effectiveSnapGridSize, isSpacePressed, queueMousePositionUpdate, wallTool, roomTool, pageConfig.height]
     );
 
     const handleMouseMove = useCallback(
@@ -361,6 +419,16 @@ export function DrawingCanvas({
                 return;
             }
 
+            // Handle wall tool movement - convert from pixels to mm with Y-flip
+            if (tool === 'wall' && wallTool.isDrawing) {
+                const wallPoint = {
+                    x: rawPoint.x / MM_TO_PX,
+                    y: pageConfig.height - rawPoint.y / MM_TO_PX,
+                };
+                wallTool.handleMouseMove(wallPoint);
+                return;
+            }
+
             if (!currentState.isDrawing) return;
             const nextPoints = [...currentState.drawingPoints, point];
             const nextState: CanvasState = { ...currentState, drawingPoints: nextPoints };
@@ -368,7 +436,7 @@ export function DrawingCanvas({
             setCanvasState(nextState);
             renderDrawingPreview(canvas, nextPoints, tool);
         },
-        [tool, resolvedSnapToGrid, effectiveSnapGridSize, setPanOffset, queueMousePositionUpdate, middlePan.middlePanRef]
+        [tool, resolvedSnapToGrid, effectiveSnapGridSize, setPanOffset, queueMousePositionUpdate, middlePan.middlePanRef, wallTool, pageConfig.height]
     );
 
     const handleMouseUp = useCallback(() => {
@@ -428,6 +496,21 @@ export function DrawingCanvas({
         const handleCanvasDoubleClick = (event: MouseEvent) => {
             if (tool === 'select') {
                 selectMode.handleDoubleClick(event);
+            }
+            if (tool === 'wall') {
+                wallTool.handleDoubleClick();
+            }
+        };
+
+        // Wall tool keyboard handlers
+        const handleWallKeyDown = (e: KeyboardEvent) => {
+            if (tool === 'wall') {
+                wallTool.handleKeyDown(e);
+            }
+        };
+        const handleWallKeyUp = (e: KeyboardEvent) => {
+            if (tool === 'wall') {
+                wallTool.handleKeyUp(e);
             }
         };
 
@@ -494,6 +577,8 @@ export function DrawingCanvas({
         window.addEventListener('mousemove', middlePan.handleMiddleMouseMove, { passive: false });
         window.addEventListener('mouseup', middlePan.handleMiddleMouseUp);
         window.addEventListener('blur', handleWindowBlur);
+        window.addEventListener('keydown', handleWallKeyDown);
+        window.addEventListener('keyup', handleWallKeyUp);
 
         return () => {
             canvas.off('mouse:down', handleMouseDown);
@@ -514,9 +599,11 @@ export function DrawingCanvas({
             window.removeEventListener('mousemove', middlePan.handleMiddleMouseMove);
             window.removeEventListener('mouseup', middlePan.handleMiddleMouseUp);
             window.removeEventListener('blur', handleWindowBlur);
+            window.removeEventListener('keydown', handleWallKeyDown);
+            window.removeEventListener('keyup', handleWallKeyUp);
             selectMode.finalizeHandleDrag();
         };
-    }, [handleMouseDown, handleMouseMove, handleMouseUp, handleWheel, tool, selectMode, middlePan, setSelectedIds, setHoveredElement]);
+    }, [handleMouseDown, handleMouseMove, handleMouseUp, handleWheel, tool, selectMode, middlePan, setSelectedIds, setHoveredElement, wallTool]);
 
     // ---------------------------------------------------------------------------
     // Render
@@ -549,6 +636,20 @@ export function DrawingCanvas({
                 />
                 <canvas ref={canvasRef} className="relative z-[2] block" />
             </div>
+
+            {/* Room Configuration Popup */}
+            {roomTool.showConfigPopup && roomTool.startCorner && (
+                <RoomConfigPopup
+                    config={roomTool.roomConfig}
+                    onChange={roomTool.setRoomConfig}
+                    onConfirm={roomTool.confirmRoomCreation}
+                    onCancel={roomTool.cancelRoomCreation}
+                    position={{
+                        x: roomTool.startCorner.x * MM_TO_PX * zoom - panOffset.x * zoom + originOffset.x + 20,
+                        y: (pageConfig.height - roomTool.startCorner.y) * MM_TO_PX * zoom - panOffset.y * zoom + originOffset.y + 20,
+                    }}
+                />
+            )}
 
             <Rulers
                 pageWidth={pageConfig.width}

@@ -19,6 +19,8 @@ export function getToolCursor(tool: DrawingTool): string {
         case 'pan':
             return 'grab';
         case 'dimension':
+        case 'wall':
+        case 'room':
             return 'crosshair';
         case 'pencil':
         case 'spline':
@@ -33,7 +35,7 @@ export function getToolCursor(tool: DrawingTool): string {
 }
 
 export function isDrawingTool(tool: DrawingTool): boolean {
-    return ['pencil', 'spline', 'dimension', 'rectangle', 'circle', 'line'].includes(tool);
+    return ['pencil', 'spline', 'dimension', 'rectangle', 'circle', 'line', 'wall', 'room'].includes(tool);
 }
 
 export function isEditableElement(target: EventTarget | null): boolean {

@@ -23,7 +23,17 @@ import type {
   HistoryEntry,
   SplineSettings,
   SplineMethod,
+  Wall,
+  WallDrawingState,
+  WallSettings,
+  WallMaterial,
+  CreateWallParams,
+  RoomConfig,
 } from '../types';
+import {
+  DEFAULT_WALL_SETTINGS,
+  DEFAULT_WALL_DRAWING_STATE,
+} from '../types/wall';
 import { generateId } from '../utils/geometry';
 import { DEFAULT_SPLINE_SETTINGS } from '../utils/spline';
 
@@ -50,6 +60,11 @@ export interface DrawingState {
   guides: Guide[];
   symbols: SymbolInstance2D[];
   layers: DrawingLayer[];
+
+  // Wall State
+  walls: Wall[];
+  wallDrawingState: WallDrawingState;
+  wallSettings: WallSettings;
 
   // Import State
   importedDrawing: ImportedDrawing | null;
@@ -136,6 +151,25 @@ export interface DrawingState {
   addSymbol: (symbol: Omit<SymbolInstance2D, 'id'>) => string;
   updateSymbol: (id: string, data: Partial<SymbolInstance2D>) => void;
   deleteSymbol: (id: string) => void;
+
+  // Actions - Walls
+  addWall: (params: CreateWallParams) => string;
+  updateWall: (id: string, updates: Partial<Wall>) => void;
+  deleteWall: (id: string) => void;
+  getWall: (id: string) => Wall | undefined;
+  startWallDrawing: (startPoint: Point2D) => void;
+  updateWallPreview: (currentPoint: Point2D) => void;
+  commitWall: () => string | null;
+  cancelWallDrawing: () => void;
+  setChainMode: (enabled: boolean) => void;
+  connectWalls: (wallId: string, otherWallId: string) => void;
+  disconnectWall: (wallId: string, otherWallId: string) => void;
+  setWallSettings: (settings: Partial<WallSettings>) => void;
+  setWallPreviewMaterial: (material: WallMaterial) => void;
+  setWallPreviewThickness: (thickness: number) => void;
+  createRoomWalls: (config: RoomConfig, startCorner: Point2D) => string[];
+  deleteWalls: (ids: string[]) => void;
+  clearAllWalls: () => void;
 
   // Actions - Selection
   selectElement: (id: string, addToSelection?: boolean) => void;
@@ -233,6 +267,11 @@ export const useDrawingStore = create<DrawingState>()(
       guides: [],
       symbols: [],
       layers: [...DEFAULT_LAYERS],
+
+      // Wall State
+      walls: [],
+      wallDrawingState: { ...DEFAULT_WALL_DRAWING_STATE },
+      wallSettings: { ...DEFAULT_WALL_SETTINGS },
       importedDrawing: null,
       importProgress: 0,
       isProcessing: false,
@@ -396,6 +435,279 @@ export const useDrawingStore = create<DrawingState>()(
         get().saveToHistory('Delete symbol');
       },
 
+      // Wall Actions
+      addWall: (params) => {
+        const id = generateId();
+        const thickness = params.thickness ?? 150;
+        const material = params.material ?? 'brick';
+        const layer = params.layer ?? 'partition';
+
+        // Compute offset lines
+        const dx = params.endPoint.x - params.startPoint.x;
+        const dy = params.endPoint.y - params.startPoint.y;
+        const length = Math.sqrt(dx * dx + dy * dy) || 1;
+        const perpX = -dy / length;
+        const perpY = dx / length;
+        const halfThickness = thickness / 2;
+
+        const wall: Wall = {
+          id,
+          startPoint: { ...params.startPoint },
+          endPoint: { ...params.endPoint },
+          thickness,
+          material,
+          layer,
+          interiorLine: {
+            start: { x: params.startPoint.x + perpX * halfThickness, y: params.startPoint.y + perpY * halfThickness },
+            end: { x: params.endPoint.x + perpX * halfThickness, y: params.endPoint.y + perpY * halfThickness },
+          },
+          exteriorLine: {
+            start: { x: params.startPoint.x - perpX * halfThickness, y: params.startPoint.y - perpY * halfThickness },
+            end: { x: params.endPoint.x - perpX * halfThickness, y: params.endPoint.y - perpY * halfThickness },
+          },
+          connectedWalls: [],
+          openings: [],
+          properties3D: null,
+        };
+
+        set((state) => ({ walls: [...state.walls, wall] }));
+        get().saveToHistory('Add wall');
+        return id;
+      },
+
+      updateWall: (id, updates) => {
+        set((state) => ({
+          walls: state.walls.map((wall) => {
+            if (wall.id !== id) return wall;
+            const updatedWall = { ...wall, ...updates };
+
+            // Recompute geometry if relevant fields changed
+            if (updates.startPoint || updates.endPoint || updates.thickness) {
+              const dx = updatedWall.endPoint.x - updatedWall.startPoint.x;
+              const dy = updatedWall.endPoint.y - updatedWall.startPoint.y;
+              const length = Math.sqrt(dx * dx + dy * dy) || 1;
+              const perpX = -dy / length;
+              const perpY = dx / length;
+              const halfThickness = updatedWall.thickness / 2;
+
+              updatedWall.interiorLine = {
+                start: { x: updatedWall.startPoint.x + perpX * halfThickness, y: updatedWall.startPoint.y + perpY * halfThickness },
+                end: { x: updatedWall.endPoint.x + perpX * halfThickness, y: updatedWall.endPoint.y + perpY * halfThickness },
+              };
+              updatedWall.exteriorLine = {
+                start: { x: updatedWall.startPoint.x - perpX * halfThickness, y: updatedWall.startPoint.y - perpY * halfThickness },
+                end: { x: updatedWall.endPoint.x - perpX * halfThickness, y: updatedWall.endPoint.y - perpY * halfThickness },
+              };
+            }
+
+            return updatedWall;
+          }),
+        }));
+        get().saveToHistory('Update wall');
+      },
+
+      deleteWall: (id) => {
+        set((state) => ({
+          walls: state.walls
+            .filter((w) => w.id !== id)
+            .map((wall) => ({
+              ...wall,
+              connectedWalls: wall.connectedWalls.filter((cid) => cid !== id),
+            })),
+        }));
+        get().saveToHistory('Delete wall');
+      },
+
+      getWall: (id) => get().walls.find((w) => w.id === id),
+
+      startWallDrawing: (startPoint) => {
+        const { wallSettings } = get();
+        set({
+          wallDrawingState: {
+            isDrawing: true,
+            startPoint: { ...startPoint },
+            currentPoint: { ...startPoint },
+            chainMode: wallSettings.chainModeEnabled,
+            previewThickness: wallSettings.defaultThickness,
+            previewMaterial: wallSettings.defaultMaterial,
+          },
+        });
+      },
+
+      updateWallPreview: (currentPoint) => {
+        set((state) => ({
+          wallDrawingState: {
+            ...state.wallDrawingState,
+            currentPoint: { ...currentPoint },
+          },
+        }));
+      },
+
+      commitWall: () => {
+        const { wallDrawingState, wallSettings } = get();
+
+        if (!wallDrawingState.isDrawing || !wallDrawingState.startPoint || !wallDrawingState.currentPoint) {
+          return null;
+        }
+
+        // Don't create zero-length walls
+        const dx = wallDrawingState.currentPoint.x - wallDrawingState.startPoint.x;
+        const dy = wallDrawingState.currentPoint.y - wallDrawingState.startPoint.y;
+        const length = Math.sqrt(dx * dx + dy * dy);
+
+        if (length < 1) {
+          return null;
+        }
+
+        // Create the wall
+        const wallId = get().addWall({
+          startPoint: wallDrawingState.startPoint,
+          endPoint: wallDrawingState.currentPoint,
+          thickness: wallDrawingState.previewThickness,
+          material: wallDrawingState.previewMaterial,
+          layer: wallSettings.defaultLayer,
+        });
+
+        // If chain mode, start next wall from current endpoint
+        if (wallDrawingState.chainMode) {
+          set({
+            wallDrawingState: {
+              ...wallDrawingState,
+              startPoint: { ...wallDrawingState.currentPoint },
+              currentPoint: { ...wallDrawingState.currentPoint },
+            },
+          });
+        } else {
+          set({
+            wallDrawingState: { ...DEFAULT_WALL_DRAWING_STATE },
+          });
+        }
+
+        return wallId;
+      },
+
+      cancelWallDrawing: () => {
+        set({
+          wallDrawingState: { ...DEFAULT_WALL_DRAWING_STATE },
+        });
+      },
+
+      setChainMode: (enabled) => {
+        set((state) => ({
+          wallDrawingState: {
+            ...state.wallDrawingState,
+            chainMode: enabled,
+          },
+          wallSettings: {
+            ...state.wallSettings,
+            chainModeEnabled: enabled,
+          },
+        }));
+      },
+
+      connectWalls: (wallId, otherWallId) => {
+        if (wallId === otherWallId) return;
+        set((state) => ({
+          walls: state.walls.map((wall) => {
+            if (wall.id === wallId && !wall.connectedWalls.includes(otherWallId)) {
+              return { ...wall, connectedWalls: [...wall.connectedWalls, otherWallId] };
+            }
+            if (wall.id === otherWallId && !wall.connectedWalls.includes(wallId)) {
+              return { ...wall, connectedWalls: [...wall.connectedWalls, wallId] };
+            }
+            return wall;
+          }),
+        }));
+      },
+
+      disconnectWall: (wallId, otherWallId) => {
+        set((state) => ({
+          walls: state.walls.map((wall) => {
+            if (wall.id === wallId || wall.id === otherWallId) {
+              return {
+                ...wall,
+                connectedWalls: wall.connectedWalls.filter((id) => id !== wallId && id !== otherWallId),
+              };
+            }
+            return wall;
+          }),
+        }));
+      },
+
+      setWallSettings: (settings) => {
+        set((state) => ({
+          wallSettings: { ...state.wallSettings, ...settings },
+        }));
+      },
+
+      setWallPreviewMaterial: (material) => {
+        set((state) => ({
+          wallDrawingState: {
+            ...state.wallDrawingState,
+            previewMaterial: material,
+          },
+        }));
+      },
+
+      setWallPreviewThickness: (thickness) => {
+        set((state) => ({
+          wallDrawingState: {
+            ...state.wallDrawingState,
+            previewThickness: thickness,
+          },
+        }));
+      },
+
+      createRoomWalls: (config, startCorner) => {
+        const { width, height, wallThickness, material } = config;
+        const layer = material === 'partition' ? 'partition' : 'structural';
+
+        const corners: Point2D[] = [
+          startCorner,
+          { x: startCorner.x + width, y: startCorner.y },
+          { x: startCorner.x + width, y: startCorner.y + height },
+          { x: startCorner.x, y: startCorner.y + height },
+        ];
+
+        const wallIds: string[] = [];
+        for (let i = 0; i < 4; i++) {
+          const start = corners[i];
+          const end = corners[(i + 1) % 4];
+          const wallId = get().addWall({
+            startPoint: start,
+            endPoint: end,
+            thickness: wallThickness,
+            material,
+            layer,
+          });
+          wallIds.push(wallId);
+        }
+
+        for (let i = 0; i < 4; i++) {
+          get().connectWalls(wallIds[i], wallIds[(i + 1) % 4]);
+        }
+
+        return wallIds;
+      },
+
+      deleteWalls: (ids) => {
+        const idsSet = new Set(ids);
+        set((state) => ({
+          walls: state.walls
+            .filter((w) => !idsSet.has(w.id))
+            .map((wall) => ({
+              ...wall,
+              connectedWalls: wall.connectedWalls.filter((cid) => !idsSet.has(cid)),
+            })),
+        }));
+        get().saveToHistory('Delete walls');
+      },
+
+      clearAllWalls: () => {
+        set({ walls: [] });
+        get().saveToHistory('Clear all walls');
+      },
+
       // Selection Actions
       selectElement: (id, addToSelection = false) => set((state) => ({
         selectedElementIds: addToSelection
@@ -419,24 +731,33 @@ export const useDrawingStore = create<DrawingState>()(
           ...state.annotations.map((a) => a.id),
           ...state.sketches.map((s) => s.id),
           ...state.symbols.map((s) => s.id),
+          ...state.walls.map((w) => w.id),
         ],
         selectedIds: [
           ...state.dimensions.map((d) => d.id),
           ...state.annotations.map((a) => a.id),
           ...state.sketches.map((s) => s.id),
           ...state.symbols.map((s) => s.id),
+          ...state.walls.map((w) => w.id),
         ],
       })),
 
       setHoveredElement: (id) => set({ hoveredElementId: id }),
 
       deleteSelectedElements: () => {
-        const { selectedElementIds, dimensions, annotations, sketches, symbols } = get();
+        const { selectedElementIds, dimensions, annotations, sketches, symbols, walls } = get();
+        const selectedSet = new Set(selectedElementIds);
         set({
-          dimensions: dimensions.filter((d) => !selectedElementIds.includes(d.id)),
-          annotations: annotations.filter((a) => !selectedElementIds.includes(a.id)),
-          sketches: sketches.filter((s) => !selectedElementIds.includes(s.id)),
-          symbols: symbols.filter((s) => !selectedElementIds.includes(s.id)),
+          dimensions: dimensions.filter((d) => !selectedSet.has(d.id)),
+          annotations: annotations.filter((a) => !selectedSet.has(a.id)),
+          sketches: sketches.filter((s) => !selectedSet.has(s.id)),
+          symbols: symbols.filter((s) => !selectedSet.has(s.id)),
+          walls: walls
+            .filter((w) => !selectedSet.has(w.id))
+            .map((wall) => ({
+              ...wall,
+              connectedWalls: wall.connectedWalls.filter((cid) => !selectedSet.has(cid)),
+            })),
           selectedElementIds: [],
           selectedIds: [],
         });
@@ -616,6 +937,7 @@ export const useDrawingStore = create<DrawingState>()(
           annotations: prevEntry.snapshot.annotations,
           sketches: prevEntry.snapshot.sketches,
           symbols: prevEntry.snapshot.symbols,
+          walls: prevEntry.snapshot.walls ?? [],
           historyIndex: nextHistoryIndex,
           canUndo: nextHistoryIndex > 0,
           canRedo: nextHistoryIndex < state.history.length - 1,
@@ -633,6 +955,7 @@ export const useDrawingStore = create<DrawingState>()(
           annotations: nextEntry.snapshot.annotations,
           sketches: nextEntry.snapshot.sketches,
           symbols: nextEntry.snapshot.symbols,
+          walls: nextEntry.snapshot.walls ?? [],
           historyIndex: nextHistoryIndex,
           canUndo: nextHistoryIndex > 0,
           canRedo: nextHistoryIndex < state.history.length - 1,
@@ -648,7 +971,7 @@ export const useDrawingStore = create<DrawingState>()(
 
       // Export/Import Actions
       exportToJSON: () => {
-        const { importedDrawing, dimensions, annotations, sketches, symbols, guides } = get();
+        const { importedDrawing, dimensions, annotations, sketches, symbols, guides, walls } = get();
         return JSON.stringify({
           version: '1.0',
           dimensions,
@@ -656,6 +979,7 @@ export const useDrawingStore = create<DrawingState>()(
           sketches,
           guides,
           symbols,
+          walls,
           scale: importedDrawing?.scale || 100,
           exportedAt: new Date().toISOString(),
         }, null, 2);
@@ -670,6 +994,7 @@ export const useDrawingStore = create<DrawingState>()(
             sketches: data.sketches || [],
             guides: data.guides || [],
             symbols: data.symbols || [],
+            walls: data.walls || [],
           });
           get().setProcessingStatus('Imported drawing JSON.', false);
         } catch (error) {
