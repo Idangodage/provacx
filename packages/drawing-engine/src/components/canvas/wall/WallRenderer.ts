@@ -28,11 +28,13 @@ export class WallRenderer {
   private wallObjects: Map<string, fabric.Group> = new Map();
   private showCenterLines: boolean = true;
   private pageHeight: number;
+  private scaleRatio: number;  // scaleReal / scaleDrawing - converts real-world mm to paper mm
   private hatchPatterns: Map<WallMaterial, fabric.Pattern | null> = new Map();
 
-  constructor(canvas: fabric.Canvas, pageHeight: number = 3000) {
+  constructor(canvas: fabric.Canvas, pageHeight: number = 3000, scaleRatio: number = 1) {
     this.canvas = canvas;
     this.pageHeight = pageHeight;
+    this.scaleRatio = scaleRatio;
     this.initializePatterns();
   }
 
@@ -76,18 +78,25 @@ export class WallRenderer {
 
   /**
    * Convert Y coordinate for architectural convention (Y-up to canvas Y-down)
+   * Applies scale ratio: real-world mm -> paper mm -> pixels
    */
   private toCanvasY(y: number): number {
-    return (this.pageHeight - y) * MM_TO_PX;
+    // Convert real-world mm to paper mm, then to pixels
+    const paperMm = y / this.scaleRatio;
+    return (this.pageHeight - paperMm) * MM_TO_PX;
   }
 
   /**
    * Convert point to canvas coordinates
+   * Applies scale ratio: real-world mm -> paper mm -> pixels
    */
   private toCanvasPoint(point: Point2D): { x: number; y: number } {
+    // Convert real-world mm to paper mm, then to pixels
+    const paperX = point.x / this.scaleRatio;
+    const paperY = point.y / this.scaleRatio;
     return {
-      x: point.x * MM_TO_PX,
-      y: this.toCanvasY(point.y),
+      x: paperX * MM_TO_PX,
+      y: (this.pageHeight - paperY) * MM_TO_PX,
     };
   }
 
@@ -96,6 +105,14 @@ export class WallRenderer {
    */
   setPageHeight(height: number): void {
     this.pageHeight = height;
+  }
+
+  /**
+   * Set scale ratio for coordinate conversion
+   * scaleRatio = scaleReal / scaleDrawing (e.g., 50 for 1:50 scale)
+   */
+  setScaleRatio(ratio: number): void {
+    this.scaleRatio = ratio;
   }
 
   /**
