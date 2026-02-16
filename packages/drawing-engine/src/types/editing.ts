@@ -145,9 +145,9 @@ export interface WallConstraints {
  * Default wall constraints
  */
 export const DEFAULT_WALL_CONSTRAINTS: WallConstraints = {
-  minThickness: 50,   // 50mm minimum
-  maxThickness: 600,  // 600mm maximum
-  minLength: 100,     // 100mm minimum
+  minThickness: 50,       // 50mm minimum
+  maxThickness: Infinity, // No maximum limit
+  minLength: 100,         // 100mm minimum
 };
 
 /**
