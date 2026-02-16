@@ -516,7 +516,9 @@ export const useDrawingStore = create<DrawingState>()(
             return updatedWall;
           }),
         }));
-        get().saveToHistory('Update wall');
+        // Note: History is NOT saved here automatically
+        // Callers should save history explicitly when the operation is complete
+        // This allows drag operations to update walls without creating history entries on every move
       },
 
       deleteWall: (id) => {

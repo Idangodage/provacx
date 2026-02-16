@@ -250,11 +250,48 @@ export function DrawingCanvas({
     });
 
     // Keyboard handling
+    const handleNudgeSelected = useCallback((delta: Point2D) => {
+        if (editingManagerRef.current) {
+            editingManagerRef.current.nudgeSelected(delta);
+        }
+    }, []);
+
+    const handleDuplicateSelected = useCallback(() => {
+        if (editingManagerRef.current) {
+            editingManagerRef.current.duplicateSelected();
+        }
+    }, []);
+
+    const handleCancelOperation = useCallback(() => {
+        if (editingManagerRef.current?.isDragging()) {
+            editingManagerRef.current.cancelDrag();
+            // Re-enable canvas selection after cancel
+            const canvas = fabricRef.current;
+            if (canvas && tool === 'select') {
+                canvas.selection = true;
+            }
+        } else {
+            cancelWallDrawing();
+        }
+    }, [cancelWallDrawing, tool]);
+
+    const handleDeleteSelected = useCallback(() => {
+        if (tool === 'select' && editingManagerRef.current) {
+            editingManagerRef.current.deleteSelected();
+        } else {
+            deleteSelected();
+        }
+    }, [tool, deleteSelected]);
+
     useCanvasKeyboard({
         tool,
         selectedIds,
-        deleteSelected,
+        deleteSelected: handleDeleteSelected,
         setIsSpacePressed,
+        nudgeSelected: handleNudgeSelected,
+        duplicateSelected: handleDuplicateSelected,
+        cancelOperation: handleCancelOperation,
+        gridSize: storeGridSize ?? 100,
     });
 
     // ---------------------------------------------------------------------------
@@ -378,6 +415,18 @@ export function DrawingCanvas({
         }
     }, [selectedIds, tool]);
 
+    // Bring handles to front after walls are re-rendered during drag
+    // This runs after useWallTool's useEffect re-renders walls
+    useEffect(() => {
+        if (editingManagerRef.current?.isDragging()) {
+            // Use requestAnimationFrame to ensure this runs after wall rendering
+            requestAnimationFrame(() => {
+                editingManagerRef.current?.bringHandlesToFront();
+                fabricRef.current?.renderAll();
+            });
+        }
+    }, [walls]);
+
     // ---------------------------------------------------------------------------
     // Tool Change Handler
     // ---------------------------------------------------------------------------
@@ -480,8 +529,26 @@ export function DrawingCanvas({
                         x: paperX * scaleRatio,
                         y: paperY * scaleRatio,
                     };
-                    const hitResult = editingManagerRef.current.hitTestAtPoint(rawPoint);
+                    // Get handle info directly from Fabric.js target instead of position-based hit testing
+                    // This prevents edge handles from hijacking center handle clicks on thin walls
+                    const handleTarget = target as unknown as {
+                        handleId: string;
+                        handleType: string;
+                        elementId: string;
+                        elementType: 'wall' | 'room';
+                    };
+                    const hitResult = editingManagerRef.current.getHitResultFromHandle(
+                        handleTarget.handleId,
+                        handleTarget.handleType as 'interior-edge' | 'exterior-edge' | 'center-midpoint' | 'endpoint-start' | 'endpoint-end' | 'centroid',
+                        handleTarget.elementId,
+                        handleTarget.elementType
+                    );
                     if (hitResult) {
+                        // Disable canvas selection during handle drag to prevent blue rectangle
+                        canvas.selection = false;
+                        canvas.discardActiveObject();
+                        // Clear any active group selection state
+                        (canvas as unknown as { _groupSelector: unknown })._groupSelector = null;
                         editingManagerRef.current.startDrag(hitResult, realPoint);
                     }
                 }
@@ -527,6 +594,8 @@ export function DrawingCanvas({
 
             // Handle editing drag in select mode
             if (tool === 'select' && editingManagerRef.current?.isDragging()) {
+                // Ensure selection box is not rendered during our custom drag
+                (canvas as unknown as { _groupSelector: unknown })._groupSelector = null;
                 const paperX = rawPoint.x / MM_TO_PX;
                 const paperY = pageConfig.height - rawPoint.y / MM_TO_PX;
                 const realPoint = {
@@ -567,6 +636,10 @@ export function DrawingCanvas({
         // End editing drag if active
         if (editingManagerRef.current?.isDragging()) {
             editingManagerRef.current.endDrag();
+            // Re-enable canvas selection after drag ends
+            if (tool === 'select') {
+                canvas.selection = true;
+            }
             return;
         }
 

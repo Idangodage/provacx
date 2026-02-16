@@ -70,6 +70,59 @@ export class HandleRenderer {
   // ==========================================================================
 
   /**
+   * Generate a custom SVG cursor rotated to the exact angle
+   * Creates a double-headed arrow cursor perpendicular to the wall
+   */
+  private generateRotatedCursor(angleDegrees: number): string {
+    // SVG for a double-headed arrow (horizontal by default)
+    // We'll rotate it to match the perpendicular angle
+    const size = 24;
+    const center = size / 2;
+
+    // Create SVG with rotation transform
+    const svg = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+        <g transform="rotate(${angleDegrees}, ${center}, ${center})">
+          <!-- Arrow shaft -->
+          <line x1="4" y1="${center}" x2="20" y2="${center}" stroke="white" stroke-width="3" stroke-linecap="round"/>
+          <line x1="4" y1="${center}" x2="20" y2="${center}" stroke="black" stroke-width="1.5" stroke-linecap="round"/>
+          <!-- Left arrowhead -->
+          <path d="M4,${center} L9,${center - 4} M4,${center} L9,${center + 4}" stroke="white" stroke-width="3" stroke-linecap="round" fill="none"/>
+          <path d="M4,${center} L9,${center - 4} M4,${center} L9,${center + 4}" stroke="black" stroke-width="1.5" stroke-linecap="round" fill="none"/>
+          <!-- Right arrowhead -->
+          <path d="M20,${center} L15,${center - 4} M20,${center} L15,${center + 4}" stroke="white" stroke-width="3" stroke-linecap="round" fill="none"/>
+          <path d="M20,${center} L15,${center - 4} M20,${center} L15,${center + 4}" stroke="black" stroke-width="1.5" stroke-linecap="round" fill="none"/>
+        </g>
+      </svg>
+    `.trim().replace(/\s+/g, ' ');
+
+    // Encode SVG for use in CSS cursor
+    const encoded = encodeURIComponent(svg);
+    return `url("data:image/svg+xml,${encoded}") ${center} ${center}, crosshair`;
+  }
+
+  /**
+   * Calculate the perpendicular cursor for wall thickness adjustment
+   * Returns a custom SVG cursor rotated to the exact perpendicular angle
+   */
+  private getPerpendicularCursor(wall: Wall): string {
+    // Calculate wall direction angle
+    const dx = wall.endPoint.x - wall.startPoint.x;
+    const dy = wall.endPoint.y - wall.startPoint.y;
+    const wallAngle = Math.atan2(dy, dx);
+
+    // Perpendicular angle (add 90 degrees)
+    // Note: In canvas coordinates, Y is flipped, so we negate the angle
+    const perpAngleRad = wallAngle + Math.PI / 2;
+
+    // Convert to degrees for SVG rotation
+    // Negate because canvas Y-axis is inverted compared to math convention
+    const perpAngleDeg = -perpAngleRad * 180 / Math.PI;
+
+    return this.generateRotatedCursor(perpAngleDeg);
+  }
+
+  /**
    * Render all handles for a selected wall
    * Shows exactly 3 dots:
    * - 1 dot on interior line center (for thickness adjustment)
@@ -81,6 +134,9 @@ export class HandleRenderer {
     this.clearWallHandles(wall.id);
 
     const handles: WallHandle[] = [];
+
+    // Calculate perpendicular cursor for edge handles
+    const edgeCursor = this.getPerpendicularCursor(wall);
 
     // 1. Interior edge handle (dot at midpoint of interior line - for thickness)
     const interiorMidpoint: Point2D = {
@@ -103,12 +159,18 @@ export class HandleRenderer {
     const centerHandle = this.createWallHandle(wall, 'center-midpoint', centerPoint);
     handles.push(centerHandle);
 
-    // Render all handles
+    // Render all handles with appropriate cursors
     for (const handle of handles) {
-      this.renderHandle(handle, 'wall');
+      const cursor = (handle.type === 'interior-edge' || handle.type === 'exterior-edge')
+        ? edgeCursor
+        : 'move';
+      this.renderHandleWithCursor(handle, 'wall', cursor);
     }
 
     this.wallHandles.set(wall.id, handles);
+
+    // Ensure handles are on top of walls
+    this.bringHandlesToFront();
     this.canvas.renderAll();
 
     return handles;
@@ -143,6 +205,9 @@ export class HandleRenderer {
 
     this.renderHandle(handle, 'room');
     this.roomHandles.set(room.id, handle);
+
+    // Ensure handles are on top of walls/rooms
+    this.bringHandlesToFront();
     this.canvas.renderAll();
 
     return handle;
@@ -153,6 +218,10 @@ export class HandleRenderer {
   // ==========================================================================
 
   private renderHandle(handle: WallHandle | RoomHandle, elementType: 'wall' | 'room'): void {
+    this.renderHandleWithCursor(handle, elementType, undefined);
+  }
+
+  private renderHandleWithCursor(handle: WallHandle | RoomHandle, elementType: 'wall' | 'room', cursor?: string): void {
     const canvasPos = this.toCanvasPoint(handle.position);
     const config = HANDLE_COLORS[handle.type];
     let fabricObject: HandleFabricObject;
@@ -164,15 +233,15 @@ export class HandleRenderer {
         break;
       case 'interior-edge':
       case 'exterior-edge':
-        // Use circles (dots) for edge handles - for thickness adjustment
-        fabricObject = this.createDot(canvasPos, config.size, config.color, 'ew-resize') as unknown as HandleFabricObject;
+        // Use circles (dots) for edge handles - cursor is perpendicular to wall
+        fabricObject = this.createDot(canvasPos, config.size, config.color, cursor ?? 'ew-resize') as unknown as HandleFabricObject;
         break;
       case 'center-midpoint':
         // Use circle (dot) for center handle - for wall movement
-        fabricObject = this.createDot(canvasPos, config.size, config.color, 'move') as unknown as HandleFabricObject;
+        fabricObject = this.createDot(canvasPos, config.size, config.color, cursor ?? 'move') as unknown as HandleFabricObject;
         break;
       case 'centroid':
-        fabricObject = this.createCrosshair(canvasPos, config.size, config.color, 'move') as unknown as HandleFabricObject;
+        fabricObject = this.createCrosshair(canvasPos, config.size, config.color, cursor ?? 'move') as unknown as HandleFabricObject;
         break;
       default:
         return;
@@ -366,6 +435,72 @@ export class HandleRenderer {
     }
 
     this.canvas.renderAll();
+  }
+
+  // ==========================================================================
+  // Handle Position Updates (for drag operations)
+  // ==========================================================================
+
+  /**
+   * Update positions of existing wall handles without recreating them.
+   * Used during drag operations to avoid handle disappearing.
+   */
+  updateWallHandlePositions(wall: Wall): void {
+    const handles = this.wallHandles.get(wall.id);
+    if (!handles) return;
+
+    // Calculate new positions
+    const interiorMidpoint: Point2D = {
+      x: (wall.interiorLine.start.x + wall.interiorLine.end.x) / 2,
+      y: (wall.interiorLine.start.y + wall.interiorLine.end.y) / 2,
+    };
+    const exteriorMidpoint: Point2D = {
+      x: (wall.exteriorLine.start.x + wall.exteriorLine.end.x) / 2,
+      y: (wall.exteriorLine.start.y + wall.exteriorLine.end.y) / 2,
+    };
+    const centerPoint = wallCenter(wall);
+
+    // Update each handle's position
+    for (const handle of handles) {
+      let newPosition: Point2D;
+      switch (handle.type) {
+        case 'interior-edge':
+          newPosition = interiorMidpoint;
+          break;
+        case 'exterior-edge':
+          newPosition = exteriorMidpoint;
+          break;
+        case 'center-midpoint':
+          newPosition = centerPoint;
+          break;
+        default:
+          continue;
+      }
+
+      // Update the handle data
+      handle.position = newPosition;
+
+      // Update the fabric object position
+      const fabricObj = this.handles.get(handle.id);
+      if (fabricObj) {
+        const canvasPos = this.toCanvasPoint(newPosition);
+        fabricObj.set({ left: canvasPos.x, top: canvasPos.y });
+        fabricObj.setCoords();
+      }
+    }
+
+    // Note: Don't call bringHandlesToFront() or renderAll() here
+    // The useEffect in DrawingCanvas will handle bringing handles to front
+    // after wall re-rendering completes, which also triggers renderAll
+  }
+
+  /**
+   * Bring all handles to front of canvas (above walls)
+   */
+  bringHandlesToFront(): void {
+    for (const fabricObj of this.handles.values()) {
+      this.canvas.bringObjectToFront(fabricObj);
+    }
   }
 
   // ==========================================================================

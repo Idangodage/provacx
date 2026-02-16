@@ -100,21 +100,23 @@ export class WallEditor {
     }
 
     // Calculate new thickness
+    // Only the dragged edge moves - opposite edge stays fixed
+    // Interior line is at +perp direction, exterior line is at -perp direction
     let newThickness: number;
     let centerOffset: number;
 
     if (edge === 'interior') {
-      // Moving interior edge inward (negative dragDelta) increases thickness
-      // Moving interior edge outward (positive dragDelta) decreases thickness
-      newThickness = wall.thickness - dragDelta;
-      // Center line shifts toward exterior by half the delta
-      centerOffset = -dragDelta / 2;
-    } else {
-      // Moving exterior edge outward (positive dragDelta) increases thickness
-      // Moving exterior edge inward (negative dragDelta) decreases thickness
+      // Interior edge is at positive perp from center
+      // Dragging outward (positive perpDelta) increases thickness
+      // Dragging inward (negative perpDelta) decreases thickness
       newThickness = wall.thickness + dragDelta;
-      // Center line shifts toward interior by half the delta
       centerOffset = dragDelta / 2;
+    } else {
+      // Exterior edge is at negative perp from center
+      // Dragging outward (negative perpDelta) increases thickness
+      // Dragging inward (positive perpDelta) decreases thickness
+      newThickness = wall.thickness - dragDelta;
+      centerOffset = -dragDelta / 2;
     }
 
     // Validate constraints
@@ -140,6 +142,17 @@ export class WallEditor {
         limit: this.options.constraints.maxThickness,
       });
       newThickness = this.options.constraints.maxThickness;
+    }
+
+    // Recalculate center offset based on actual thickness change
+    // This ensures the opposite edge stays fixed even when thickness is clamped
+    const actualThicknessChange = newThickness - wall.thickness;
+    if (edge === 'interior') {
+      // Interior edge at +perp, so center moves in +perp direction when thickness increases
+      centerOffset = actualThicknessChange / 2;
+    } else {
+      // Exterior edge at -perp, so center moves in -perp direction when thickness increases
+      centerOffset = -actualThicknessChange / 2;
     }
 
     // Calculate center line offset
@@ -269,11 +282,11 @@ export class WallEditor {
   }
 
   // ==========================================================================
-  // Center Dragging (Parallel Translation)
+  // Center Dragging (Free Translation)
   // ==========================================================================
 
   /**
-   * Drag the center point to translate the wall parallel to itself
+   * Drag the center point to translate the wall freely following the mouse
    */
   dragCenter(params: DragCenterParams): WallEditResult {
     const { wallId, dragDelta, moveConnected, snapToGrid } = params;
@@ -290,11 +303,8 @@ export class WallEditor {
 
     const updatedWalls: Wall[] = [];
 
-    // Project delta onto wall perpendicular direction for pure parallel movement
-    const dir = direction(wall.startPoint, wall.endPoint);
-    const perp = perpendicular(dir);
-    const perpComponent = dot(dragDelta, perp);
-    let offsetVec = scaleVec(perp, perpComponent);
+    // Use the full delta for free movement (wall follows mouse directly)
+    let offsetVec = { ...dragDelta };
 
     // Apply grid snapping if enabled
     if (snapToGrid && this.options.snapToGrid) {

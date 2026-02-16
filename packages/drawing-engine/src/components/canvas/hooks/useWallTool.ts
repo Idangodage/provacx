@@ -122,6 +122,14 @@ export function useWallTool({
     }
   }, [wallSettings.showCenterLines]);
 
+  // Clear preview when wall drawing is cancelled (e.g., via Escape key)
+  useEffect(() => {
+    if (!wallDrawingState.isDrawing && wallPreviewRef.current) {
+      wallPreviewRef.current.clearPreview();
+      lastSnappedWallRef.current = null;
+    }
+  }, [wallDrawingState.isDrawing]);
+
   /**
    * Handle mouse down - start wall or commit current wall
    */
