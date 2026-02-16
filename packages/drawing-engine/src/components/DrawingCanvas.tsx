@@ -31,9 +31,8 @@ import {
     useWallTool,
     useRoomTool,
 } from './canvas';
-import { EditingManager } from './canvas/editing';
-import { detectRooms } from './canvas/room';
 import { RoomConfigPopup } from './canvas/wall';
+import { EditingManager } from './canvas/editing';
 
 // =============================================================================
 // Types & Constants
@@ -159,6 +158,8 @@ export function DrawingCanvas({
         deleteWalls,
         getRoom,
         getAllRooms,
+        rooms,
+        setRooms,
         saveToHistory,
     } = useSmartDrawingStore();
 
@@ -282,12 +283,6 @@ export function DrawingCanvas({
         }
     }, [tool, deleteSelected]);
 
-    const rebuildRoomsFromCurrentWalls = useCallback(() => {
-        const state = useSmartDrawingStore.getState();
-        const detection = detectRooms(state.walls);
-        state.setRooms(detection.rooms);
-    }, []);
-
     useCanvasKeyboard({
         tool,
         selectedIds,
@@ -378,7 +373,7 @@ export function DrawingCanvas({
             canvas,
             {
                 getWall,
-                getAllWalls: () => useSmartDrawingStore.getState().walls,
+                getAllWalls: () => walls,
                 updateWall,
                 addWall: (params) => addWall({
                     startPoint: params.startPoint,
@@ -390,8 +385,10 @@ export function DrawingCanvas({
                 deleteWalls,
                 getRoom,
                 getAllRooms,
-                detectRooms: rebuildRoomsFromCurrentWalls,
-                getSelectedIds: () => useSmartDrawingStore.getState().selectedElementIds,
+                detectRooms: () => {
+                    // Room detection will be wired when RoomDetector is integrated
+                },
+                getSelectedIds: () => selectedIds,
                 setSelectedIds,
                 saveToHistory,
                 getGridSize: () => storeGridSize ?? 100,
@@ -409,7 +406,7 @@ export function DrawingCanvas({
             manager.dispose();
             editingManagerRef.current = null;
         };
-    }, [fabricCanvas, pageConfig.height, scaleRatio, rebuildRoomsFromCurrentWalls]);
+    }, [fabricCanvas, pageConfig.height, scaleRatio]);
 
     // Update EditingManager selection when selectedIds change
     useEffect(() => {
@@ -429,11 +426,6 @@ export function DrawingCanvas({
             });
         }
     }, [walls]);
-
-    useEffect(() => {
-        if (editingManagerRef.current?.isDragging()) return;
-        rebuildRoomsFromCurrentWalls();
-    }, [walls, rebuildRoomsFromCurrentWalls]);
 
     // ---------------------------------------------------------------------------
     // Tool Change Handler
