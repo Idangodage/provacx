@@ -175,6 +175,11 @@ export interface DrawingState {
   deleteWalls: (ids: string[]) => void;
   clearAllWalls: () => void;
 
+  // Actions - Rooms
+  getRoom: (id: string) => Room | undefined;
+  getAllRooms: () => Room[];
+  setRooms: (rooms: Room[]) => void;
+
   // Actions - Selection
   selectElement: (id: string, addToSelection?: boolean) => void;
   deselectElement: (id: string) => void;
@@ -714,6 +719,19 @@ export const useDrawingStore = create<DrawingState>()(
       clearAllWalls: () => {
         set({ walls: [] });
         get().saveToHistory('Clear all walls');
+      },
+
+      // Room Actions
+      getRoom: (id) => {
+        return get().rooms.find((r) => r.id === id);
+      },
+
+      getAllRooms: () => {
+        return get().rooms;
+      },
+
+      setRooms: (rooms) => {
+        set({ rooms });
       },
 
       // Selection Actions

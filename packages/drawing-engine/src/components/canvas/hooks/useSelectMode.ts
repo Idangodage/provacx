@@ -17,6 +17,10 @@ export interface UseSelectModeOptions {
 interface TargetMeta {
     name?: string;
     id?: string;
+    wallId?: string;   // Set by WallRenderer
+    roomId?: string;   // Set by RoomRenderer
+    handleId?: string; // Set by HandleRenderer
+    elementId?: string; // Set by HandleRenderer (parent element ID)
 }
 
 export function useSelectMode({
@@ -26,18 +30,25 @@ export function useSelectMode({
     const isWallHandleDraggingRef = useRef(false);
 
     const getTargetMeta = useCallback((target: FabricObject | undefined | null): TargetMeta => {
+        if (!target) return {};
         const typed = target as unknown as TargetMeta;
         return {
             name: typed?.name,
             id: typed?.id,
+            wallId: typed?.wallId,
+            roomId: typed?.roomId,
+            handleId: typed?.handleId,
+            elementId: typed?.elementId,
         };
     }, []);
 
     const updateSelectionFromTarget = useCallback(
         (target: FabricObject | undefined | null) => {
             const meta = getTargetMeta(target);
-            if (meta.id) {
-                setSelectedIds([meta.id]);
+            // Priority: handleId's elementId > wallId > roomId > id
+            const elementId = meta.elementId || meta.wallId || meta.roomId || meta.id;
+            if (elementId) {
+                setSelectedIds([elementId]);
                 return;
             }
             if (!target) {

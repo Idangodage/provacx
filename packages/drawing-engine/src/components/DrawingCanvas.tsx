@@ -32,6 +32,7 @@ import {
     useRoomTool,
 } from './canvas';
 import { RoomConfigPopup } from './canvas/wall';
+import { EditingManager } from './canvas/editing';
 
 // =============================================================================
 // Types & Constants
@@ -108,6 +109,7 @@ export function DrawingCanvas({
         isDrawing: false,
         drawingPoints: [],
     });
+    const editingManagerRef = useRef<EditingManager | null>(null);
 
     // State
     const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
@@ -149,6 +151,16 @@ export function DrawingCanvas({
         cancelWallDrawing,
         connectWalls,
         createRoomWalls,
+        // Additional actions for editing
+        getWall,
+        updateWall,
+        addWall,
+        deleteWalls,
+        getRoom,
+        getAllRooms,
+        rooms,
+        setRooms,
+        saveToHistory,
     } = useSmartDrawingStore();
 
     // Derived values
@@ -312,6 +324,61 @@ export function DrawingCanvas({
     useEffect(() => { canvasStateRef.current = canvasState; }, [canvasState]);
 
     // ---------------------------------------------------------------------------
+    // EditingManager Initialization
+    // ---------------------------------------------------------------------------
+
+    useEffect(() => {
+        const canvas = fabricRef.current;
+        if (!canvas) return;
+
+        // Create EditingManager with callbacks
+        const manager = new EditingManager(
+            canvas,
+            {
+                getWall,
+                getAllWalls: () => walls,
+                updateWall,
+                addWall: (params) => addWall({
+                    startPoint: params.startPoint,
+                    endPoint: params.endPoint,
+                    thickness: params.thickness,
+                    material: params.material as 'brick' | 'concrete' | 'partition',
+                    layer: params.layer as 'structural' | 'partition',
+                }),
+                deleteWalls,
+                getRoom,
+                getAllRooms,
+                detectRooms: () => {
+                    // Room detection will be wired when RoomDetector is integrated
+                },
+                getSelectedIds: () => selectedIds,
+                setSelectedIds,
+                saveToHistory,
+                getGridSize: () => storeGridSize ?? 100,
+                getSnapToGrid: () => storeSnapToGrid ?? true,
+            },
+            {
+                pageHeight: pageConfig.height,
+                scaleRatio,
+            }
+        );
+
+        editingManagerRef.current = manager;
+
+        return () => {
+            manager.dispose();
+            editingManagerRef.current = null;
+        };
+    }, [fabricCanvas, pageConfig.height, scaleRatio]);
+
+    // Update EditingManager selection when selectedIds change
+    useEffect(() => {
+        if (editingManagerRef.current && tool === 'select') {
+            editingManagerRef.current.updateSelection(selectedIds);
+        }
+    }, [selectedIds, tool]);
+
+    // ---------------------------------------------------------------------------
     // Tool Change Handler
     // ---------------------------------------------------------------------------
 
@@ -328,10 +395,22 @@ export function DrawingCanvas({
         canvas.hoverCursor = pointerCursor;
 
         canvas.forEachObject((obj) => {
+            const isEditHandle = Boolean((obj as unknown as { handleId?: string }).handleId);
+            if (isEditHandle) {
+                obj.selectable = false;
+                obj.evented = allowSelection;
+                return;
+            }
+
             obj.selectable = allowSelection;
             obj.evented = allowSelection;
         });
         canvas.renderAll();
+
+        // Hide handles when not in select mode
+        if (effectiveTool !== 'select' && editingManagerRef.current) {
+            editingManagerRef.current.hideAllHandles();
+        }
     }, [tool, isSpacePressed, canvasState.isPanning]);
 
     // ---------------------------------------------------------------------------
@@ -390,6 +469,25 @@ export function DrawingCanvas({
                 return;
             }
 
+            // Handle select mode - check for handle click to start drag
+            if (tool === 'select' && editingManagerRef.current) {
+                const target = e.target;
+                // Check if clicked on a handle (has handleId property)
+                if (target && (target as unknown as { handleId?: string }).handleId) {
+                    const paperX = rawPoint.x / MM_TO_PX;
+                    const paperY = pageConfig.height - rawPoint.y / MM_TO_PX;
+                    const realPoint = {
+                        x: paperX * scaleRatio,
+                        y: paperY * scaleRatio,
+                    };
+                    const hitResult = editingManagerRef.current.hitTestAtPoint(rawPoint);
+                    if (hitResult) {
+                        editingManagerRef.current.startDrag(hitResult, realPoint);
+                    }
+                }
+                return;
+            }
+
             if (isDrawingTool(tool)) {
                 const nextState: CanvasState = { ...canvasStateRef.current, isDrawing: true, drawingPoints: [point] };
                 canvasStateRef.current = nextState;
@@ -427,6 +525,18 @@ export function DrawingCanvas({
                 return;
             }
 
+            // Handle editing drag in select mode
+            if (tool === 'select' && editingManagerRef.current?.isDragging()) {
+                const paperX = rawPoint.x / MM_TO_PX;
+                const paperY = pageConfig.height - rawPoint.y / MM_TO_PX;
+                const realPoint = {
+                    x: paperX * scaleRatio,
+                    y: paperY * scaleRatio,
+                };
+                editingManagerRef.current.updateDrag(realPoint);
+                return;
+            }
+
             // Handle wall tool movement - convert from pixels to real-world mm with Y-flip and scale
             if (tool === 'wall' && wallTool.isDrawing) {
                 const paperX = rawPoint.x / MM_TO_PX;
@@ -453,6 +563,12 @@ export function DrawingCanvas({
         const canvas = fabricRef.current;
         if (!canvas) return;
         const currentState = canvasStateRef.current;
+
+        // End editing drag if active
+        if (editingManagerRef.current?.isDragging()) {
+            editingManagerRef.current.endDrag();
+            return;
+        }
 
         if (currentState.isPanning) {
             const nextState: CanvasState = { ...currentState, isPanning: false, lastPanPoint: null };
