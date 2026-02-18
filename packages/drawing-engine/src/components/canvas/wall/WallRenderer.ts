@@ -1,12 +1,12 @@
 /**
  * WallRenderer
  *
- * Fabric.js rendering for walls with clean architectural appearance.
- * Walls are rendered with solid black exterior/interior lines and a subtle fill.
+ * Fabric.js rendering for walls with material fills and joins.
  */
 
 import * as fabric from 'fabric';
 import type { Point2D, Wall, WallMaterial, JoinData } from '../../../types';
+import { WALL_MATERIAL_COLORS } from '../../../types/wall';
 import { computeWallPolygon, computeMiterJoin, angleBetweenWalls, determineJoinType } from './WallGeometry';
 import { MM_TO_PX } from '../scale';
 
@@ -16,15 +16,8 @@ import { MM_TO_PX } from '../scale';
 
 export interface WallRenderOptions {
   showCenterLines: boolean;
-  pageHeight: number;
+  pageHeight: number;  // For Y-axis flip
 }
-
-// Wall fill colors - clean architectural style
-const WALL_FILLS: Record<WallMaterial, string> = {
-  brick: '#F5E6D3',      // Light warm beige
-  concrete: '#E8E8E8',   // Light gray
-  partition: '#FFFFFF',  // White
-};
 
 // =============================================================================
 // WallRenderer Class
@@ -33,20 +26,72 @@ const WALL_FILLS: Record<WallMaterial, string> = {
 export class WallRenderer {
   private canvas: fabric.Canvas;
   private wallObjects: Map<string, fabric.Group> = new Map();
+  private showCenterLines: boolean = true;
   private pageHeight: number;
-  private scaleRatio: number;
+  private scaleRatio: number;  // scaleReal / scaleDrawing - converts real-world mm to paper mm
+  private hatchPatterns: Map<WallMaterial, fabric.Pattern | null> = new Map();
 
   constructor(canvas: fabric.Canvas, pageHeight: number = 3000, scaleRatio: number = 1) {
     this.canvas = canvas;
     this.pageHeight = pageHeight;
     this.scaleRatio = scaleRatio;
+    this.initializePatterns();
   }
 
-  // ==========================================================================
-  // Coordinate Conversion
-  // ==========================================================================
+  /**
+   * Initialize hatch patterns for materials
+   */
+  private initializePatterns(): void {
+    // Create brick hatch pattern
+    const brickPattern = this.createHatchPattern('#CC9999');
+    this.hatchPatterns.set('brick', brickPattern);
+    this.hatchPatterns.set('concrete', null);
+    this.hatchPatterns.set('partition', null);
+  }
 
+  /**
+   * Create 45-degree hatch pattern
+   */
+  private createHatchPattern(strokeColor: string): fabric.Pattern | null {
+    // Create a small canvas for the pattern
+    const patternSize = 10;
+    const patternCanvas = document.createElement('canvas');
+    patternCanvas.width = patternSize;
+    patternCanvas.height = patternSize;
+    const ctx = patternCanvas.getContext('2d');
+
+    if (!ctx) return null;
+
+    // Draw diagonal line
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, patternSize);
+    ctx.lineTo(patternSize, 0);
+    ctx.stroke();
+
+    return new fabric.Pattern({
+      source: patternCanvas,
+      repeat: 'repeat',
+    });
+  }
+
+  /**
+   * Convert Y coordinate for architectural convention (Y-up to canvas Y-down)
+   * Applies scale ratio: real-world mm -> paper mm -> pixels
+   */
+  private toCanvasY(y: number): number {
+    // Convert real-world mm to paper mm, then to pixels
+    const paperMm = y / this.scaleRatio;
+    return (this.pageHeight - paperMm) * MM_TO_PX;
+  }
+
+  /**
+   * Convert point to canvas coordinates
+   * Applies scale ratio: real-world mm -> paper mm -> pixels
+   */
   private toCanvasPoint(point: Point2D): { x: number; y: number } {
+    // Convert real-world mm to paper mm, then to pixels
     const paperX = point.x / this.scaleRatio;
     const paperY = point.y / this.scaleRatio;
     return {
@@ -55,82 +100,123 @@ export class WallRenderer {
     };
   }
 
-  // ==========================================================================
-  // Configuration
-  // ==========================================================================
-
+  /**
+   * Set page height for Y-axis conversion
+   */
   setPageHeight(height: number): void {
     this.pageHeight = height;
   }
 
+  /**
+   * Set scale ratio for coordinate conversion
+   * scaleRatio = scaleReal / scaleDrawing (e.g., 50 for 1:50 scale)
+   */
   setScaleRatio(ratio: number): void {
     this.scaleRatio = ratio;
   }
 
-  setShowCenterLines(_show: boolean): void {
-    // Center lines removed for cleaner appearance
+  /**
+   * Set whether to show center lines
+   */
+  setShowCenterLines(show: boolean): void {
+    this.showCenterLines = show;
+    // Update all existing walls
+    this.wallObjects.forEach((group, wallId) => {
+      const centerLine = group.getObjects().find((obj) =>
+        (obj as fabric.Object & { name?: string }).name === 'centerLine'
+      );
+      if (centerLine) {
+        centerLine.set('visible', show);
+      }
+    });
+    this.canvas.renderAll();
   }
 
-  // ==========================================================================
-  // Wall Rendering
-  // ==========================================================================
-
   /**
-   * Render a wall with clean architectural appearance
+   * Render a wall as a Fabric.js group
    */
   renderWall(wall: Wall, joins?: JoinData[]): fabric.Group {
+    // Remove existing wall object if any
     this.removeWall(wall.id);
 
-    // Compute polygon vertices (order: interiorStart, interiorEnd, exteriorEnd, exteriorStart)
+    // Compute polygon vertices
     const vertices = computeWallPolygon(wall, joins);
+
+    // Convert to canvas coordinates
     const canvasVertices = vertices.map((v) => this.toCanvasPoint(v));
 
-    // Get fill color based on material
-    const fillColor = WALL_FILLS[wall.material] || WALL_FILLS.brick;
+    // Get material colors
+    const materialColors = WALL_MATERIAL_COLORS[wall.material];
 
-    const objects: fabric.FabricObject[] = [];
-
-    // Create solid fill polygon with clean black outline
+    // Create wall polygon
     const polygon = new fabric.Polygon(canvasVertices, {
-      fill: fillColor,
-      stroke: '#000000',
-      strokeWidth: 1.5,
-      selectable: false,
-      evented: false,
-      strokeLineJoin: 'miter',
+      fill: materialColors.fill,
+      stroke: materialColors.stroke,
+      strokeWidth: 1,
+      selectable: true,
+      evented: true,
     });
-    (polygon as fabric.Object & { name?: string }).name = 'wallPolygon';
-    objects.push(polygon);
 
-    // Create the group
+    // Apply hatch pattern if needed
+    if (materialColors.pattern === 'hatch') {
+      const pattern = this.hatchPatterns.get(wall.material);
+      if (pattern) {
+        // Draw base fill first, then apply pattern overlay
+        polygon.set('fill', materialColors.fill);
+      }
+    }
+
+    const objects: fabric.FabricObject[] = [polygon];
+
+    // Create center line (dashed)
+    if (this.showCenterLines) {
+      const centerLine = new fabric.Line(
+        [
+          wall.startPoint.x * MM_TO_PX,
+          this.toCanvasY(wall.startPoint.y),
+          wall.endPoint.x * MM_TO_PX,
+          this.toCanvasY(wall.endPoint.y),
+        ],
+        {
+          stroke: '#666666',
+          strokeWidth: 1,
+          strokeDashArray: [5, 5],
+          selectable: false,
+          evented: false,
+        }
+      );
+      (centerLine as fabric.Object & { name?: string }).name = 'centerLine';
+      objects.push(centerLine);
+    }
+
+    // Create group
     const group = new fabric.Group(objects, {
       selectable: true,
       evented: true,
       subTargetCheck: true,
-      hasControls: false,
-      hasBorders: false,
-      lockMovementX: true,
-      lockMovementY: true,
     });
 
-    // Store wall ID for selection
+    // Store wall ID in the group
     (group as fabric.Group & { wallId?: string }).wallId = wall.id;
     (group as fabric.Group & { name?: string }).name = `wall-${wall.id}`;
 
+    // Add to canvas and store reference
     this.canvas.add(group);
     this.wallObjects.set(wall.id, group);
 
     return group;
   }
 
-  // ==========================================================================
-  // Wall Management
-  // ==========================================================================
-
+  /**
+   * Update an existing wall's rendering
+   */
   updateWall(wall: Wall, joins?: JoinData[]): void {
     this.renderWall(wall, joins);
   }
 
+  /**
+   * Remove a wall from the canvas
+   */
   removeWall(wallId: string): void {
     const existing = this.wallObjects.get(wallId);
     if (existing) {
@@ -139,17 +225,20 @@ export class WallRenderer {
     }
   }
 
+  /**
+   * Render all walls with proper joins
+   */
   renderAllWalls(walls: Wall[]): void {
-    // Clear existing
+    // Clear existing wall objects
     this.wallObjects.forEach((obj) => {
       this.canvas.remove(obj);
     });
     this.wallObjects.clear();
 
-    // Compute joins
+    // Compute joins for connected walls
     const joinsMap = this.computeAllJoins(walls);
 
-    // Render each wall
+    // Render each wall with its joins
     for (const wall of walls) {
       const joins = joinsMap.get(wall.id) || [];
       this.renderWall(wall, joins);
@@ -158,6 +247,9 @@ export class WallRenderer {
     this.canvas.renderAll();
   }
 
+  /**
+   * Compute all wall joins
+   */
   private computeAllJoins(walls: Wall[]): Map<string, JoinData[]> {
     const joinsMap = new Map<string, JoinData[]>();
     const wallsById = new Map(walls.map((w) => [w.id, w]));
@@ -169,11 +261,15 @@ export class WallRenderer {
         const connectedWall = wallsById.get(connectedId);
         if (!connectedWall) continue;
 
+        // Find shared endpoint
         const sharedEndpoint = this.findSharedEndpoint(wall, connectedWall);
         if (!sharedEndpoint) continue;
 
+        // Calculate angle and join type
         const angle = angleBetweenWalls(wall, connectedWall, sharedEndpoint);
         const joinType = determineJoinType(angle);
+
+        // Compute miter/butt join vertices
         const { interiorVertex, exteriorVertex } = computeMiterJoin(wall, connectedWall, sharedEndpoint);
 
         joins.push({
@@ -193,46 +289,55 @@ export class WallRenderer {
     return joinsMap;
   }
 
+  /**
+   * Find shared endpoint between two walls
+   */
   private findSharedEndpoint(wall1: Wall, wall2: Wall): Point2D | null {
     const tolerance = 0.1;
+
     const endpoints1 = [wall1.startPoint, wall1.endPoint];
     const endpoints2 = [wall2.startPoint, wall2.endPoint];
 
     for (const p1 of endpoints1) {
       for (const p2 of endpoints2) {
-        if (Math.abs(p1.x - p2.x) < tolerance && Math.abs(p1.y - p2.y) < tolerance) {
+        if (
+          Math.abs(p1.x - p2.x) < tolerance &&
+          Math.abs(p1.y - p2.y) < tolerance
+        ) {
           return p1;
         }
       }
     }
+
     return null;
   }
 
-  // ==========================================================================
-  // Selection Highlight
-  // ==========================================================================
-
+  /**
+   * Highlight a wall
+   */
   highlightWall(wallId: string, highlight: boolean): void {
     const group = this.wallObjects.get(wallId);
     if (!group) return;
 
-    // Find the wall polygon and highlight it
-    const objects = group.getObjects();
-    for (const obj of objects) {
-      const name = (obj as fabric.Object & { name?: string }).name;
-      if (name === 'wallPolygon') {
-        (obj as fabric.Polygon).set('stroke', highlight ? '#2196F3' : '#000000');
-        (obj as fabric.Polygon).set('strokeWidth', highlight ? 2.5 : 1.5);
-      }
+    const polygon = group.getObjects()[0];
+    if (polygon) {
+      polygon.set('strokeWidth', highlight ? 3 : 1);
+      polygon.set('stroke', highlight ? '#2196F3' : WALL_MATERIAL_COLORS.brick.stroke);
     }
 
     this.canvas.renderAll();
   }
 
+  /**
+   * Get wall object by ID
+   */
   getWallObject(wallId: string): fabric.Group | undefined {
     return this.wallObjects.get(wallId);
   }
 
+  /**
+   * Clear all walls
+   */
   clearAllWalls(): void {
     this.wallObjects.forEach((obj) => {
       this.canvas.remove(obj);
@@ -241,7 +346,11 @@ export class WallRenderer {
     this.canvas.renderAll();
   }
 
+  /**
+   * Dispose renderer
+   */
   dispose(): void {
     this.clearAllWalls();
+    this.hatchPatterns.clear();
   }
 }

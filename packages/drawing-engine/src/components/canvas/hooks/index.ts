@@ -19,6 +19,3 @@ export { useWallTool, type UseWallToolOptions, type UseWallToolResult } from './
 
 // Room tool
 export { useRoomTool, type UseRoomToolOptions, type UseRoomToolResult } from './useRoomTool';
-
-// Edit mode
-export { useEditMode, type UseEditModeOptions } from './useEditMode';

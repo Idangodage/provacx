@@ -38,8 +38,5 @@ export * from './hooks';
 // Wall module
 export * from './wall';
 
-// Editing module
-export * from './editing';
-
 // UI Components
 export * from './ui';

@@ -12,9 +12,6 @@ export * from './wall';
 // Re-export room types
 export * from './room';
 
-// Re-export editing types
-export * from './editing';
-
 // =============================================================================
 // Geometry Types
 // =============================================================================
