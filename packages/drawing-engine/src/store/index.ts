@@ -7,6 +7,10 @@
 import { create } from 'zustand';
 import { devtools } from 'zustand/middleware';
 
+import {
+  computeOffsetLines,
+  rebuildWallFacesWithJunctionCleanup,
+} from '../components/canvas/wall/WallGeometry';
 import type {
   Point2D,
   DisplayUnit,
@@ -454,14 +458,11 @@ export const useDrawingStore = create<DrawingState>()(
         const thickness = params.thickness ?? 150;
         const material = params.material ?? 'brick';
         const layer = params.layer ?? 'partition';
-
-        // Compute offset lines
-        const dx = params.endPoint.x - params.startPoint.x;
-        const dy = params.endPoint.y - params.startPoint.y;
-        const length = Math.sqrt(dx * dx + dy * dy) || 1;
-        const perpX = -dy / length;
-        const perpY = dx / length;
-        const halfThickness = thickness / 2;
+        const { interiorLine, exteriorLine } = computeOffsetLines(
+          params.startPoint,
+          params.endPoint,
+          thickness
+        );
 
         const wall: Wall = {
           id,
@@ -470,51 +471,25 @@ export const useDrawingStore = create<DrawingState>()(
           thickness,
           material,
           layer,
-          interiorLine: {
-            start: { x: params.startPoint.x + perpX * halfThickness, y: params.startPoint.y + perpY * halfThickness },
-            end: { x: params.endPoint.x + perpX * halfThickness, y: params.endPoint.y + perpY * halfThickness },
-          },
-          exteriorLine: {
-            start: { x: params.startPoint.x - perpX * halfThickness, y: params.startPoint.y - perpY * halfThickness },
-            end: { x: params.endPoint.x - perpX * halfThickness, y: params.endPoint.y - perpY * halfThickness },
-          },
+          interiorLine,
+          exteriorLine,
           connectedWalls: [],
           openings: [],
           properties3D: null,
         };
 
-        set((state) => ({ walls: [...state.walls, wall] }));
+        set((state) => ({
+          walls: rebuildWallFacesWithJunctionCleanup([...state.walls, wall]),
+        }));
         get().saveToHistory('Add wall');
         return id;
       },
 
       updateWall: (id, updates) => {
         set((state) => ({
-          walls: state.walls.map((wall) => {
-            if (wall.id !== id) return wall;
-            const updatedWall = { ...wall, ...updates };
-
-            // Recompute geometry if relevant fields changed
-            if (updates.startPoint || updates.endPoint || updates.thickness) {
-              const dx = updatedWall.endPoint.x - updatedWall.startPoint.x;
-              const dy = updatedWall.endPoint.y - updatedWall.startPoint.y;
-              const length = Math.sqrt(dx * dx + dy * dy) || 1;
-              const perpX = -dy / length;
-              const perpY = dx / length;
-              const halfThickness = updatedWall.thickness / 2;
-
-              updatedWall.interiorLine = {
-                start: { x: updatedWall.startPoint.x + perpX * halfThickness, y: updatedWall.startPoint.y + perpY * halfThickness },
-                end: { x: updatedWall.endPoint.x + perpX * halfThickness, y: updatedWall.endPoint.y + perpY * halfThickness },
-              };
-              updatedWall.exteriorLine = {
-                start: { x: updatedWall.startPoint.x - perpX * halfThickness, y: updatedWall.startPoint.y - perpY * halfThickness },
-                end: { x: updatedWall.endPoint.x - perpX * halfThickness, y: updatedWall.endPoint.y - perpY * halfThickness },
-              };
-            }
-
-            return updatedWall;
-          }),
+          walls: rebuildWallFacesWithJunctionCleanup(
+            state.walls.map((wall) => (wall.id === id ? { ...wall, ...updates } : wall))
+          ),
         }));
         // Note: History is NOT saved here automatically
         // Callers should save history explicitly when the operation is complete
@@ -523,12 +498,14 @@ export const useDrawingStore = create<DrawingState>()(
 
       deleteWall: (id) => {
         set((state) => ({
-          walls: state.walls
-            .filter((w) => w.id !== id)
-            .map((wall) => ({
-              ...wall,
-              connectedWalls: wall.connectedWalls.filter((cid) => cid !== id),
-            })),
+          walls: rebuildWallFacesWithJunctionCleanup(
+            state.walls
+              .filter((w) => w.id !== id)
+              .map((wall) => ({
+                ...wall,
+                connectedWalls: wall.connectedWalls.filter((cid) => cid !== id),
+              }))
+          ),
         }));
         get().saveToHistory('Delete wall');
       },
@@ -623,29 +600,33 @@ export const useDrawingStore = create<DrawingState>()(
       connectWalls: (wallId, otherWallId) => {
         if (wallId === otherWallId) return;
         set((state) => ({
-          walls: state.walls.map((wall) => {
-            if (wall.id === wallId && !wall.connectedWalls.includes(otherWallId)) {
-              return { ...wall, connectedWalls: [...wall.connectedWalls, otherWallId] };
-            }
-            if (wall.id === otherWallId && !wall.connectedWalls.includes(wallId)) {
-              return { ...wall, connectedWalls: [...wall.connectedWalls, wallId] };
-            }
-            return wall;
-          }),
+          walls: rebuildWallFacesWithJunctionCleanup(
+            state.walls.map((wall) => {
+              if (wall.id === wallId && !wall.connectedWalls.includes(otherWallId)) {
+                return { ...wall, connectedWalls: [...wall.connectedWalls, otherWallId] };
+              }
+              if (wall.id === otherWallId && !wall.connectedWalls.includes(wallId)) {
+                return { ...wall, connectedWalls: [...wall.connectedWalls, wallId] };
+              }
+              return wall;
+            })
+          ),
         }));
       },
 
       disconnectWall: (wallId, otherWallId) => {
         set((state) => ({
-          walls: state.walls.map((wall) => {
-            if (wall.id === wallId || wall.id === otherWallId) {
-              return {
-                ...wall,
-                connectedWalls: wall.connectedWalls.filter((id) => id !== wallId && id !== otherWallId),
-              };
-            }
-            return wall;
-          }),
+          walls: rebuildWallFacesWithJunctionCleanup(
+            state.walls.map((wall) => {
+              if (wall.id === wallId || wall.id === otherWallId) {
+                return {
+                  ...wall,
+                  connectedWalls: wall.connectedWalls.filter((id) => id !== wallId && id !== otherWallId),
+                };
+              }
+              return wall;
+            })
+          ),
         }));
       },
 
@@ -708,12 +689,14 @@ export const useDrawingStore = create<DrawingState>()(
       deleteWalls: (ids) => {
         const idsSet = new Set(ids);
         set((state) => ({
-          walls: state.walls
-            .filter((w) => !idsSet.has(w.id))
-            .map((wall) => ({
-              ...wall,
-              connectedWalls: wall.connectedWalls.filter((cid) => !idsSet.has(cid)),
-            })),
+          walls: rebuildWallFacesWithJunctionCleanup(
+            state.walls
+              .filter((w) => !idsSet.has(w.id))
+              .map((wall) => ({
+                ...wall,
+                connectedWalls: wall.connectedWalls.filter((cid) => !idsSet.has(cid)),
+              }))
+          ),
         }));
         get().saveToHistory('Delete walls');
       },
@@ -780,12 +763,14 @@ export const useDrawingStore = create<DrawingState>()(
           annotations: annotations.filter((a) => !selectedSet.has(a.id)),
           sketches: sketches.filter((s) => !selectedSet.has(s.id)),
           symbols: symbols.filter((s) => !selectedSet.has(s.id)),
-          walls: walls
-            .filter((w) => !selectedSet.has(w.id))
-            .map((wall) => ({
-              ...wall,
-              connectedWalls: wall.connectedWalls.filter((cid) => !selectedSet.has(cid)),
-            })),
+          walls: rebuildWallFacesWithJunctionCleanup(
+            walls
+              .filter((w) => !selectedSet.has(w.id))
+              .map((wall) => ({
+                ...wall,
+                connectedWalls: wall.connectedWalls.filter((cid) => !selectedSet.has(cid)),
+              }))
+          ),
           selectedElementIds: [],
           selectedIds: [],
         });
@@ -1024,7 +1009,7 @@ export const useDrawingStore = create<DrawingState>()(
             sketches: data.sketches || [],
             guides: data.guides || [],
             symbols: data.symbols || [],
-            walls: data.walls || [],
+            walls: rebuildWallFacesWithJunctionCleanup(data.walls || []),
           });
           get().setProcessingStatus('Imported drawing JSON.', false);
         } catch (error) {

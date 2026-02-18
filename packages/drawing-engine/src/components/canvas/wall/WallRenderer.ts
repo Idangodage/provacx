@@ -6,9 +6,11 @@
  */
 
 import * as fabric from 'fabric';
-import type { Point2D, Wall, WallMaterial, JoinData } from '../../../types';
-import { computeWallPolygon, computeMiterJoin, angleBetweenWalls, determineJoinType } from './WallGeometry';
+
+import type { Point2D, Wall, WallMaterial } from '../../../types';
 import { MM_TO_PX } from '../scale';
+
+import { computeWallPolygon } from './WallGeometry';
 
 // =============================================================================
 // Types
@@ -78,11 +80,11 @@ export class WallRenderer {
   /**
    * Render a wall with clean architectural appearance
    */
-  renderWall(wall: Wall, joins?: JoinData[]): fabric.Group {
+  renderWall(wall: Wall): fabric.Group {
     this.removeWall(wall.id);
 
-    // Compute polygon vertices (order: interiorStart, interiorEnd, exteriorEnd, exteriorStart)
-    const vertices = computeWallPolygon(wall, joins);
+    // Faces are pre-trimmed in the geometry pipeline; render directly.
+    const vertices = computeWallPolygon(wall);
     const canvasVertices = vertices.map((v) => this.toCanvasPoint(v));
 
     // Get fill color based on material
@@ -127,8 +129,8 @@ export class WallRenderer {
   // Wall Management
   // ==========================================================================
 
-  updateWall(wall: Wall, joins?: JoinData[]): void {
-    this.renderWall(wall, joins);
+  updateWall(wall: Wall): void {
+    this.renderWall(wall);
   }
 
   removeWall(wallId: string): void {
@@ -146,66 +148,12 @@ export class WallRenderer {
     });
     this.wallObjects.clear();
 
-    // Compute joins
-    const joinsMap = this.computeAllJoins(walls);
-
     // Render each wall
     for (const wall of walls) {
-      const joins = joinsMap.get(wall.id) || [];
-      this.renderWall(wall, joins);
+      this.renderWall(wall);
     }
 
     this.canvas.renderAll();
-  }
-
-  private computeAllJoins(walls: Wall[]): Map<string, JoinData[]> {
-    const joinsMap = new Map<string, JoinData[]>();
-    const wallsById = new Map(walls.map((w) => [w.id, w]));
-
-    for (const wall of walls) {
-      const joins: JoinData[] = [];
-
-      for (const connectedId of wall.connectedWalls) {
-        const connectedWall = wallsById.get(connectedId);
-        if (!connectedWall) continue;
-
-        const sharedEndpoint = this.findSharedEndpoint(wall, connectedWall);
-        if (!sharedEndpoint) continue;
-
-        const angle = angleBetweenWalls(wall, connectedWall, sharedEndpoint);
-        const joinType = determineJoinType(angle);
-        const { interiorVertex, exteriorVertex } = computeMiterJoin(wall, connectedWall, sharedEndpoint);
-
-        joins.push({
-          wallId: wall.id,
-          otherWallId: connectedId,
-          joinPoint: sharedEndpoint,
-          joinType,
-          angle,
-          interiorVertex,
-          exteriorVertex,
-        });
-      }
-
-      joinsMap.set(wall.id, joins);
-    }
-
-    return joinsMap;
-  }
-
-  private findSharedEndpoint(wall1: Wall, wall2: Wall): Point2D | null {
-    const tolerance = 0.1;
-    const endpoints1 = [wall1.startPoint, wall1.endPoint];
-    const endpoints2 = [wall2.startPoint, wall2.endPoint];
-
-    for (const p1 of endpoints1) {
-      for (const p2 of endpoints2) {
-        if (Math.abs(p1.x - p2.x) < tolerance && Math.abs(p1.y - p2.y) < tolerance) {
-          return p1;
-        }
-      }
-    }
-    return null;
   }
 
   // ==========================================================================
