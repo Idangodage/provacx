@@ -161,21 +161,37 @@ export class WallEditor {
     const offsetVec = scaleVec(perp, centerOffset);
 
     // New center-line positions
+    const originalStartPoint = wall.startPoint;
+    const originalEndPoint = wall.endPoint;
     const newStartPoint = add(wall.startPoint, offsetVec);
     const newEndPoint = add(wall.endPoint, offsetVec);
 
-    // Update wall
+    // Update edited wall
     this.updateWallFn(wallId, {
       startPoint: newStartPoint,
       endPoint: newEndPoint,
       thickness: newThickness,
     });
 
+    const updatedWalls: Wall[] = [];
     const updatedWall = this.getWallFn(wallId);
+    if (updatedWall) {
+      updatedWalls.push(updatedWall);
+    }
+
+    // Keep junction continuity: shift endpoints of walls that share either
+    // original junction point with this wall by the same centerline offset.
+    // This prevents visual separation when thickness drag offsets centerline.
+    this.shiftWallsAtJunctionPoints(
+      wallId,
+      [originalStartPoint, originalEndPoint],
+      offsetVec,
+      updatedWalls
+    );
 
     return {
       success: true,
-      updatedWalls: updatedWall ? [updatedWall] : [],
+      updatedWalls,
       warnings: violations.length > 0 ? ['Thickness clamped to constraints'] : [],
       constraintViolations: violations,
     };
@@ -476,11 +492,11 @@ export class WallEditor {
     let centerOffset: number;
 
     if (edge === 'interior') {
-      newThickness = wall.thickness - dragDelta;
-      centerOffset = -dragDelta / 2;
-    } else {
       newThickness = wall.thickness + dragDelta;
       centerOffset = dragDelta / 2;
+    } else {
+      newThickness = wall.thickness - dragDelta;
+      centerOffset = -dragDelta / 2;
     }
 
     // Clamp thickness
@@ -488,6 +504,12 @@ export class WallEditor {
       this.options.constraints.minThickness,
       Math.min(this.options.constraints.maxThickness, newThickness)
     );
+
+    // Recalculate offset after clamp so preview matches committed drag behavior.
+    const actualThicknessChange = newThickness - wall.thickness;
+    centerOffset = edge === 'interior'
+      ? actualThicknessChange / 2
+      : -actualThicknessChange / 2;
 
     // Calculate center line offset
     const dir = direction(wall.startPoint, wall.endPoint);
@@ -578,5 +600,40 @@ export class WallEditor {
     const dx = b.x - a.x;
     const dy = b.y - a.y;
     return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  private shiftWallsAtJunctionPoints(
+    editedWallId: string,
+    junctionPoints: Point2D[],
+    delta: Point2D,
+    updatedWalls: Wall[]
+  ): void {
+    const movement = Math.sqrt(delta.x * delta.x + delta.y * delta.y);
+    if (movement < 0.0001) return;
+
+    const tolerance = 1; // mm
+    for (const candidate of this.getAllWallsFn()) {
+      if (candidate.id === editedWallId) continue;
+
+      const updates: Partial<Wall> = {};
+      const startMatches = junctionPoints.some((p) => this.distance(candidate.startPoint, p) < tolerance);
+      const endMatches = junctionPoints.some((p) => this.distance(candidate.endPoint, p) < tolerance);
+
+      if (startMatches) {
+        updates.startPoint = add(candidate.startPoint, delta);
+      }
+
+      if (endMatches) {
+        updates.endPoint = add(candidate.endPoint, delta);
+      }
+
+      if (!updates.startPoint && !updates.endPoint) continue;
+
+      this.updateWallFn(candidate.id, updates);
+      const updated = this.getWallFn(candidate.id);
+      if (updated) {
+        updatedWalls.push(updated);
+      }
+    }
   }
 }
