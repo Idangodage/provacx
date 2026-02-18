@@ -195,7 +195,7 @@ export class EditingManager {
   }
 
   /**
-   * Refresh handles (after wall geometry changes) - clears and recreates
+   * Refresh handles (after wall geometry changes)
    */
   refreshHandles(): void {
     const wallIds = Array.from(this.selectedWallIds);
@@ -209,26 +209,6 @@ export class EditingManager {
     for (const roomId of roomIds) {
       this.showHandlesForRoom(roomId);
     }
-  }
-
-  /**
-   * Update handle positions without clearing (for use during drag)
-   */
-  updateHandlePositions(): void {
-    for (const wallId of this.selectedWallIds) {
-      const wall = this.callbacks.getWall(wallId);
-      if (wall) {
-        this.handleRenderer.updateWallHandlePositions(wall);
-      }
-    }
-  }
-
-  /**
-   * Bring all handles to front of canvas (above walls)
-   * Called after walls are re-rendered to ensure handles stay visible
-   */
-  bringHandlesToFront(): void {
-    this.handleRenderer.bringHandlesToFront();
   }
 
   // ==========================================================================
@@ -247,29 +227,6 @@ export class EditingManager {
    */
   hitTestRealWorld(realWorldPoint: Point2D): HandleHitResult | null {
     return this.hitTester.hitTestRealWorld(realWorldPoint);
-  }
-
-  /**
-   * Get hit result directly from handle properties (bypasses position-based hit testing)
-   * Use this when Fabric.js has already identified which handle was clicked
-   */
-  getHitResultFromHandle(
-    handleId: string,
-    handleType: WallHandleType | RoomHandleType,
-    elementId: string,
-    elementType: 'wall' | 'room'
-  ): HandleHitResult | null {
-    // Find the actual handle object
-    const handle = this.hitTester.findHandleById(handleId);
-    if (!handle) return null;
-
-    return {
-      type: elementType,
-      handleType,
-      elementId,
-      handle,
-      priority: 0, // Not used when getting directly
-    };
   }
 
   // ==========================================================================
@@ -343,8 +300,8 @@ export class EditingManager {
         break;
     }
 
-    // Update handle positions (don't clear/recreate during drag)
-    this.updateHandlePositions();
+    // Refresh handles to match new positions
+    this.refreshHandles();
   }
 
   /**
@@ -437,7 +394,7 @@ export class EditingManager {
       wallId: this.dragState.elementId,
       dragDelta: delta,
       moveConnected: true,
-      snapToGrid: false,  // Disable snapping during drag for smooth movement
+      snapToGrid: this.callbacks.getSnapToGrid(),
     });
   }
 
