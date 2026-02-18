@@ -160,8 +160,6 @@ export function DrawingCanvas({
     const safeScaleDrawing = Number.isFinite(scaleDrawing) && scaleDrawing > 0 ? scaleDrawing : 1;
     const safeScaleReal = Number.isFinite(scaleReal) && scaleReal > 0 ? scaleReal : 1;
     const paperPerRealRatio = safeScaleDrawing / safeScaleReal;
-    // scaleRatio converts paper mm to real-world mm (e.g., 50 for 1:50 scale)
-    const scaleRatio = safeScaleReal / safeScaleDrawing;
     const safeGridSubdivisions = Number.isFinite(gridSubdivisions) && gridSubdivisions >= 1
         ? Math.max(1, Math.floor(gridSubdivisions))
         : 1;
@@ -223,7 +221,6 @@ export function DrawingCanvas({
         wallSettings,
         zoom,
         pageHeight: pageConfig.height,
-        scaleRatio,
         startWallDrawing,
         updateWallPreview,
         commitWall,
@@ -365,26 +362,21 @@ export function DrawingCanvas({
                 return;
             }
 
-            // Handle wall tool - convert from pixels to real-world mm with Y-flip and scale
+            // Handle wall tool - convert from pixels to mm with Y-flip
             if (tool === 'wall') {
-                // Convert pixels -> paper mm -> real-world mm
-                const paperX = rawPoint.x / MM_TO_PX;
-                const paperY = pageConfig.height - rawPoint.y / MM_TO_PX;
                 const wallPoint = {
-                    x: paperX * scaleRatio,
-                    y: paperY * scaleRatio,
+                    x: rawPoint.x / MM_TO_PX,
+                    y: pageConfig.height - rawPoint.y / MM_TO_PX,
                 };
                 wallTool.handleMouseDown(wallPoint);
                 return;
             }
 
-            // Handle room tool - convert from pixels to real-world mm with Y-flip and scale
+            // Handle room tool - convert from pixels to mm with Y-flip
             if (tool === 'room') {
-                const paperX = rawPoint.x / MM_TO_PX;
-                const paperY = pageConfig.height - rawPoint.y / MM_TO_PX;
                 const roomPoint = {
-                    x: paperX * scaleRatio,
-                    y: paperY * scaleRatio,
+                    x: rawPoint.x / MM_TO_PX,
+                    y: pageConfig.height - rawPoint.y / MM_TO_PX,
                 };
                 roomTool.handleMouseDown(roomPoint);
                 return;
@@ -396,7 +388,7 @@ export function DrawingCanvas({
                 setCanvasState(nextState);
             }
         },
-        [tool, resolvedSnapToGrid, effectiveSnapGridSize, isSpacePressed, queueMousePositionUpdate, wallTool, roomTool, pageConfig.height, scaleRatio]
+        [tool, resolvedSnapToGrid, effectiveSnapGridSize, isSpacePressed, queueMousePositionUpdate, wallTool, roomTool, pageConfig.height]
     );
 
     const handleMouseMove = useCallback(
@@ -427,13 +419,11 @@ export function DrawingCanvas({
                 return;
             }
 
-            // Handle wall tool movement - convert from pixels to real-world mm with Y-flip and scale
+            // Handle wall tool movement - convert from pixels to mm with Y-flip
             if (tool === 'wall' && wallTool.isDrawing) {
-                const paperX = rawPoint.x / MM_TO_PX;
-                const paperY = pageConfig.height - rawPoint.y / MM_TO_PX;
                 const wallPoint = {
-                    x: paperX * scaleRatio,
-                    y: paperY * scaleRatio,
+                    x: rawPoint.x / MM_TO_PX,
+                    y: pageConfig.height - rawPoint.y / MM_TO_PX,
                 };
                 wallTool.handleMouseMove(wallPoint);
                 return;
@@ -446,7 +436,7 @@ export function DrawingCanvas({
             setCanvasState(nextState);
             renderDrawingPreview(canvas, nextPoints, tool);
         },
-        [tool, resolvedSnapToGrid, effectiveSnapGridSize, setPanOffset, queueMousePositionUpdate, middlePan.middlePanRef, wallTool, pageConfig.height, scaleRatio]
+        [tool, resolvedSnapToGrid, effectiveSnapGridSize, setPanOffset, queueMousePositionUpdate, middlePan.middlePanRef, wallTool, pageConfig.height]
     );
 
     const handleMouseUp = useCallback(() => {

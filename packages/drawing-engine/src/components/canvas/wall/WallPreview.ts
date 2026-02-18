@@ -19,33 +19,20 @@ export class WallPreview {
   private canvas: fabric.Canvas;
   private previewGroup: fabric.Group | null = null;
   private pageHeight: number;
-  private scaleRatio: number;  // scaleReal / scaleDrawing - converts real-world mm to paper mm
   private startPoint: Point2D | null = null;
   private thickness: number = 150;
   private material: WallMaterial = 'brick';
 
-  constructor(canvas: fabric.Canvas, pageHeight: number = 3000, scaleRatio: number = 1) {
+  constructor(canvas: fabric.Canvas, pageHeight: number = 3000) {
     this.canvas = canvas;
     this.pageHeight = pageHeight;
-    this.scaleRatio = scaleRatio;
-  }
-
-  /**
-   * Convert real-world mm coordinate to canvas pixels
-   * Applies scale ratio: real-world mm -> paper mm -> pixels
-   */
-  private toCanvasX(x: number): number {
-    const paperMm = x / this.scaleRatio;
-    return paperMm * MM_TO_PX;
   }
 
   /**
    * Convert Y coordinate for architectural convention
-   * Applies scale ratio: real-world mm -> paper mm -> pixels
    */
   private toCanvasY(y: number): number {
-    const paperMm = y / this.scaleRatio;
-    return (this.pageHeight - paperMm) * MM_TO_PX;
+    return (this.pageHeight - y) * MM_TO_PX;
   }
 
   /**
@@ -53,14 +40,6 @@ export class WallPreview {
    */
   setPageHeight(height: number): void {
     this.pageHeight = height;
-  }
-
-  /**
-   * Set scale ratio for coordinate conversion
-   * scaleRatio = scaleReal / scaleDrawing (e.g., 50 for 1:50 scale)
-   */
-  setScaleRatio(ratio: number): void {
-    this.scaleRatio = ratio;
   }
 
   /**
@@ -110,9 +89,9 @@ export class WallPreview {
     objects.push(
       new fabric.Line(
         [
-          this.toCanvasX(interiorLine.start.x),
+          interiorLine.start.x * MM_TO_PX,
           this.toCanvasY(interiorLine.start.y),
-          this.toCanvasX(interiorLine.end.x),
+          interiorLine.end.x * MM_TO_PX,
           this.toCanvasY(interiorLine.end.y),
         ],
         {
@@ -128,9 +107,9 @@ export class WallPreview {
     objects.push(
       new fabric.Line(
         [
-          this.toCanvasX(this.startPoint.x),
+          this.startPoint.x * MM_TO_PX,
           this.toCanvasY(this.startPoint.y),
-          this.toCanvasX(endPoint.x),
+          endPoint.x * MM_TO_PX,
           this.toCanvasY(endPoint.y),
         ],
         {
@@ -147,9 +126,9 @@ export class WallPreview {
     objects.push(
       new fabric.Line(
         [
-          this.toCanvasX(exteriorLine.start.x),
+          exteriorLine.start.x * MM_TO_PX,
           this.toCanvasY(exteriorLine.start.y),
-          this.toCanvasX(exteriorLine.end.x),
+          exteriorLine.end.x * MM_TO_PX,
           this.toCanvasY(exteriorLine.end.y),
         ],
         {
@@ -165,9 +144,9 @@ export class WallPreview {
     objects.push(
       new fabric.Line(
         [
-          this.toCanvasX(interiorLine.start.x),
+          interiorLine.start.x * MM_TO_PX,
           this.toCanvasY(interiorLine.start.y),
-          this.toCanvasX(exteriorLine.start.x),
+          exteriorLine.start.x * MM_TO_PX,
           this.toCanvasY(exteriorLine.start.y),
         ],
         {
@@ -182,9 +161,9 @@ export class WallPreview {
     objects.push(
       new fabric.Line(
         [
-          this.toCanvasX(interiorLine.end.x),
+          interiorLine.end.x * MM_TO_PX,
           this.toCanvasY(interiorLine.end.y),
-          this.toCanvasX(exteriorLine.end.x),
+          exteriorLine.end.x * MM_TO_PX,
           this.toCanvasY(exteriorLine.end.y),
         ],
         {
@@ -199,10 +178,10 @@ export class WallPreview {
     // Semi-transparent fill polygon
     const polygon = new fabric.Polygon(
       [
-        { x: this.toCanvasX(interiorLine.start.x), y: this.toCanvasY(interiorLine.start.y) },
-        { x: this.toCanvasX(interiorLine.end.x), y: this.toCanvasY(interiorLine.end.y) },
-        { x: this.toCanvasX(exteriorLine.end.x), y: this.toCanvasY(exteriorLine.end.y) },
-        { x: this.toCanvasX(exteriorLine.start.x), y: this.toCanvasY(exteriorLine.start.y) },
+        { x: interiorLine.start.x * MM_TO_PX, y: this.toCanvasY(interiorLine.start.y) },
+        { x: interiorLine.end.x * MM_TO_PX, y: this.toCanvasY(interiorLine.end.y) },
+        { x: exteriorLine.end.x * MM_TO_PX, y: this.toCanvasY(exteriorLine.end.y) },
+        { x: exteriorLine.start.x * MM_TO_PX, y: this.toCanvasY(exteriorLine.start.y) },
       ],
       {
         fill: materialColors.fill,

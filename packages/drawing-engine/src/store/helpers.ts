@@ -13,7 +13,6 @@ import type {
     SymbolInstance2D,
     HistoryEntry,
     Wall,
-    Room,
 } from '../types';
 import { generateId } from '../utils/geometry';
 
@@ -37,7 +36,6 @@ export function createEmptyHistorySnapshot(): HistoryEntry['snapshot'] {
         sketches: [],
         symbols: [],
         walls: [],
-        rooms: [],
     };
 }
 
@@ -57,7 +55,6 @@ export function createHistorySnapshot(state: {
     sketches: Sketch2D[];
     symbols: SymbolInstance2D[];
     walls: Wall[];
-    rooms: Room[];
 }): HistoryEntry['snapshot'] {
     return {
         detectedElements: deepClone(state.detectedElements),
@@ -66,6 +63,5 @@ export function createHistorySnapshot(state: {
         sketches: deepClone(state.sketches),
         symbols: deepClone(state.symbols),
         walls: deepClone(state.walls),
-        rooms: deepClone(state.rooms),
     };
 }

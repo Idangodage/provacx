@@ -9,9 +9,6 @@ import type { ReactNode } from 'react';
 // Re-export wall types
 export * from './wall';
 
-// Re-export room types
-export * from './room';
-
 // =============================================================================
 // Geometry Types
 // =============================================================================
@@ -260,7 +257,6 @@ export interface PageLayout {
 // =============================================================================
 
 import type { Wall } from './wall';
-import type { Room } from './room';
 
 export interface HistorySnapshot {
   detectedElements: DetectedElement[];
@@ -269,7 +265,6 @@ export interface HistorySnapshot {
   sketches: Sketch2D[];
   symbols: SymbolInstance2D[];
   walls: Wall[];
-  rooms: Room[];
 }
 
 export interface HistoryEntry {

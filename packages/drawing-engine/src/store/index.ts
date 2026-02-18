@@ -29,7 +29,6 @@ import type {
   WallMaterial,
   CreateWallParams,
   RoomConfig,
-  Room,
 } from '../types';
 import {
   DEFAULT_WALL_SETTINGS,
@@ -66,9 +65,6 @@ export interface DrawingState {
   walls: Wall[];
   wallDrawingState: WallDrawingState;
   wallSettings: WallSettings;
-
-  // Room State
-  rooms: Room[];
 
   // Import State
   importedDrawing: ImportedDrawing | null;
@@ -276,10 +272,6 @@ export const useDrawingStore = create<DrawingState>()(
       walls: [],
       wallDrawingState: { ...DEFAULT_WALL_DRAWING_STATE },
       wallSettings: { ...DEFAULT_WALL_SETTINGS },
-
-      // Room State
-      rooms: [],
-
       importedDrawing: null,
       importProgress: 0,
       isProcessing: false,
@@ -946,7 +938,6 @@ export const useDrawingStore = create<DrawingState>()(
           sketches: prevEntry.snapshot.sketches,
           symbols: prevEntry.snapshot.symbols,
           walls: prevEntry.snapshot.walls ?? [],
-          rooms: prevEntry.snapshot.rooms ?? [],
           historyIndex: nextHistoryIndex,
           canUndo: nextHistoryIndex > 0,
           canRedo: nextHistoryIndex < state.history.length - 1,
@@ -965,7 +956,6 @@ export const useDrawingStore = create<DrawingState>()(
           sketches: nextEntry.snapshot.sketches,
           symbols: nextEntry.snapshot.symbols,
           walls: nextEntry.snapshot.walls ?? [],
-          rooms: nextEntry.snapshot.rooms ?? [],
           historyIndex: nextHistoryIndex,
           canUndo: nextHistoryIndex > 0,
           canRedo: nextHistoryIndex < state.history.length - 1,

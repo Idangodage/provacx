@@ -25,7 +25,6 @@ export interface UseWallToolOptions {
   wallSettings: WallSettings;
   zoom: number;
   pageHeight: number;
-  scaleRatio: number;  // scaleReal / scaleDrawing (e.g., 50 for 1:50 scale) - converts paper to real-world
   startWallDrawing: (startPoint: Point2D) => void;
   updateWallPreview: (currentPoint: Point2D) => void;
   commitWall: () => string | null;
@@ -58,7 +57,6 @@ export function useWallTool({
   wallSettings,
   zoom,
   pageHeight,
-  scaleRatio,
   startWallDrawing,
   updateWallPreview,
   commitWall,
@@ -79,27 +77,25 @@ export function useWallTool({
 
     // Create instances if not already created
     if (!wallRendererRef.current) {
-      wallRendererRef.current = new WallRenderer(canvas, pageHeight, scaleRatio);
+      wallRendererRef.current = new WallRenderer(canvas, pageHeight);
     }
     if (!wallPreviewRef.current) {
-      wallPreviewRef.current = new WallPreview(canvas, pageHeight, scaleRatio);
+      wallPreviewRef.current = new WallPreview(canvas, pageHeight);
     }
     if (!wallManagerRef.current) {
       wallManagerRef.current = new WallManager();
     }
 
-    // Update page height and scale
+    // Update page height
     wallRendererRef.current.setPageHeight(pageHeight);
-    wallRendererRef.current.setScaleRatio(scaleRatio);
     wallPreviewRef.current.setPageHeight(pageHeight);
-    wallPreviewRef.current.setScaleRatio(scaleRatio);
 
     // Cleanup
     return () => {
       wallPreviewRef.current?.dispose();
       wallRendererRef.current?.dispose();
     };
-  }, [canvas, pageHeight, scaleRatio]);
+  }, [canvas, pageHeight]);
 
   // Update wall manager when walls change
   useEffect(() => {
