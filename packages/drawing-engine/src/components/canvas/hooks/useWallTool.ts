@@ -7,11 +7,10 @@
 
 import type { Canvas as FabricCanvas } from 'fabric';
 import { useRef, useCallback, useEffect } from 'react';
-
 import type { Point2D, Wall, WallSettings, WallDrawingState } from '../../../types';
-import { WallManager } from '../wall/WallManager';
 import { WallPreview } from '../wall/WallPreview';
 import { WallRenderer } from '../wall/WallRenderer';
+import { WallManager } from '../wall/WallManager';
 import { snapWallPoint } from '../wall/WallSnapping';
 
 // =============================================================================
@@ -186,12 +185,12 @@ export function useWallTool({
         const newWallId = commitWall();
 
         if (newWallId) {
-          // Connect to start-point snapped wall if any
+          // Connect to start point wall if snapped
           if (lastSnappedWallRef.current) {
             connectWalls(newWallId, lastSnappedWallRef.current.wallId);
           }
 
-          // Connect to end-point snapped wall if any
+          // Connect to end point wall if snapped
           if (endSnapResult.snapType === 'endpoint' && endSnapResult.connectedWallId) {
             connectWalls(newWallId, endSnapResult.connectedWallId);
           }
