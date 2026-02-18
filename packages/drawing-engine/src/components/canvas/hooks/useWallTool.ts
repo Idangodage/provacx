@@ -193,34 +193,24 @@ export function useWallTool({
           // Connect to end point wall if snapped
           if (endSnapResult.snapType === 'endpoint' && endSnapResult.connectedWallId) {
             connectWalls(newWallId, endSnapResult.connectedWallId);
+            lastSnappedWallRef.current = {
+              wallId: endSnapResult.connectedWallId,
+              endpoint: endSnapResult.endpoint!,
+            };
+          } else {
+            lastSnappedWallRef.current = null;
           }
 
           onWallCreated?.(newWallId);
 
           // If chain mode, update preview for next wall
           if (wallDrawingState.chainMode) {
-            // In chain mode, the next wall will start from this wall's end point
-            // Remember this wall so the next wall will be connected to it
-            lastSnappedWallRef.current = {
-              wallId: newWallId,
-              endpoint: 'end',
-            };
-
             wallPreviewRef.current?.startPreview(
               snapResult.snappedPoint,
               wallSettings.defaultThickness,
               wallSettings.defaultMaterial
             );
           } else {
-            // Not in chain mode - clear the snap reference
-            if (endSnapResult.snapType === 'endpoint' && endSnapResult.connectedWallId) {
-              lastSnappedWallRef.current = {
-                wallId: endSnapResult.connectedWallId,
-                endpoint: endSnapResult.endpoint!,
-              };
-            } else {
-              lastSnappedWallRef.current = null;
-            }
             wallPreviewRef.current?.clearPreview();
           }
         }
