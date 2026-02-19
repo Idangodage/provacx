@@ -131,6 +131,12 @@ export class WallRenderer {
     return screenPx / zoom;
   }
 
+  private toSceneTolerance(screenPx: number, minMm = 1, maxMm = 120): number {
+    const zoom = Math.max(this.canvas.getZoom(), 0.01);
+    const sceneMm = screenPx / (MM_TO_PX * zoom);
+    return Math.min(maxMm, Math.max(minMm, sceneMm));
+  }
+
   private annotateWallTarget(object: fabric.Object, wallId: string): void {
     const typed = object as NamedObject;
     typed.wallId = wallId;
@@ -220,6 +226,13 @@ export class WallRenderer {
     const interiorEnd = canvasVertices[1];
     const exteriorEnd = canvasVertices[2];
     const exteriorStart = canvasVertices[3];
+    const joinEndpointTolerance = this.toSceneTolerance(10, 2, 180);
+    const hasStartJoin = (joins ?? []).some(
+      (join) => this.pointDistance(join.joinPoint, wall.startPoint) <= joinEndpointTolerance
+    );
+    const hasEndJoin = (joins ?? []).some(
+      (join) => this.pointDistance(join.joinPoint, wall.endPoint) <= joinEndpointTolerance
+    );
 
     const interiorBoundary = new fabric.Line(
       [interiorStart.x, interiorStart.y, interiorEnd.x, interiorEnd.y],
@@ -252,6 +265,7 @@ export class WallRenderer {
         strokeWidth: 2,
         selectable: false,
         evented: false,
+        visible: !hasStartJoin,
       }
     );
     (startCap as NamedObject).name = 'startCap';
@@ -264,6 +278,7 @@ export class WallRenderer {
         strokeWidth: 2,
         selectable: false,
         evented: false,
+        visible: !hasEndJoin,
       }
     );
     (endCap as NamedObject).name = 'endCap';
@@ -799,7 +814,7 @@ export class WallRenderer {
    * Find endpoint-level joins between walls (shared endpoint or endpoint-on-segment).
    */
   private findJoinMatches(wall: Wall, otherWall: Wall): WallJoinMatch[] {
-    const JOIN_TOLERANCE_MM = 2;
+    const JOIN_TOLERANCE_MM = this.toSceneTolerance(10, 2, 180);
     const ENDPOINT_T_RATIO = 0.02;
     const matches: WallJoinMatch[] = [];
     const seen = new Set<string>();
@@ -831,11 +846,19 @@ export class WallRenderer {
         continue;
       }
 
+      const segmentLength = Math.max(
+        1,
+        this.pointDistance(otherWall.startPoint, otherWall.endPoint)
+      );
+      const endpointBand = Math.min(
+        0.2,
+        ENDPOINT_T_RATIO + JOIN_TOLERANCE_MM / segmentLength
+      );
       const nearOtherStart =
-        projection.t <= ENDPOINT_T_RATIO &&
+        projection.t <= endpointBand &&
         this.pointDistance(point, otherWall.startPoint) <= JOIN_TOLERANCE_MM * 2;
       const nearOtherEnd =
-        projection.t >= 1 - ENDPOINT_T_RATIO &&
+        projection.t >= 1 - endpointBand &&
         this.pointDistance(point, otherWall.endPoint) <= JOIN_TOLERANCE_MM * 2;
       const matchType: 'endpoint' | 'segment' =
         nearOtherStart || nearOtherEnd ? 'endpoint' : 'segment';

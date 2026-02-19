@@ -713,11 +713,20 @@ export function useSelectMode({
     const endpointSeen = new Set<string>();
     const segmentSeen = new Set<string>();
     const allWalls = optionsRef.current.walls;
+    const safeZoom = Math.max(optionsRef.current.zoom, 0.01);
+    const endpointTolerance = Math.max(
+      ENDPOINT_BOND_TOLERANCE_MM,
+      optionsRef.current.wallSettings.endpointSnapTolerance / (MM_TO_PX * safeZoom)
+    );
+    const segmentTolerance = Math.max(
+      SEGMENT_BOND_TOLERANCE_MM,
+      optionsRef.current.wallSettings.midpointSnapTolerance / (MM_TO_PX * safeZoom)
+    );
 
     for (const connectedWall of allWalls) {
       if (connectedWall.id === wall.id || skipWallIds.has(connectedWall.id)) continue;
 
-      if (pointsNear(connectedWall.startPoint, movingPoint)) {
+      if (pointsNear(connectedWall.startPoint, movingPoint, endpointTolerance)) {
         const key = `${connectedWall.id}:start`;
         if (!endpointSeen.has(key)) {
           endpointSeen.add(key);
@@ -726,7 +735,7 @@ export function useSelectMode({
         continue;
       }
 
-      if (pointsNear(connectedWall.endPoint, movingPoint)) {
+      if (pointsNear(connectedWall.endPoint, movingPoint, endpointTolerance)) {
         const key = `${connectedWall.id}:end`;
         if (!endpointSeen.has(key)) {
           endpointSeen.add(key);
@@ -740,13 +749,21 @@ export function useSelectMode({
         connectedWall.startPoint,
         connectedWall.endPoint
       );
-      if (projection.distance <= SEGMENT_BOND_TOLERANCE_MM) {
+      if (projection.distance <= segmentTolerance) {
+        const segmentLength = Math.max(
+          1,
+          magnitude(subtract(connectedWall.endPoint, connectedWall.startPoint))
+        );
+        const endpointBand = Math.min(
+          0.2,
+          SEGMENT_ENDPOINT_T_THRESHOLD + endpointTolerance / segmentLength
+        );
         const nearStart =
-          projection.t <= SEGMENT_ENDPOINT_T_THRESHOLD &&
-          pointsNear(movingPoint, connectedWall.startPoint, SEGMENT_BOND_TOLERANCE_MM * 2);
+          projection.t <= endpointBand ||
+          pointsNear(movingPoint, connectedWall.startPoint, endpointTolerance);
         const nearEnd =
-          projection.t >= 1 - SEGMENT_ENDPOINT_T_THRESHOLD &&
-          pointsNear(movingPoint, connectedWall.endPoint, SEGMENT_BOND_TOLERANCE_MM * 2);
+          projection.t >= 1 - endpointBand ||
+          pointsNear(movingPoint, connectedWall.endPoint, endpointTolerance);
 
         if (nearStart || nearEnd) {
           const endpointKey = `${connectedWall.id}:${nearStart ? 'start' : 'end'}`;
