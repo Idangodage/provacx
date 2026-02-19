@@ -6,6 +6,7 @@
  */
 
 import React from 'react';
+
 import type { RoomConfig, WallMaterial } from '../../../types';
 
 // =============================================================================

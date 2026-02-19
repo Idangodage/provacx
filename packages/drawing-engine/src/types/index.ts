@@ -8,6 +8,8 @@ import type { ReactNode } from 'react';
 
 // Re-export wall types
 export * from './wall';
+export * from './grips';
+export * from './room';
 
 // =============================================================================
 // Geometry Types
@@ -93,6 +95,7 @@ export type DrawingTool =
   | 'select'
   | 'pan'
   | 'wall'
+  | 'section-line'
   | 'room'
   | 'dimension'
   | 'text'
@@ -110,15 +113,77 @@ export type DrawingTool =
   | 'revision-cloud'
   | 'pencil';
 
+export type DimensionType = 'linear' | 'aligned' | 'angular' | 'radius' | 'diameter' | 'area';
+export type DimensionLinearMode = 'horizontal' | 'vertical' | 'aligned';
+export type DimensionStyle = 'architectural' | 'engineering' | 'minimal';
+export type DimensionUnitSystem = 'metric' | 'imperial';
+export type DimensionDisplayFormat = 'auto' | 'mm' | 'm' | 'in' | 'ft-in';
+export type DimensionTerminator = 'arrow' | 'tick';
+export type DimensionPlacementType = 'linear' | 'angular' | 'area';
+
+export interface DimensionAnchor {
+  kind: 'point' | 'wall-endpoint' | 'wall-midpoint';
+  point?: Point2D;
+  wallId?: string;
+  endpoint?: 'start' | 'end';
+}
+
+export interface DimensionSettings {
+  style: DimensionStyle;
+  unitSystem: DimensionUnitSystem;
+  displayFormat: DimensionDisplayFormat;
+  precision: 0 | 1 | 2;
+  defaultOffset: number;            // mm
+  extensionGap: number;             // mm
+  extensionBeyond: number;          // mm
+  textHeightPaperMm: number;        // intended paper text size
+  terminator: DimensionTerminator;
+  placementType: DimensionPlacementType;
+  showAreaPerimeter: boolean;
+  autoAvoidOverlap: boolean;
+  showLayer: boolean;
+}
+
+export const DEFAULT_DIMENSION_SETTINGS: DimensionSettings = {
+  style: 'architectural',
+  unitSystem: 'metric',
+  displayFormat: 'auto',
+  precision: 1,
+  defaultOffset: 500,
+  extensionGap: 2,
+  extensionBeyond: 20,
+  textHeightPaperMm: 2.5,
+  terminator: 'tick',
+  placementType: 'linear',
+  showAreaPerimeter: false,
+  autoAvoidOverlap: true,
+  showLayer: true,
+};
+
 export interface Dimension2D {
   id: string;
-  type: 'linear' | 'aligned' | 'angular' | 'radius' | 'diameter' | 'area';
+  type: DimensionType;
   points: Point2D[];
   value: number;
-  unit: 'mm' | 'cm' | 'm' | 'in' | 'ft';
+  unit: 'mm' | 'cm' | 'm' | 'in' | 'ft' | 'ft-in';
   text?: string;
   textPosition: Point2D;
   visible: boolean;
+  linearMode?: DimensionLinearMode;
+  style?: DimensionStyle;
+  precision?: 0 | 1 | 2;
+  displayFormat?: DimensionDisplayFormat;
+  offset?: number;
+  showPerimeter?: boolean;
+  linkedRoomId?: string;
+  linkedWallIds?: string[];
+  anchors?: DimensionAnchor[];
+  isAssociative?: boolean;
+  isDesignValue?: boolean;
+  textPositionLocked?: boolean;
+  chainGroupId?: string;
+  baselineGroupId?: string;
+  baselineOrigin?: Point2D;
 }
 
 export interface Annotation2D {
@@ -256,7 +321,7 @@ export interface PageLayout {
 // History Types
 // =============================================================================
 
-import type { Wall } from './wall';
+import type { ElevationView, Room, SectionLine, Wall } from './wall';
 
 export interface HistorySnapshot {
   detectedElements: DetectedElement[];
@@ -265,6 +330,10 @@ export interface HistorySnapshot {
   sketches: Sketch2D[];
   symbols: SymbolInstance2D[];
   walls: Wall[];
+  rooms: Room[];
+  sectionLines: SectionLine[];
+  elevationViews: ElevationView[];
+  activeElevationViewId: string | null;
 }
 
 export interface HistoryEntry {

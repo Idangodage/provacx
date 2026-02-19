@@ -5,7 +5,8 @@
  * Manages wall CRUD, connections, and spatial queries.
  */
 
-import type { Point2D, Wall, CreateWallParams } from '../../../types';
+import type { Point2D, Wall } from '../../../types';
+
 import { wallBounds } from './WallGeometry';
 
 // =============================================================================

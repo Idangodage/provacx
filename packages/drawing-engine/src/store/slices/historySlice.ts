@@ -13,6 +13,9 @@ import type {
     Sketch2D,
     SymbolInstance2D,
     HistoryEntry,
+    ElevationView,
+    Room,
+    SectionLine,
     Wall,
 } from '../../types';
 import { createHistoryEntry, createHistorySnapshot } from '../helpers';
@@ -48,6 +51,10 @@ interface SliceDependencies {
     sketches: Sketch2D[];
     symbols: SymbolInstance2D[];
     walls: Wall[];
+    rooms: Room[];
+    sectionLines: SectionLine[];
+    elevationViews: ElevationView[];
+    activeElevationViewId: string | null;
 }
 
 // =============================================================================
@@ -76,6 +83,10 @@ export const createHistorySlice: StateCreator<
             sketches: state.sketches,
             symbols: state.symbols,
             walls: state.walls,
+            rooms: state.rooms,
+            sectionLines: state.sectionLines,
+            elevationViews: state.elevationViews,
+            activeElevationViewId: state.activeElevationViewId,
         });
         const entry = createHistoryEntry(action, snapshot);
         const trimmedHistory = state.history.slice(0, state.historyIndex + 1);
@@ -103,6 +114,10 @@ export const createHistorySlice: StateCreator<
             sketches: snapshot.sketches,
             symbols: snapshot.symbols,
             walls: snapshot.walls ?? [],
+            rooms: snapshot.rooms ?? [],
+            sectionLines: snapshot.sectionLines ?? [],
+            elevationViews: snapshot.elevationViews ?? [],
+            activeElevationViewId: snapshot.activeElevationViewId ?? null,
             historyIndex: targetIndex,
             canUndo: targetIndex > 0,
             canRedo: true,
@@ -122,6 +137,10 @@ export const createHistorySlice: StateCreator<
             sketches: snapshot.sketches,
             symbols: snapshot.symbols,
             walls: snapshot.walls ?? [],
+            rooms: snapshot.rooms ?? [],
+            sectionLines: snapshot.sectionLines ?? [],
+            elevationViews: snapshot.elevationViews ?? [],
+            activeElevationViewId: snapshot.activeElevationViewId ?? null,
             historyIndex: targetIndex,
             canUndo: true,
             canRedo: targetIndex < history.length - 1,

@@ -18,9 +18,15 @@ import type {
   Point2D,
 } from '../../types';
 import {
+  DEFAULT_WALL_3D,
   DEFAULT_WALL_SETTINGS,
   DEFAULT_WALL_DRAWING_STATE,
   DEFAULT_WALL_THICKNESS,
+  MAX_WALL_HEIGHT,
+  MAX_WALL_THICKNESS,
+  MIN_WALL_HEIGHT,
+  MIN_WALL_LENGTH,
+  MIN_WALL_THICKNESS,
 } from '../../types/wall';
 import { generateId } from '../../utils/geometry';
 import { deepClone } from '../helpers';
@@ -72,6 +78,14 @@ export type WallSlice = WallSliceState & WallSliceActions;
 // Helpers
 // =============================================================================
 
+function clampThickness(thickness: number): number {
+  return Math.min(MAX_WALL_THICKNESS, Math.max(MIN_WALL_THICKNESS, thickness));
+}
+
+function clampHeight(height: number): number {
+  return Math.min(MAX_WALL_HEIGHT, Math.max(MIN_WALL_HEIGHT, height));
+}
+
 /**
  * Compute offset lines (interior and exterior) from center-line
  */
@@ -121,7 +135,9 @@ function computeOffsetLines(
  * Create a new wall from parameters
  */
 function createWall(params: CreateWallParams): Wall {
-  const thickness = params.thickness ?? DEFAULT_WALL_THICKNESS[params.layer ?? 'partition'];
+  const thickness = clampThickness(
+    params.thickness ?? DEFAULT_WALL_THICKNESS[params.layer ?? 'partition']
+  );
   const material = params.material ?? 'brick';
   const layer = params.layer ?? 'partition';
 
@@ -130,6 +146,12 @@ function createWall(params: CreateWallParams): Wall {
     params.endPoint,
     thickness
   );
+  const length = Math.sqrt(
+    (params.endPoint.x - params.startPoint.x) ** 2 +
+    (params.endPoint.y - params.startPoint.y) ** 2
+  );
+  const height = clampHeight(DEFAULT_WALL_SETTINGS.defaultHeight);
+  const volume = (length * thickness * height) / 1_000_000_000;
 
   return {
     id: generateId(),
@@ -142,7 +164,12 @@ function createWall(params: CreateWallParams): Wall {
     exteriorLine,
     connectedWalls: [],
     openings: [],
-    properties3D: null,
+    properties3D: {
+      ...DEFAULT_WALL_3D,
+      height,
+      computedLength: length,
+      computedVolumeM3: volume,
+    },
   };
 }
 
@@ -155,7 +182,23 @@ function recomputeWallGeometry(wall: Wall): Wall {
     wall.endPoint,
     wall.thickness
   );
-  return { ...wall, interiorLine, exteriorLine };
+  const length = Math.sqrt(
+    (wall.endPoint.x - wall.startPoint.x) ** 2 +
+    (wall.endPoint.y - wall.startPoint.y) ** 2
+  );
+  const height = clampHeight(wall.properties3D?.height ?? DEFAULT_WALL_3D.height);
+  const volume = (length * wall.thickness * height) / 1_000_000_000;
+  return {
+    ...wall,
+    interiorLine,
+    exteriorLine,
+    properties3D: {
+      ...wall.properties3D,
+      height,
+      computedLength: length,
+      computedVolumeM3: volume,
+    },
+  };
 }
 
 // =============================================================================
@@ -234,7 +277,7 @@ export const createWallSlice: StateCreator<WallSlice, [], [], WallSlice> = (set,
         startPoint: { ...startPoint },
         currentPoint: { ...startPoint },
         chainMode: wallSettings.chainModeEnabled,
-        previewThickness: wallSettings.defaultThickness,
+        previewThickness: clampThickness(wallSettings.defaultThickness),
         previewMaterial: wallSettings.defaultMaterial,
       },
     });
@@ -261,8 +304,8 @@ export const createWallSlice: StateCreator<WallSlice, [], [], WallSlice> = (set,
     const dy = wallDrawingState.currentPoint.y - wallDrawingState.startPoint.y;
     const length = Math.sqrt(dx * dx + dy * dy);
 
-    if (length < 1) {
-      // Less than 1mm, don't create
+    if (length < MIN_WALL_LENGTH) {
+      // Reject walls shorter than minimum configured architectural length.
       return null;
     }
 
@@ -352,8 +395,22 @@ export const createWallSlice: StateCreator<WallSlice, [], [], WallSlice> = (set,
   // ==========================================================================
 
   setWallSettings: (settings) => {
+    const safeSettings = { ...settings };
+    if (safeSettings.defaultThickness !== undefined) {
+      safeSettings.defaultThickness = clampThickness(safeSettings.defaultThickness);
+    }
+    if (safeSettings.defaultHeight !== undefined) {
+      safeSettings.defaultHeight = clampHeight(safeSettings.defaultHeight);
+    }
+    if (safeSettings.defaultLayerCount !== undefined) {
+      safeSettings.defaultLayerCount = Math.max(1, Math.round(safeSettings.defaultLayerCount));
+    }
+    if (safeSettings.gridSize !== undefined) {
+      safeSettings.gridSize = Math.max(1, safeSettings.gridSize);
+    }
+
     set((state) => ({
-      wallSettings: { ...state.wallSettings, ...settings },
+      wallSettings: { ...state.wallSettings, ...safeSettings },
     }));
   },
 
@@ -370,7 +427,7 @@ export const createWallSlice: StateCreator<WallSlice, [], [], WallSlice> = (set,
     set((state) => ({
       wallDrawingState: {
         ...state.wallDrawingState,
-        previewThickness: thickness,
+        previewThickness: clampThickness(thickness),
       },
     }));
   },

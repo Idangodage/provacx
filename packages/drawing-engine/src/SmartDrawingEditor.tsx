@@ -30,11 +30,18 @@ import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import {
   DrawingCanvas,
   Toolbar,
+  AttributeQuickToolbar,
   PropertiesPanel,
+  ObjectLibraryPanel,
   SymbolPalette,
   ZoomIndicator,
   CoordinatesDisplay,
 } from './components';
+import { MM_TO_PX } from './components/canvas';
+import {
+  DEFAULT_ARCHITECTURAL_OBJECT_LIBRARY,
+  type ArchitecturalObjectDefinition,
+} from './data';
 import type { SymbolDefinition } from './data/symbol-library';
 import { useSmartDrawingStore } from './store';
 import type { Point2D, DrawingTool, PageLayout } from './types';
@@ -347,6 +354,7 @@ function EditorFooter({
   mousePosition,
   elementCount,
   areaSummary,
+  statusMessage,
 }: {
   mousePosition: Point2D;
   elementCount: number;
@@ -355,6 +363,7 @@ function EditorFooter({
     usableArea: number;
     circulationArea: number;
   };
+  statusMessage: string;
 }) {
   return (
     <div className="flex items-center justify-between h-8 px-4 bg-[#fffaf0] border-t border-amber-200/70 text-xs text-slate-600">
@@ -368,8 +377,15 @@ function EditorFooter({
         <CoordinatesDisplay
           x={mousePosition.x}
           y={mousePosition.y}
+          unit="mm"
           className="!px-0 !py-0 !border-0 !shadow-none !bg-transparent text-xs"
         />
+        {statusMessage && (
+          <>
+            <span>|</span>
+            <span className="text-blue-700">{statusMessage}</span>
+          </>
+        )}
       </div>
       <div className="flex items-center gap-4">
         <ZoomIndicator className="!px-0 !py-0 !border-0 !shadow-none !bg-transparent text-xs" />
@@ -417,9 +433,11 @@ export function SmartDrawingEditor({
   const leftPanelRef = useRef<HTMLDivElement>(null);
   const minLeftWidth = 96;
   const [maxLeftWidth, setMaxLeftWidth] = useState(360);
-  const [leftPanelWidth, setLeftPanelWidth] = useState(minLeftWidth);
+  const [leftPanelWidth, setLeftPanelWidth] = useState(300);
   const [isResizingLeft, setIsResizingLeft] = useState(false);
-  const previousPaperScaleRef = useRef(scaleDrawing / scaleReal);
+  const [pendingPlacementObjectId, setPendingPlacementObjectId] = useState<string | null>(null);
+  const [customLibraryObjects, setCustomLibraryObjects] = useState<ArchitecturalObjectDefinition[]>([]);
+  const [recentObjectUsage, setRecentObjectUsage] = useState<Record<string, number>>({});
   const compactThreshold = Math.max(minLeftWidth + 32, Math.min(190, maxLeftWidth - 40));
   const isLeftCompact = leftPanelWidth <= compactThreshold;
 
@@ -429,7 +447,8 @@ export function SmartDrawingEditor({
     annotations,
     dimensions,
     symbols,
-    guides,
+    walls,
+    rooms,
     loadData,
     exportData,
     setTool,
@@ -445,6 +464,7 @@ export function SmartDrawingEditor({
     setZoom,
     setPanOffset,
     displayUnit,
+    processingStatus,
   } = store;
 
   const quickActions: { id: DrawingTool; label: string; icon: React.ReactNode }[] = [
@@ -463,9 +483,13 @@ export function SmartDrawingEditor({
     setScaleDrawing(parsed.drawing);
     setScaleReal(parsed.real);
   }, []);
+  const architecturalObjects = useMemo(
+    () => [...DEFAULT_ARCHITECTURAL_OBJECT_LIBRARY, ...customLibraryObjects],
+    [customLibraryObjects]
+  );
 
   // Calculate total element count
-  const elementCount = sketches.length + annotations.length + dimensions.length + symbols.length;
+  const elementCount = sketches.length + annotations.length + dimensions.length + symbols.length + walls.length + rooms.length;
 
   const areaSummary = useMemo(() => {
     return { totalFloorArea: 0, usableArea: 0, circulationArea: 0 };
@@ -484,90 +508,58 @@ export function SmartDrawingEditor({
       const data = exportData();
       onDataChange(data);
     }
-  }, [sketches, exportData, onDataChange]);
+  }, [sketches, dimensions, symbols, walls, rooms, exportData, onDataChange]);
 
   useEffect(() => {
     if (!onSave || saveState === 'saving' || saveState === 'idle') return;
     setSaveState('idle');
-  }, [sketches, onSave, saveState]);
+  }, [sketches, dimensions, walls, rooms, onSave, saveState]);
 
-  // Keep paper size fixed; only scale drawn content when drawing scale changes.
   useEffect(() => {
-    const nextPaperScale = scaleDrawing / scaleReal;
-    const prevPaperScale = previousPaperScaleRef.current;
-
-    if (
-      !Number.isFinite(nextPaperScale) ||
-      !Number.isFinite(prevPaperScale) ||
-      prevPaperScale <= 0 ||
-      nextPaperScale <= 0
-    ) {
-      previousPaperScaleRef.current = nextPaperScale;
-      return;
+    if (activeTool !== 'select' && pendingPlacementObjectId) {
+      setPendingPlacementObjectId(null);
     }
+  }, [activeTool, pendingPlacementObjectId]);
 
-    if (Math.abs(nextPaperScale - prevPaperScale) < 0.000001) return;
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const rawCustom = window.localStorage.getItem('drawing-library-custom');
+      if (rawCustom) {
+        const parsed = JSON.parse(rawCustom);
+        if (Array.isArray(parsed)) {
+          setCustomLibraryObjects(
+            parsed.filter((entry): entry is ArchitecturalObjectDefinition => Boolean(entry) && typeof entry === 'object')
+          );
+        }
+      }
+      const rawRecent = window.localStorage.getItem('drawing-library-recent');
+      if (rawRecent) {
+        const parsedRecent = JSON.parse(rawRecent);
+        if (parsedRecent && typeof parsedRecent === 'object') {
+          setRecentObjectUsage(parsedRecent as Record<string, number>);
+        }
+      }
+    } catch {
+      // Ignore malformed persisted values.
+    }
+  }, []);
 
-    const scaleFactor = nextPaperScale / prevPaperScale;
-    previousPaperScaleRef.current = nextPaperScale;
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('drawing-library-custom', JSON.stringify(customLibraryObjects));
+  }, [customLibraryObjects]);
 
-    const hasDrawableContent =
-      sketches.length > 0 ||
-      annotations.length > 0 ||
-      dimensions.length > 0 ||
-      symbols.length > 0 ||
-      guides.length > 0;
-    if (!hasDrawableContent) return;
-
-    const scalePoint = (point: Point2D): Point2D => ({
-      x: point.x * scaleFactor,
-      y: point.y * scaleFactor,
-    });
-
-    useSmartDrawingStore.setState((state) => ({
-      sketches: state.sketches.map((sketch) => ({
-        ...sketch,
-        points: sketch.points.map(scalePoint),
-        controlPoints: sketch.controlPoints?.map((controlPoint) => ({
-          ...controlPoint,
-          position: scalePoint(controlPoint.position),
-          tangentIn: controlPoint.tangentIn ? scalePoint(controlPoint.tangentIn) : controlPoint.tangentIn,
-          tangentOut: controlPoint.tangentOut ? scalePoint(controlPoint.tangentOut) : controlPoint.tangentOut,
-        })),
-      })),
-      annotations: state.annotations.map((annotation) => ({
-        ...annotation,
-        position: scalePoint(annotation.position),
-        leaderPoints: annotation.leaderPoints?.map(scalePoint),
-      })),
-      dimensions: state.dimensions.map((dimension) => ({
-        ...dimension,
-        points: dimension.points.map(scalePoint),
-        textPosition: scalePoint(dimension.textPosition),
-        value: dimension.value * scaleFactor,
-      })),
-      symbols: state.symbols.map((symbol) => ({
-        ...symbol,
-        position: scalePoint(symbol.position),
-        scale: symbol.scale * scaleFactor,
-      })),
-      guides: state.guides.map((guide) => ({
-        ...guide,
-        offset: guide.offset * scaleFactor,
-      })),
-    }));
-  }, [
-    annotations.length,
-    dimensions.length,
-    guides.length,
-    scaleDrawing,
-    scaleReal,
-    sketches.length,
-    symbols.length,
-  ]);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('drawing-library-recent', JSON.stringify(recentObjectUsage));
+  }, [recentObjectUsage]);
 
   useEffect(() => {
     const handleOpenRoomProperties = () => {
+      setShowRightPanel(true);
+    };
+    const handleOpenPropertiesPanel = () => {
       setShowRightPanel(true);
     };
 
@@ -575,10 +567,18 @@ export function SmartDrawingEditor({
       'smart-drawing:open-room-properties',
       handleOpenRoomProperties as EventListener
     );
+    window.addEventListener(
+      'smart-drawing:open-properties-panel',
+      handleOpenPropertiesPanel as EventListener
+    );
     return () => {
       window.removeEventListener(
         'smart-drawing:open-room-properties',
         handleOpenRoomProperties as EventListener
+      );
+      window.removeEventListener(
+        'smart-drawing:open-properties-panel',
+        handleOpenPropertiesPanel as EventListener
       );
     };
   }, []);
@@ -648,7 +648,7 @@ export function SmartDrawingEditor({
     // Track mouse position
     canvas.on('mouse:move', (e) => {
       const pointer = canvas.getScenePoint(e.e);
-      setMousePosition({ x: pointer.x, y: pointer.y });
+      setMousePosition({ x: pointer.x / MM_TO_PX, y: pointer.y / MM_TO_PX });
     });
   }, []);
 
@@ -677,6 +677,46 @@ export function SmartDrawingEditor({
     },
     [fabricCanvas, readOnly]
   );
+
+  const handleStartObjectPlacement = useCallback((definition: ArchitecturalObjectDefinition) => {
+    if (readOnly) return;
+    setPendingPlacementObjectId(definition.id);
+    setTool('select');
+  }, [readOnly, setTool]);
+
+  const handleCancelObjectPlacement = useCallback(() => {
+    setPendingPlacementObjectId(null);
+  }, []);
+
+  const handleObjectPlaced = useCallback((definitionId: string) => {
+    setRecentObjectUsage((prev) => ({
+      ...prev,
+      [definitionId]: Date.now(),
+    }));
+  }, []);
+
+  const handleAddCustomObject = useCallback((definition: ArchitecturalObjectDefinition) => {
+    setCustomLibraryObjects((prev) => {
+      if (prev.some((entry) => entry.id === definition.id)) {
+        return prev.map((entry) => (entry.id === definition.id ? definition : entry));
+      }
+      return [...prev, definition];
+    });
+  }, []);
+
+  const handleImportCustomObjects = useCallback((definitions: ArchitecturalObjectDefinition[]) => {
+    setCustomLibraryObjects((prev) => {
+      const merged = new Map(prev.map((entry) => [entry.id, entry]));
+      definitions.forEach((definition) => {
+        const normalized = {
+          ...definition,
+          category: 'my-library' as const,
+        };
+        merged.set(normalized.id, normalized);
+      });
+      return Array.from(merged.values());
+    });
+  }, []);
 
   // Export handlers
   const handleExportJSON = useCallback(() => {
@@ -871,6 +911,18 @@ export function SmartDrawingEditor({
                       className="h-full"
                     />
                   </div>
+
+                  <div className="h-[420px] rounded-xl border border-amber-200/80 bg-white/80 overflow-hidden">
+                    <ObjectLibraryPanel
+                      objects={architecturalObjects}
+                      recentUsage={recentObjectUsage}
+                      pendingObjectId={pendingPlacementObjectId}
+                      onStartPlacement={handleStartObjectPlacement}
+                      onCancelPlacement={handleCancelObjectPlacement}
+                      onAddCustomObject={handleAddCustomObject}
+                      onImportCustomObjects={handleImportCustomObjects}
+                    />
+                  </div>
                   </div>
                 </div>
 
@@ -944,6 +996,7 @@ export function SmartDrawingEditor({
               </button>
             </div>
           </div>
+          <AttributeQuickToolbar />
 
           <DrawingCanvas
             className="flex-1"
@@ -962,6 +1015,10 @@ export function SmartDrawingEditor({
             gridMode={gridMode}
             majorGridSize={majorGridSize}
             gridSubdivisions={gridSubdivisions}
+            objectDefinitions={architecturalObjects}
+            pendingPlacementObjectId={pendingPlacementObjectId}
+            onObjectPlaced={handleObjectPlaced}
+            onCancelObjectPlacement={handleCancelObjectPlacement}
           />
         </div>
 
@@ -989,6 +1046,7 @@ export function SmartDrawingEditor({
         mousePosition={mousePosition}
         elementCount={elementCount}
         areaSummary={areaSummary}
+        statusMessage={processingStatus}
       />
     </div>
   );

@@ -5,32 +5,6 @@
  * single kernel and progressively adopt modules.
  */
 
-import type { FloorPlanData, Room2D, Wall2D } from './internal-types';
-import {
-    ParametricModelEngine,
-    solveParametricModel,
-    type ParametricSolveResult,
-    type LinearDimensionConstraint,
-    type DimensionChainConstraint,
-    type ParameterDefinition,
-} from './parametric';
-import {
-    PrecisionToolkit,
-    parseCoordinateInput,
-    type CoordinateInputContext,
-    type CoordinateInputResult,
-} from './precision';
-import {
-    FloorPlanSpatialIndex,
-    LazyFloorPlanMetrics,
-    computeLodDecision,
-    type LodDecision,
-} from './performance';
-import {
-    CommandHistoryManager,
-    SnapshotCommand,
-    type CommandContext,
-} from './history';
 import {
     createFloorPlanFile,
     exportFloorPlanToDxf,
@@ -43,6 +17,32 @@ import {
     serializeFloorPlanFile,
     type FloorPlanFileEnvelope,
 } from './file-format';
+import {
+    CommandHistoryManager,
+    SnapshotCommand,
+    type CommandContext,
+} from './history';
+import type { FloorPlanData, Wall2D } from './internal-types';
+import {
+    ParametricModelEngine,
+    solveParametricModel,
+    type ParametricSolveResult,
+    type LinearDimensionConstraint,
+    type DimensionChainConstraint,
+    type ParameterDefinition,
+} from './parametric';
+import {
+    FloorPlanSpatialIndex,
+    LazyFloorPlanMetrics,
+    computeLodDecision,
+    type LodDecision,
+} from './performance';
+import {
+    PrecisionToolkit,
+    parseCoordinateInput,
+    type CoordinateInputContext,
+    type CoordinateInputResult,
+} from './precision';
 
 export interface ProfessionalKernelContext extends CommandContext {
     data: FloorPlanData;

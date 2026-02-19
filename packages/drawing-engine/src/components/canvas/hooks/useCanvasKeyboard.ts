@@ -17,12 +17,18 @@ export interface UseCanvasKeyboardOptions {
     selectedIds: string[];
     deleteSelected: () => void;
     setIsSpacePressed: (pressed: boolean) => void;
+    setTool?: (tool: DrawingTool) => void;
+    onCopy?: () => void;
+    onPaste?: () => void;
 }
 
 export function useCanvasKeyboard({
     selectedIds,
     deleteSelected,
     setIsSpacePressed,
+    setTool,
+    onCopy,
+    onPaste,
 }: UseCanvasKeyboardOptions) {
     // Space key for panning
     useEffect(() => {
@@ -66,4 +72,98 @@ export function useCanvasKeyboard({
             window.removeEventListener('keydown', handleDeleteKey);
         };
     }, [selectedIds, deleteSelected]);
+
+    // Copy / Paste shortcuts
+    useEffect(() => {
+        const handleClipboardKey = (event: KeyboardEvent) => {
+            if (isEditableElement(event.target)) return;
+            const withModifier = event.ctrlKey || event.metaKey;
+            if (!withModifier) return;
+
+            const key = event.key.toLowerCase();
+            if (key === 'c') {
+                if (selectedIds.length === 0 || !onCopy) return;
+                event.preventDefault();
+                onCopy();
+            }
+
+            if (key === 'v') {
+                if (!onPaste) return;
+                event.preventDefault();
+                onPaste();
+            }
+        };
+
+        window.addEventListener('keydown', handleClipboardKey);
+        return () => {
+            window.removeEventListener('keydown', handleClipboardKey);
+        };
+    }, [selectedIds, onCopy, onPaste]);
+
+    // Single-key tool shortcuts
+    useEffect(() => {
+        if (!setTool) return;
+
+        const handleToolShortcut = (event: KeyboardEvent) => {
+            if (isEditableElement(event.target)) return;
+            if (event.ctrlKey || event.metaKey || event.altKey) return;
+            if (event.repeat) return;
+
+            const key = event.key.toLowerCase();
+            if (key === 'escape') {
+                event.preventDefault();
+                setTool('select');
+                return;
+            }
+            if (key === 'v') {
+                event.preventDefault();
+                setTool('select');
+                return;
+            }
+            if (key === 'm') {
+                event.preventDefault();
+                setTool('select');
+                return;
+            }
+            if (key === 'w') {
+                event.preventDefault();
+                setTool('wall');
+                return;
+            }
+            if (key === 'r') {
+                event.preventDefault();
+                setTool('room');
+                return;
+            }
+            if (key === 't') {
+                event.preventDefault();
+                setTool('text');
+                return;
+            }
+            if (key === 'e') {
+                event.preventDefault();
+                setTool('eraser');
+                return;
+            }
+            if (key === 's') {
+                event.preventDefault();
+                setTool('spline');
+                return;
+            }
+            if (key === 'd') {
+                event.preventDefault();
+                setTool('dimension');
+                return;
+            }
+            if (key === 'k') {
+                event.preventDefault();
+                setTool('section-line');
+            }
+        };
+
+        window.addEventListener('keydown', handleToolShortcut);
+        return () => {
+            window.removeEventListener('keydown', handleToolShortcut);
+        };
+    }, [setTool]);
 }

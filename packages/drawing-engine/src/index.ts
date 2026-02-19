@@ -13,20 +13,28 @@ export { SmartDrawingEditor, type SmartDrawingEditorProps } from './SmartDrawing
 export {
   DrawingCanvas,
   Toolbar,
+  AttributeQuickToolbar,
+  ObjectLibraryPanel,
   PropertiesPanel,
   SymbolPalette,
   DrawingGrid,
   DrawingRulers,
   DrawingPageLayout,
+  RoomLayer,
+  RoomTag,
   ZoomIndicator,
   CoordinatesDisplay,
   type DrawingCanvasProps,
   type ToolbarProps,
+  type AttributeQuickToolbarProps,
+  type ObjectLibraryPanelProps,
   type PropertiesPanelProps,
   type SymbolPaletteProps,
   type DrawingGridProps,
   type DrawingRulersProps,
   type DrawingPageLayoutProps,
+  type RoomLayerProps,
+  type RoomTagProps,
 } from './components';
 
 // Spatial hash for interaction proximity detection
@@ -40,13 +48,22 @@ export {
 } from './components/canvas/spatial-hash';
 
 // Store
-export { useSmartDrawingStore, type SmartDrawingState } from './store';
+export { useSmartDrawingStore, useRoomStore, type SmartDrawingState, type RoomStore } from './store';
+export { DEFAULT_DIMENSION_SETTINGS } from './types';
 
 // Types
 export type {
   Point2D,
   Bounds,
   DisplayUnit,
+  Dimension2D,
+  DimensionSettings,
+  DimensionStyle,
+  DimensionDisplayFormat,
+  DimensionPlacementType,
+  Grip,
+  GripType,
+  GripState,
   SplineType,
   SplineSettings,
   DrawingTool,
@@ -54,6 +71,10 @@ export type {
   PageConfig,
   DrawingLayer,
   HistoryEntry,
+  WallSegment,
+  DetectedRoom,
+  RoomLabelTag,
+  RoomDetectionConfig,
 } from './types';
 
 // Utilities
@@ -87,6 +108,8 @@ export {
   buildRevisionCloudPath,
   sampleCatmullRom,
   countBy,
+  GeometryEngine,
+  type RoomValidationResult,
   // Splines
   DEFAULT_SPLINE_SETTINGS,
   buildSplinePath,
@@ -99,6 +122,15 @@ export {
   type RTreeBounds,
   type RTreeEntry,
 } from './utils';
+export { RoomTool, type RoomToolMode, type RoomToolOptions } from './tools';
+export {
+  WallEndpointEditOperation,
+  WallRotationOperation,
+  type KeyModifiers,
+  type EndpointEditPreview,
+  type RotationModifiers,
+  type RotationPreview,
+} from './operations';
 
 // Symbol Library
 export {
@@ -110,6 +142,17 @@ export {
   getCategoryLabel,
   type SymbolDefinition,
   type SymbolCategory,
+} from './data';
+
+export {
+  ARCHITECTURAL_OBJECT_CATEGORIES,
+  DEFAULT_ARCHITECTURAL_OBJECT_LIBRARY,
+  groupArchitecturalObjectsByCategory,
+  searchArchitecturalObjects,
+  sortArchitecturalObjects,
+  type ArchitecturalObjectDefinition,
+  type ArchitecturalObjectCategory,
+  type ObjectSortMode,
 } from './data';
 
 // Professional architecture modules
@@ -168,3 +211,27 @@ export {
   type PdfExportModel,
   type IndustryImportResult,
 } from './professional';
+
+// 3D attribute system
+export {
+  DEFAULT_ARCHITECTURAL_MATERIALS,
+  getArchitecturalMaterial,
+  resolveWallMaterialFromLibrary,
+  getDefaultMaterialIdForWallMaterial,
+  attributeChangeObserver,
+  bindWallGeometryTo3D,
+  bindRoomGeometryTo3D,
+  validateWall3DAttributes,
+  validateRoom3DAttributes,
+  createAttributeEnvelope,
+  deserializeAttributeEnvelope,
+  serializeAttributeEnvelope,
+  ATTRIBUTE_ENVELOPE_SCHEMA,
+  ATTRIBUTE_ENVELOPE_VERSION,
+  type MaterialFamily,
+  type ArchitecturalMaterial,
+  type AttributeChangeEvent,
+  type AttributeValidationIssue,
+  type AttributeValidationResult,
+  type DrawingAttributeEnvelope,
+} from './attributes';

@@ -19,6 +19,7 @@ export * from './WallGeometry';
 export {
   snapToGrid,
   snapToEndpoint,
+  snapToMidpoint,
   applyAngleLock,
   snapWallPoint,
   findWallIntersections,

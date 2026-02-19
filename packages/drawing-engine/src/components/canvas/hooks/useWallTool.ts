@@ -7,10 +7,11 @@
 
 import type { Canvas as FabricCanvas } from 'fabric';
 import { useRef, useCallback, useEffect } from 'react';
-import type { Point2D, Wall, WallSettings, WallDrawingState } from '../../../types';
+
+import type { Point2D, Room, Wall, WallSettings, WallDrawingState } from '../../../types';
+import { WallManager } from '../wall/WallManager';
 import { WallPreview } from '../wall/WallPreview';
 import { WallRenderer } from '../wall/WallRenderer';
-import { WallManager } from '../wall/WallManager';
 import { snapWallPoint } from '../wall/WallSnapping';
 
 // =============================================================================
@@ -21,6 +22,8 @@ export interface UseWallToolOptions {
   fabricRef: React.RefObject<FabricCanvas | null>;
   canvas: FabricCanvas | null;  // Direct canvas reference for reactivity
   walls: Wall[];
+  rooms: Room[];
+  selectedIds: string[];
   wallDrawingState: WallDrawingState;
   wallSettings: WallSettings;
   zoom: number;
@@ -53,6 +56,8 @@ export function useWallTool({
   fabricRef,
   canvas,
   walls,
+  rooms,
+  selectedIds,
   wallDrawingState,
   wallSettings,
   zoom,
@@ -69,7 +74,7 @@ export function useWallTool({
   const wallPreviewRef = useRef<WallPreview | null>(null);
   const wallManagerRef = useRef<WallManager | null>(null);
   const shiftPressedRef = useRef(false);
-  const lastSnappedWallRef = useRef<{ wallId: string; endpoint: 'start' | 'end' } | null>(null);
+  const lastSnappedWallRef = useRef<{ wallId: string } | null>(null);
 
   // Initialize instances when canvas is available
   useEffect(() => {
@@ -94,6 +99,9 @@ export function useWallTool({
     return () => {
       wallPreviewRef.current?.dispose();
       wallRendererRef.current?.dispose();
+      wallPreviewRef.current = null;
+      wallRendererRef.current = null;
+      wallManagerRef.current = null;
     };
   }, [canvas, pageHeight]);
 
@@ -111,12 +119,45 @@ export function useWallTool({
     }
   }, [walls, fabricRef]);
 
+  // Update selected wall highlights + control points
+  useEffect(() => {
+    if (!wallRendererRef.current) return;
+    const wallIdSet = new Set(walls.map((wall) => wall.id));
+    const roomById = new Map(rooms.map((room) => [room.id, room]));
+    const selectedWallIds = new Set<string>();
+
+    selectedIds.forEach((id) => {
+      if (wallIdSet.has(id)) {
+        selectedWallIds.add(id);
+        return;
+      }
+      const room = roomById.get(id);
+      if (room) {
+        room.wallIds.forEach((wallId) => {
+          if (wallIdSet.has(wallId)) {
+            selectedWallIds.add(wallId);
+          }
+        });
+      }
+    });
+
+    wallRendererRef.current.setSelectedWalls([...selectedWallIds]);
+  }, [walls, rooms, selectedIds]);
+
   // Update center lines visibility
   useEffect(() => {
     if (wallRendererRef.current) {
       wallRendererRef.current.setShowCenterLines(wallSettings.showCenterLines);
+      wallRendererRef.current.setShowHeightTags(wallSettings.showHeightTags);
+      wallRendererRef.current.setWallColorMode(wallSettings.wallColorMode);
+      wallRendererRef.current.setShowLayerCountIndicators(wallSettings.showLayerCountIndicators);
     }
-  }, [wallSettings.showCenterLines]);
+  }, [
+    wallSettings.showCenterLines,
+    wallSettings.showHeightTags,
+    wallSettings.wallColorMode,
+    wallSettings.showLayerCountIndicators,
+  ]);
 
   /**
    * Handle mouse down - start wall or commit current wall
@@ -141,10 +182,12 @@ export function useWallTool({
         startWallDrawing(snapResult.snappedPoint);
 
         // Track if we snapped to an endpoint
-        if (snapResult.snapType === 'endpoint' && snapResult.connectedWallId) {
+        if (
+          (snapResult.snapType === 'endpoint' || snapResult.snapType === 'midpoint') &&
+          snapResult.connectedWallId
+        ) {
           lastSnappedWallRef.current = {
             wallId: snapResult.connectedWallId,
-            endpoint: snapResult.endpoint!,
           };
         } else {
           lastSnappedWallRef.current = null;
@@ -160,16 +203,6 @@ export function useWallTool({
         // Second click: commit wall
         updateWallPreview(snapResult.snappedPoint);
 
-        // Check for endpoint connection at end point
-        const endSnapResult = snapWallPoint(
-          scenePoint,
-          wallDrawingState.startPoint,
-          wallSettings,
-          walls,
-          shiftPressedRef.current,
-          zoom
-        );
-
         const newWallId = commitWall();
 
         if (newWallId) {
@@ -179,11 +212,13 @@ export function useWallTool({
           }
 
           // Connect to end point wall if snapped
-          if (endSnapResult.snapType === 'endpoint' && endSnapResult.connectedWallId) {
-            connectWalls(newWallId, endSnapResult.connectedWallId);
+          if (
+            (snapResult.snapType === 'endpoint' || snapResult.snapType === 'midpoint') &&
+            snapResult.connectedWallId
+          ) {
+            connectWalls(newWallId, snapResult.connectedWallId);
             lastSnappedWallRef.current = {
-              wallId: endSnapResult.connectedWallId,
-              endpoint: endSnapResult.endpoint!,
+              wallId: snapResult.connectedWallId,
             };
           } else {
             lastSnappedWallRef.current = null;

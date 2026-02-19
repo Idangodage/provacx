@@ -10,8 +10,11 @@ import type {
     Dimension2D,
     Annotation2D,
     Sketch2D,
+    ElevationView,
+    SectionLine,
     SymbolInstance2D,
     HistoryEntry,
+    Room,
     Wall,
 } from '../types';
 import { generateId } from '../utils/geometry';
@@ -36,6 +39,10 @@ export function createEmptyHistorySnapshot(): HistoryEntry['snapshot'] {
         sketches: [],
         symbols: [],
         walls: [],
+        rooms: [],
+        sectionLines: [],
+        elevationViews: [],
+        activeElevationViewId: null,
     };
 }
 
@@ -55,6 +62,10 @@ export function createHistorySnapshot(state: {
     sketches: Sketch2D[];
     symbols: SymbolInstance2D[];
     walls: Wall[];
+    rooms: Room[];
+    sectionLines: SectionLine[];
+    elevationViews: ElevationView[];
+    activeElevationViewId: string | null;
 }): HistoryEntry['snapshot'] {
     return {
         detectedElements: deepClone(state.detectedElements),
@@ -63,5 +74,9 @@ export function createHistorySnapshot(state: {
         sketches: deepClone(state.sketches),
         symbols: deepClone(state.symbols),
         walls: deepClone(state.walls),
+        rooms: deepClone(state.rooms),
+        sectionLines: deepClone(state.sectionLines),
+        elevationViews: deepClone(state.elevationViews),
+        activeElevationViewId: state.activeElevationViewId,
     };
 }

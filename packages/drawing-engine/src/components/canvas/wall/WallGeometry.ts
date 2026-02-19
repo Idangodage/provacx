@@ -280,6 +280,8 @@ export function computeMiterJoin(
  * Returns vertices in order: interior start, interior end, exterior end, exterior start
  */
 export function computeWallPolygon(wall: Wall, joins?: JoinData[]): Point2D[] {
+  const JOIN_ENDPOINT_TOLERANCE = 2;
+
   // Start with basic rectangle from offset lines
   let interiorStart = wall.interiorLine.start;
   let interiorEnd = wall.interiorLine.end;
@@ -289,9 +291,21 @@ export function computeWallPolygon(wall: Wall, joins?: JoinData[]): Point2D[] {
   // Apply join modifications if provided
   if (joins && joins.length > 0) {
     for (const join of joins) {
-      // Check if this join affects the start point
-      const isStart = Math.abs(wall.startPoint.x - join.joinPoint.x) < 0.1 &&
-                      Math.abs(wall.startPoint.y - join.joinPoint.y) < 0.1;
+      const startDistance = Math.hypot(
+        wall.startPoint.x - join.joinPoint.x,
+        wall.startPoint.y - join.joinPoint.y
+      );
+      const endDistance = Math.hypot(
+        wall.endPoint.x - join.joinPoint.x,
+        wall.endPoint.y - join.joinPoint.y
+      );
+
+      if (Math.min(startDistance, endDistance) > JOIN_ENDPOINT_TOLERANCE) {
+        continue;
+      }
+
+      // Apply the join to whichever endpoint is closer to the join point.
+      const isStart = startDistance <= endDistance;
 
       if (isStart) {
         interiorStart = join.interiorVertex;

@@ -2,8 +2,9 @@
  * Floor plan file schema, migration, and exchange format adapters.
  */
 
-import type { FloorPlanData, Room2D, Wall2D } from './internal-types';
 import { generateId } from '../utils/geometry';
+
+import type { FloorPlanData, Room2D, Wall2D } from './internal-types';
 
 // =============================================================================
 // File Schema

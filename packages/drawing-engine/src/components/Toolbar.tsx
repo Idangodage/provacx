@@ -74,6 +74,7 @@ const DRAWING_TOOLS: {
   { id: 'select', icon: <MousePointer2 size={18} />, label: 'Select', shortLabel: 'Select', shortcut: 'V' },
   { id: 'pan', icon: <Hand size={18} />, label: 'Pan', shortLabel: 'Pan', shortcut: 'H' },
   { id: 'wall', icon: <Minus size={18} />, label: 'Wall', shortLabel: 'Wall', shortcut: 'W' },
+  { id: 'section-line', icon: <Minus size={18} />, label: 'Section', shortLabel: 'Section', shortcut: 'K' },
   { id: 'room', icon: <BoxSelect size={18} />, label: 'Room', shortLabel: 'Room', shortcut: 'R' },
   { id: 'pencil', icon: <Pencil size={18} />, label: 'Pencil', shortLabel: 'Pencil', shortcut: 'P' },
   { id: 'spline', icon: <Spline size={18} />, label: 'Spline', shortLabel: 'Spline', shortcut: 'S' },

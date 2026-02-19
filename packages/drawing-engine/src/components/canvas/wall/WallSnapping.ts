@@ -2,7 +2,7 @@
  * WallSnapping
  *
  * Snapping utilities for wall drawing.
- * Grid snap, endpoint snap, and angle locking.
+ * Grid snap, keypoint snap, and orthogonal locking.
  */
 
 import type { Point2D, Wall, SnapResult, EndpointSnapResult, WallSettings } from '../../../types';
@@ -75,6 +75,44 @@ export function snapToEndpoint(
 }
 
 /**
+ * Find the nearest wall midpoint within tolerance
+ */
+export function snapToMidpoint(
+  point: Point2D,
+  walls: Wall[],
+  tolerancePx: number,
+  zoom: number,
+  excludeWallId?: string
+): EndpointSnapResult | null {
+  const toleranceMm = tolerancePx / zoom / MM_TO_PX;
+
+  let closest: EndpointSnapResult | null = null;
+  let closestDistance = toleranceMm;
+
+  for (const wall of walls) {
+    if (wall.id === excludeWallId) continue;
+
+    const midpoint = {
+      x: (wall.startPoint.x + wall.endPoint.x) / 2,
+      y: (wall.startPoint.y + wall.endPoint.y) / 2,
+    };
+
+    const distToMidpoint = distance(point, midpoint);
+    if (distToMidpoint < closestDistance) {
+      closestDistance = distToMidpoint;
+      closest = {
+        snappedPoint: midpoint,
+        wallId: wall.id,
+        endpoint: 'midpoint',
+        distance: distToMidpoint,
+      };
+    }
+  }
+
+  return closest;
+}
+
+/**
  * Euclidean distance between two points
  */
 function distance(a: Point2D, b: Point2D): number {
@@ -87,7 +125,7 @@ function distance(a: Point2D, b: Point2D): number {
 
 /**
  * Apply angle locking when Shift key is pressed
- * Constrains the line to predefined angles (0, 45, 90, 135, 180, etc.)
+ * Constrains the line to predefined angles.
  */
 export function applyAngleLock(
   startPoint: Point2D,
@@ -140,7 +178,7 @@ function normalizeAngle(angle: number): number {
 
 /**
  * Apply all snapping rules to a point
- * Priority: endpoint snap > angle lock > grid snap
+ * Priority: endpoint snap > midpoint snap > orthogonal lock > grid snap
  */
 export function snapWallPoint(
   point: Point2D,
@@ -154,7 +192,7 @@ export function snapWallPoint(
   let snappedPoint = { ...point };
   let snapType: SnapResult['snapType'] = 'none';
   let connectedWallId: string | undefined;
-  let endpoint: 'start' | 'end' | undefined;
+  let endpoint: 'start' | 'end' | 'midpoint' | undefined;
 
   // 1. Try endpoint snapping first (highest priority)
   const endpointSnap = snapToEndpoint(
@@ -171,14 +209,31 @@ export function snapWallPoint(
     connectedWallId = endpointSnap.wallId;
     endpoint = endpointSnap.endpoint;
   }
-  // 2. Apply angle locking if Shift is pressed and we're drawing from a start point
-  else if (shiftPressed && startPoint) {
+  // 2. Try midpoint snapping
+  else {
+    const midpointSnap = snapToMidpoint(
+      point,
+      walls,
+      settings.midpointSnapTolerance,
+      zoom,
+      excludeWallId
+    );
+
+    if (midpointSnap) {
+      snappedPoint = midpointSnap.snappedPoint;
+      snapType = 'midpoint';
+      connectedWallId = midpointSnap.wallId;
+      endpoint = midpointSnap.endpoint;
+    }
+  }
+
+  // 3. Apply orthogonal locking if Shift is pressed and we're drawing from a start point
+  if (snapType === 'none' && shiftPressed && startPoint) {
     snappedPoint = applyAngleLock(startPoint, point);
     snapType = 'angle';
 
-    // After angle lock, optionally snap to grid
+    // After orthogonal lock, optionally snap to grid increments
     if (settings.snapToGrid) {
-      // Snap the length to grid increments while maintaining angle
       const dx = snappedPoint.x - startPoint.x;
       const dy = snappedPoint.y - startPoint.y;
       const length = Math.sqrt(dx * dx + dy * dy);
@@ -193,8 +248,8 @@ export function snapWallPoint(
       }
     }
   }
-  // 3. Apply grid snapping
-  else if (settings.snapToGrid) {
+  // 4. Apply grid snapping
+  else if (snapType === 'none' && settings.snapToGrid) {
     snappedPoint = snapToGrid(point, settings.gridSize);
     snapType = 'grid';
   }

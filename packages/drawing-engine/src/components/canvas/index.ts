@@ -38,5 +38,17 @@ export * from './hooks';
 // Wall module
 export * from './wall';
 
+// Room module
+export * from './room';
+
+// Dimension module
+export * from './dimension';
+
+// Object module
+export * from './object';
+
+// Elevation module
+export * from './elevation';
+
 // UI Components
 export * from './ui';

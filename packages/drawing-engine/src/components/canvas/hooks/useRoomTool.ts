@@ -5,7 +5,8 @@
  */
 
 import { useState, useCallback } from 'react';
-import type { Point2D, RoomConfig, WallMaterial } from '../../../types';
+
+import type { Point2D, RoomConfig } from '../../../types';
 import { DEFAULT_ROOM_CONFIG } from '../../../types/wall';
 import { snapToGrid } from '../wall/WallSnapping';
 

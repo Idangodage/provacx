@@ -52,3 +52,20 @@ export {
   type RTreeBounds,
   type RTreeEntry,
 } from './rtree';
+
+// Turf-powered geometry engine
+export { GeometryEngine, type RoomValidationResult } from './geometry-engine';
+export {
+  darkenHex,
+  snapEndpointToNearest,
+  prepareWallSegmentForInsertion,
+  detectRoomsFromWalls,
+  isPointInsideRoom,
+  type RoomDetectionRunOptions,
+  type RoomDetectionRunResult,
+  type PreparedWallInsertionResult,
+} from './roomDetection';
+
+// Interactive editing utilities
+export { GripManager } from './GripManager';
+export { SnapManager, SnapType, type SnapContext, type SnapTarget } from './SnapManager';

@@ -19,3 +19,6 @@ export { useWallTool, type UseWallToolOptions, type UseWallToolResult } from './
 
 // Room tool
 export { useRoomTool, type UseRoomToolOptions, type UseRoomToolResult } from './useRoomTool';
+
+// Dimension tool
+export { useDimensionTool, type UseDimensionToolOptions } from './useDimensionTool';

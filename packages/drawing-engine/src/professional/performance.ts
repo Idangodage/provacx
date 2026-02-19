@@ -8,11 +8,12 @@
  * - lazy/memoized derived property evaluation
  */
 
+import { SpatialHash } from '../components/canvas/spatial-hash';
 import type { Point2D } from '../types';
-import type { Room2D, Wall2D } from './internal-types';
 import { distance } from '../utils/geometry';
 import { PackedRTree, type RTreeBounds } from '../utils/rtree';
-import { SpatialHash } from '../components/canvas/spatial-hash';
+
+import type { Room2D, Wall2D } from './internal-types';
 
 // =============================================================================
 // Spatial Indexing

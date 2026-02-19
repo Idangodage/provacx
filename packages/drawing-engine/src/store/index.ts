@@ -7,10 +7,31 @@
 import { create } from 'zustand';
 import { devtools } from 'zustand/middleware';
 
+import {
+  attributeChangeObserver,
+  bindRoomGeometryTo3D,
+  bindWallGeometryTo3D,
+  createAttributeEnvelope,
+  DEFAULT_HVAC_DESIGN_CONDITIONS,
+  DEFAULT_ROOM_HVAC_TEMPLATES,
+  deserializeAttributeEnvelope,
+  getDefaultMaterialIdForWallMaterial,
+  getArchitecturalMaterial,
+  DEFAULT_ARCHITECTURAL_MATERIALS,
+  resolveWallMaterialFromLibrary,
+  validateRoom3DAttributes,
+  validateWall3DAttributes,
+} from '../attributes';
+import {
+  createStandardElevationViews,
+  generateCustomElevationView,
+  regenerateElevationViews,
+} from '../components/canvas/elevation';
 import type {
   Point2D,
   DisplayUnit,
   Dimension2D,
+  DimensionSettings,
   Annotation2D,
   Sketch2D,
   Guide,
@@ -23,18 +44,44 @@ import type {
   HistoryEntry,
   SplineSettings,
   SplineMethod,
+  Room,
+  Room3D,
+  RoomType,
+  HvacDesignConditions,
+  ElevationSettings,
+  ElevationView,
   Wall,
+  Wall3D,
   WallDrawingState,
   WallSettings,
   WallMaterial,
+  SectionLine,
+  SectionLineDrawingState,
+  SectionLineDirection,
+  SectionLineKind,
   CreateWallParams,
   RoomConfig,
 } from '../types';
+import { DEFAULT_DIMENSION_SETTINGS } from '../types';
 import {
+  DEFAULT_ROOM_3D,
+  DEFAULT_ELEVATION_SETTINGS,
+  DEFAULT_SECTION_LINE_COLOR,
+  DEFAULT_SECTION_LINE_DEPTH_MM,
+  DEFAULT_SECTION_LINE_DRAWING_STATE,
+  DEFAULT_WALL_3D,
   DEFAULT_WALL_SETTINGS,
   DEFAULT_WALL_DRAWING_STATE,
+  DEFAULT_WALL_HEIGHT,
+  DEFAULT_WALL_LAYER_COUNT,
+  MAX_WALL_HEIGHT,
+  MAX_WALL_THICKNESS,
+  MIN_WALL_HEIGHT,
+  MIN_WALL_LENGTH,
+  MIN_WALL_THICKNESS,
 } from '../types/wall';
 import { generateId } from '../utils/geometry';
+import { GeometryEngine } from '../utils/geometry-engine';
 import { DEFAULT_SPLINE_SETTINGS } from '../utils/spline';
 
 // Import from extracted modules
@@ -47,6 +94,555 @@ import {
   createHistoryEntry,
   createHistorySnapshot,
 } from './helpers';
+import {
+  detectRoomPolygons,
+  inferRoomType,
+  roomMinimumDimensionWarnings,
+  roomTopologyHash,
+  roomTypeFillColor,
+} from './roomDetection';
+
+const AUTO_TRIM_TOLERANCE_MM = 120;
+const ROOM_DETECTION_DEBOUNCE_MS = 120;
+const ELEVATION_REGEN_DEBOUNCE_MS = 120;
+
+let roomDetectionTimer: ReturnType<typeof setTimeout> | null = null;
+let elevationRegenTimer: ReturnType<typeof setTimeout> | null = null;
+let lastRoomTopologyHash = '';
+const INITIAL_ELEVATION_VIEWS = createStandardElevationViews(
+  [],
+  [],
+  DEFAULT_ELEVATION_SETTINGS
+);
+
+function clampValue(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function sectionLabelForIndex(kind: SectionLineKind, index: number): string {
+  if (kind === 'elevation') {
+    const presets = ['FRONT ELEVATION', 'END ELEVATION'];
+    return presets[index - 1] ?? `ELEVATION ${index}`;
+  }
+
+  const normalizedIndex = Math.max(1, Math.floor(index));
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const letter = alphabet[(normalizedIndex - 1) % alphabet.length];
+  return `SECTION ${letter}-${letter}`;
+}
+
+function wallLengthMm(startPoint: Point2D, endPoint: Point2D): number {
+  return GeometryEngine.distance(startPoint, endPoint);
+}
+
+function clampThickness(thickness: number): number {
+  return clampValue(thickness, MIN_WALL_THICKNESS, MAX_WALL_THICKNESS);
+}
+
+function clampHeight(height: number): number {
+  return clampValue(height, MIN_WALL_HEIGHT, MAX_WALL_HEIGHT);
+}
+
+function rebuildWallGeometry(wall: Wall): Wall {
+  const dx = wall.endPoint.x - wall.startPoint.x;
+  const dy = wall.endPoint.y - wall.startPoint.y;
+  const length = Math.sqrt(dx * dx + dy * dy) || 1;
+  const perpX = -dy / length;
+  const perpY = dx / length;
+  const halfThickness = wall.thickness / 2;
+
+  return {
+    ...wall,
+    interiorLine: {
+      start: { x: wall.startPoint.x + perpX * halfThickness, y: wall.startPoint.y + perpY * halfThickness },
+      end: { x: wall.endPoint.x + perpX * halfThickness, y: wall.endPoint.y + perpY * halfThickness },
+    },
+    exteriorLine: {
+      start: { x: wall.startPoint.x - perpX * halfThickness, y: wall.startPoint.y - perpY * halfThickness },
+      end: { x: wall.endPoint.x - perpX * halfThickness, y: wall.endPoint.y - perpY * halfThickness },
+    },
+  };
+}
+
+function projectPointToSegment(
+  point: Point2D,
+  start: Point2D,
+  end: Point2D
+): { point: Point2D; distance: number } {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lengthSq = dx * dx + dy * dy;
+
+  if (lengthSq < 0.000001) {
+    const distance = Math.hypot(point.x - start.x, point.y - start.y);
+    return { point: { ...start }, distance };
+  }
+
+  const t = clampValue(
+    ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSq,
+    0,
+    1
+  );
+
+  const projection = {
+    x: start.x + dx * t,
+    y: start.y + dy * t,
+  };
+
+  return {
+    point: projection,
+    distance: Math.hypot(point.x - projection.x, point.y - projection.y),
+  };
+}
+
+function autoTrimEndpointToNearbyWall(
+  endpoint: Point2D,
+  fixedPoint: Point2D,
+  walls: Wall[]
+): Point2D {
+  let bestPoint = endpoint;
+  let bestDistance = AUTO_TRIM_TOLERANCE_MM;
+
+  for (const wall of walls) {
+    const projection = projectPointToSegment(endpoint, wall.startPoint, wall.endPoint);
+
+    if (projection.distance > bestDistance) continue;
+    if (wallLengthMm(fixedPoint, projection.point) < MIN_WALL_LENGTH) continue;
+
+    bestDistance = projection.distance;
+    bestPoint = projection.point;
+  }
+
+  return bestPoint;
+}
+
+function autoTrimWallEndpoints(
+  startPoint: Point2D,
+  endPoint: Point2D,
+  walls: Wall[]
+): { startPoint: Point2D; endPoint: Point2D } {
+  const snappedStart = autoTrimEndpointToNearbyWall(startPoint, endPoint, walls);
+  const snappedEnd = autoTrimEndpointToNearbyWall(endPoint, snappedStart, walls);
+
+  if (wallLengthMm(snappedStart, snappedEnd) < MIN_WALL_LENGTH) {
+    return { startPoint, endPoint };
+  }
+
+  return { startPoint: snappedStart, endPoint: snappedEnd };
+}
+
+function pointsNear(a: Point2D, b: Point2D, tolerance: number = 2): boolean {
+  return Math.abs(a.x - b.x) <= tolerance && Math.abs(a.y - b.y) <= tolerance;
+}
+
+function pointLiesOnWall(point: Point2D, wall: Wall, tolerance: number = 2): boolean {
+  const projection = projectPointToSegment(point, wall.startPoint, wall.endPoint);
+  return projection.distance <= tolerance;
+}
+
+function findWallsTouchingPoint(
+  point: Point2D,
+  walls: Wall[],
+  tolerance: number = 2
+): string[] {
+  const touching: string[] = [];
+
+  for (const wall of walls) {
+    if (
+      pointsNear(point, wall.startPoint, tolerance) ||
+      pointsNear(point, wall.endPoint, tolerance) ||
+      pointLiesOnWall(point, wall, tolerance)
+    ) {
+      touching.push(wall.id);
+    }
+  }
+
+  return touching;
+}
+
+function polygonArea(vertices: Point2D[]): number {
+  return GeometryEngine.calculateRoomAreaMm2({ vertices });
+}
+
+function polygonPerimeter(vertices: Point2D[]): number {
+  return GeometryEngine.calculateRoomPerimeterMm({ vertices });
+}
+
+function polygonCentroid(vertices: Point2D[]): Point2D {
+  return GeometryEngine.findRoomCentroid({ vertices });
+}
+
+function roomSignatureFromWallIds(wallIds: string[]): string {
+  return [...new Set(wallIds)].sort().join('|');
+}
+
+function bindWallAttributes(wall: Wall, defaults?: Partial<Wall3D>): Wall {
+  const bound = bindWallGeometryTo3D(wall, defaults);
+  return {
+    ...wall,
+    properties3D: bound.value,
+  };
+}
+
+function bindRoomAttributes(room: Room, defaults?: Partial<Room3D>): Room {
+  const computedArea = polygonArea(room.vertices);
+  const computedPerimeter = polygonPerimeter(room.vertices);
+  const computedCentroid = polygonCentroid(room.vertices);
+  const bound = bindRoomGeometryTo3D(
+    {
+      ...room,
+      area: computedArea,
+    },
+    defaults
+  );
+  return {
+    ...room,
+    properties3D: bound.value,
+    area: computedArea,
+    perimeter: computedPerimeter,
+    centroid: computedCentroid,
+  };
+}
+
+function createRoomModel(params: {
+  vertices: Point2D[];
+  wallIds: string[];
+  name?: string;
+  roomType?: RoomType;
+  perimeter?: number;
+  centroid?: Point2D;
+  finishes?: string;
+  notes?: string;
+  fillColor?: string;
+  showLabel?: boolean;
+  adjacentRoomIds?: string[];
+  hasWindows?: boolean;
+  validationWarnings?: string[];
+  isExterior?: boolean;
+  properties3D?: Partial<Room3D>;
+}): Room {
+  const area = polygonArea(params.vertices);
+  const areaM2 = area / 1_000_000;
+  const roomType = params.roomType ?? inferRoomType(areaM2);
+  const roomBase: Room = {
+    id: generateId(),
+    name: params.name ?? `${roomType} ${new Date().toISOString().slice(11, 16)}`,
+    roomType,
+    vertices: params.vertices.map((vertex) => ({ ...vertex })),
+    wallIds: [...params.wallIds],
+    area,
+    perimeter: params.perimeter ?? polygonPerimeter(params.vertices),
+    centroid: params.centroid ? { ...params.centroid } : polygonCentroid(params.vertices),
+    finishes: params.finishes ?? '',
+    notes: params.notes ?? '',
+    fillColor: params.fillColor ?? roomTypeFillColor(roomType),
+    showLabel: params.showLabel ?? true,
+    adjacentRoomIds: params.adjacentRoomIds ?? [],
+    hasWindows: params.hasWindows ?? false,
+    validationWarnings: params.validationWarnings ?? [],
+    isExterior: params.isExterior ?? false,
+    properties3D: { ...DEFAULT_ROOM_3D },
+  };
+  return bindRoomAttributes(roomBase, params.properties3D);
+}
+
+function buildRoomValidationWarnings(params: {
+  areaM2: number;
+  roomType: RoomType;
+  vertices: Point2D[];
+  hasWindows: boolean;
+}): string[] {
+  const warnings: string[] = [];
+  if (params.areaM2 < 2) {
+    warnings.push('Room area is below 2m² (possible drawing error).');
+  }
+  if (!params.hasWindows) {
+    warnings.push('No windows detected for this room.');
+  }
+  warnings.push(...roomMinimumDimensionWarnings(params.roomType, params.vertices));
+  return warnings;
+}
+
+function buildAutoDetectedRooms(
+  walls: Wall[],
+  existingRooms: Room[]
+): Room[] {
+  if (walls.length < 3) return [];
+
+  const detection = detectRoomPolygons(walls);
+  if (detection.faces.length === 0) return [];
+
+  const existingBySignature = new Map<string, Room>();
+  existingRooms.forEach((room) => {
+    existingBySignature.set(roomSignatureFromWallIds(room.wallIds), room);
+  });
+
+  const wallById = new Map(walls.map((wall) => [wall.id, wall]));
+  const usedNames = new Set(existingRooms.map((room) => room.name));
+  const nextRooms: Room[] = [];
+
+  detection.faces.forEach((face, index) => {
+    if (face.wallIds.length < 3) return;
+    if (detection.exteriorSignatures.has(face.signature)) return;
+    const signature = roomSignatureFromWallIds(face.wallIds);
+    const existing = existingBySignature.get(signature);
+    const areaM2 = face.area / 1_000_000;
+    const roomType = existing?.roomType ?? inferRoomType(areaM2);
+    const hasWindows = face.wallIds.some((wallId) => {
+      const wall = wallById.get(wallId);
+      if (!wall) return false;
+      return wall.openings.some((opening) => opening.type === 'window');
+    });
+    const validationWarnings = buildRoomValidationWarnings({
+      areaM2,
+      roomType,
+      vertices: face.vertices,
+      hasWindows,
+    });
+
+    let roomName = existing?.name;
+    if (!roomName) {
+      roomName = `${roomType} ${index + 1}`;
+      if (usedNames.has(roomName)) {
+        roomName = `Room ${index + 1}`;
+      }
+    }
+    usedNames.add(roomName);
+
+    const room = createRoomModel({
+      vertices: face.vertices,
+      wallIds: face.wallIds,
+      name: roomName,
+      roomType,
+      perimeter: face.perimeter,
+      centroid: face.centroid,
+      finishes: existing?.finishes ?? '',
+      notes: existing?.notes ?? '',
+      fillColor: existing?.fillColor ?? roomTypeFillColor(roomType),
+      showLabel: existing?.showLabel ?? true,
+      adjacentRoomIds: existing?.adjacentRoomIds ?? [],
+      hasWindows,
+      validationWarnings,
+      isExterior: existing?.isExterior ?? false,
+      properties3D: existing?.properties3D,
+    });
+
+    if (existing) {
+      room.id = existing.id;
+    }
+
+    nextRooms.push(room);
+  });
+
+  const roomIdsByWall = new Map<string, string[]>();
+  nextRooms.forEach((room) => {
+    room.wallIds.forEach((wallId) => {
+      roomIdsByWall.set(wallId, [...(roomIdsByWall.get(wallId) ?? []), room.id]);
+    });
+  });
+  nextRooms.forEach((room) => {
+    const adjacent = new Set<string>();
+    room.wallIds.forEach((wallId) => {
+      const linked = roomIdsByWall.get(wallId) ?? [];
+      linked.forEach((roomId) => {
+        if (roomId !== room.id) adjacent.add(roomId);
+      });
+    });
+    room.adjacentRoomIds = [...adjacent];
+  });
+
+  return nextRooms;
+}
+
+function wallLength(wall: Wall): number {
+  return GeometryEngine.wallLength(wall);
+}
+
+function wallMidpoint(wall: Wall): Point2D {
+  return {
+    x: (wall.startPoint.x + wall.endPoint.x) / 2,
+    y: (wall.startPoint.y + wall.endPoint.y) / 2,
+  };
+}
+
+function wallLinearMode(wall: Wall): 'horizontal' | 'vertical' | 'aligned' {
+  const dx = Math.abs(wall.endPoint.x - wall.startPoint.x);
+  const dy = Math.abs(wall.endPoint.y - wall.startPoint.y);
+  if (dx >= dy * 1.2) return 'horizontal';
+  if (dy >= dx * 1.2) return 'vertical';
+  return 'aligned';
+}
+
+function buildExteriorWallSet(walls: Wall[], rooms: Room[]): Set<string> {
+  const interiorRoomWallRefCount = new Map<string, number>();
+  rooms.forEach((room) => {
+    if (room.isExterior) return;
+    room.wallIds.forEach((wallId) => {
+      interiorRoomWallRefCount.set(wallId, (interiorRoomWallRefCount.get(wallId) ?? 0) + 1);
+    });
+  });
+  const exterior = new Set<string>();
+  walls.forEach((wall) => {
+    const count = interiorRoomWallRefCount.get(wall.id) ?? 0;
+    if (count <= 1) {
+      exterior.add(wall.id);
+    }
+  });
+  return exterior;
+}
+
+function buildAutoWallDimensions(
+  walls: Wall[],
+  rooms: Room[],
+  settings: DimensionSettings
+): Omit<Dimension2D, 'id'>[] {
+  const exteriorWallIds = buildExteriorWallSet(walls, rooms);
+  const exteriorWalls = walls.filter((wall) => exteriorWallIds.has(wall.id));
+  if (exteriorWalls.length === 0) return [];
+
+  const horizontal: Wall[] = [];
+  const vertical: Wall[] = [];
+  const aligned: Wall[] = [];
+
+  exteriorWalls.forEach((wall) => {
+    const mode = wallLinearMode(wall);
+    if (mode === 'horizontal') horizontal.push(wall);
+    else if (mode === 'vertical') vertical.push(wall);
+    else aligned.push(wall);
+  });
+
+  horizontal.sort((a, b) => wallMidpoint(a).y - wallMidpoint(b).y || wallMidpoint(a).x - wallMidpoint(b).x);
+  vertical.sort((a, b) => wallMidpoint(a).x - wallMidpoint(b).x || wallMidpoint(a).y - wallMidpoint(b).y);
+  aligned.sort((a, b) => wallLength(b) - wallLength(a));
+
+  const dimensions: Omit<Dimension2D, 'id'>[] = [];
+  const offsetBase = Math.max(120, settings.defaultOffset);
+  const offsetStep = 120;
+
+  horizontal.forEach((wall, index) => {
+    dimensions.push({
+      type: 'linear',
+      linearMode: 'horizontal',
+      points: [{ ...wall.startPoint }, { ...wall.endPoint }],
+      value: Math.abs(wall.endPoint.x - wall.startPoint.x),
+      unit: settings.unitSystem === 'imperial' ? 'ft-in' : 'mm',
+      textPosition: wallMidpoint(wall),
+      visible: true,
+      style: settings.style,
+      precision: settings.precision,
+      displayFormat: settings.displayFormat,
+      offset: offsetBase + index * offsetStep,
+      linkedWallIds: [wall.id],
+      anchors: [
+        { kind: 'wall-endpoint', wallId: wall.id, endpoint: 'start' },
+        { kind: 'wall-endpoint', wallId: wall.id, endpoint: 'end' },
+      ],
+      isAssociative: true,
+      chainGroupId: 'auto-horizontal',
+      baselineGroupId: 'auto-exterior',
+    });
+  });
+
+  vertical.forEach((wall, index) => {
+    dimensions.push({
+      type: 'linear',
+      linearMode: 'vertical',
+      points: [{ ...wall.startPoint }, { ...wall.endPoint }],
+      value: Math.abs(wall.endPoint.y - wall.startPoint.y),
+      unit: settings.unitSystem === 'imperial' ? 'ft-in' : 'mm',
+      textPosition: wallMidpoint(wall),
+      visible: true,
+      style: settings.style,
+      precision: settings.precision,
+      displayFormat: settings.displayFormat,
+      offset: offsetBase + index * offsetStep,
+      linkedWallIds: [wall.id],
+      anchors: [
+        { kind: 'wall-endpoint', wallId: wall.id, endpoint: 'start' },
+        { kind: 'wall-endpoint', wallId: wall.id, endpoint: 'end' },
+      ],
+      isAssociative: true,
+      chainGroupId: 'auto-vertical',
+      baselineGroupId: 'auto-exterior',
+    });
+  });
+
+  aligned.forEach((wall, index) => {
+    dimensions.push({
+      type: 'aligned',
+      linearMode: 'aligned',
+      points: [{ ...wall.startPoint }, { ...wall.endPoint }],
+      value: wallLength(wall),
+      unit: settings.unitSystem === 'imperial' ? 'ft-in' : 'mm',
+      textPosition: wallMidpoint(wall),
+      visible: true,
+      style: settings.style,
+      precision: settings.precision,
+      displayFormat: settings.displayFormat,
+      offset: offsetBase + index * offsetStep,
+      linkedWallIds: [wall.id],
+      anchors: [
+        { kind: 'wall-endpoint', wallId: wall.id, endpoint: 'start' },
+        { kind: 'wall-endpoint', wallId: wall.id, endpoint: 'end' },
+      ],
+      isAssociative: true,
+      baselineGroupId: 'auto-exterior',
+    });
+  });
+
+  return dimensions;
+}
+
+function buildRoomAreaDimensions(
+  rooms: Room[],
+  settings: DimensionSettings
+): Omit<Dimension2D, 'id'>[] {
+  return rooms
+    .filter((room) => !room.isExterior)
+    .map((room) => ({
+      type: 'area',
+      points: [{ ...room.centroid }],
+      value: room.area,
+      unit: settings.unitSystem === 'imperial' ? 'ft-in' : 'mm',
+      textPosition: { ...room.centroid },
+      visible: true,
+      style: settings.style,
+      precision: settings.precision,
+      displayFormat: settings.displayFormat,
+      linkedRoomId: room.id,
+      showPerimeter: settings.showAreaPerimeter,
+      isAssociative: true,
+    }));
+}
+
+function normalizeDimensionPayload(
+  dimension: Omit<Dimension2D, 'id'> | Dimension2D,
+  settings: DimensionSettings
+): Omit<Dimension2D, 'id'> {
+  const { id: _dimensionId, ...payload } = dimension as Dimension2D;
+  void _dimensionId;
+  const points = Array.isArray(dimension.points)
+    ? dimension.points.map((point) => ({ ...point }))
+    : [];
+  const safeTextPosition = payload.textPosition
+    ? { ...payload.textPosition }
+    : points[0]
+      ? { ...points[0] }
+      : { x: 0, y: 0 };
+  const precision = payload.precision ?? settings.precision;
+
+  return {
+    ...payload,
+    points,
+    textPosition: safeTextPosition,
+    visible: payload.visible ?? true,
+    style: payload.style ?? settings.style,
+    precision: precision === 0 || precision === 1 || precision === 2 ? precision : settings.precision,
+    displayFormat: payload.displayFormat ?? settings.displayFormat,
+    offset: Number.isFinite(payload.offset) ? payload.offset : settings.defaultOffset,
+    textPositionLocked: payload.textPositionLocked ?? false,
+  };
+}
 
 // =============================================================================
 // Store Interface
@@ -55,6 +651,7 @@ import {
 export interface DrawingState {
   // Drawing Elements
   dimensions: Dimension2D[];
+  dimensionSettings: DimensionSettings;
   annotations: Annotation2D[];
   sketches: Sketch2D[];
   guides: Guide[];
@@ -63,8 +660,16 @@ export interface DrawingState {
 
   // Wall State
   walls: Wall[];
+  rooms: Room[];
+  materialLibrary: typeof DEFAULT_ARCHITECTURAL_MATERIALS;
+  hvacDesignConditions: HvacDesignConditions;
   wallDrawingState: WallDrawingState;
   wallSettings: WallSettings;
+  sectionLines: SectionLine[];
+  sectionLineDrawingState: SectionLineDrawingState;
+  elevationViews: ElevationView[];
+  activeElevationViewId: string | null;
+  elevationSettings: ElevationSettings;
 
   // Import State
   importedDrawing: ImportedDrawing | null;
@@ -128,9 +733,12 @@ export interface DrawingState {
   clearDetectedElements: () => void;
 
   // Actions - Dimensions
-  addDimension: (dimension: Omit<Dimension2D, 'id'>) => string;
-  updateDimension: (id: string, data: Partial<Dimension2D>) => void;
+  addDimension: (dimension: Omit<Dimension2D, 'id'>, options?: { skipHistory?: boolean }) => string;
+  updateDimension: (id: string, data: Partial<Dimension2D>, options?: { skipHistory?: boolean }) => void;
   deleteDimension: (id: string) => void;
+  setDimensionSettings: (settings: Partial<DimensionSettings>) => void;
+  autoDimensionExteriorWalls: () => void;
+  addAreaDimensions: () => void;
 
   // Actions - Annotations
   addAnnotation: (annotation: Omit<Annotation2D, 'id'>) => string;
@@ -154,14 +762,56 @@ export interface DrawingState {
 
   // Actions - Walls
   addWall: (params: CreateWallParams) => string;
-  updateWall: (id: string, updates: Partial<Wall>) => void;
+  updateWall: (
+    id: string,
+    updates: Partial<Wall>,
+    options?: { skipHistory?: boolean; source?: 'ui' | 'drag'; skipRoomDetection?: boolean }
+  ) => void;
+  updateWall3DAttributes: (id: string, updates: Partial<Wall3D>) => void;
   deleteWall: (id: string) => void;
   getWall: (id: string) => Wall | undefined;
+  addRoom: (params: {
+    vertices: Point2D[];
+    wallIds: string[];
+    name?: string;
+    roomType?: RoomType;
+    perimeter?: number;
+    centroid?: Point2D;
+    finishes?: string;
+    notes?: string;
+    fillColor?: string;
+    showLabel?: boolean;
+    adjacentRoomIds?: string[];
+    hasWindows?: boolean;
+    validationWarnings?: string[];
+    isExterior?: boolean;
+    properties3D?: Partial<Room3D>;
+  }) => string;
+  updateRoom: (id: string, updates: Partial<Room>) => void;
+  updateRoom3DAttributes: (id: string, updates: Partial<Room3D>) => void;
+  setHvacDesignConditions: (updates: Partial<HvacDesignConditions>) => void;
+  applyRoomTemplateToSelectedRooms: (templateId: string) => void;
+  deleteRoom: (id: string) => void;
+  getRoom: (id: string) => Room | undefined;
+  moveRoom: (id: string, delta: Point2D, options?: { skipHistory?: boolean }) => void;
+  detectRooms: (options?: { debounce?: boolean }) => void;
   startWallDrawing: (startPoint: Point2D) => void;
   updateWallPreview: (currentPoint: Point2D) => void;
   commitWall: () => string | null;
   cancelWallDrawing: () => void;
   setChainMode: (enabled: boolean) => void;
+  startSectionLineDrawing: (startPoint: Point2D) => void;
+  updateSectionLinePreview: (currentPoint: Point2D) => void;
+  commitSectionLine: () => string | null;
+  cancelSectionLineDrawing: () => void;
+  setSectionLineDirection: (direction: SectionLineDirection) => void;
+  flipSectionLineDirection: (sectionLineId: string) => void;
+  updateSectionLine: (id: string, updates: Partial<SectionLine>) => void;
+  deleteSectionLine: (id: string) => void;
+  setElevationSettings: (settings: Partial<ElevationSettings>) => void;
+  setActiveElevationView: (id: string | null) => void;
+  generateElevationForSection: (sectionLineId: string) => void;
+  regenerateElevations: (options?: { debounce?: boolean }) => void;
   connectWalls: (wallId: string, otherWallId: string) => void;
   disconnectWall: (wallId: string, otherWallId: string) => void;
   setWallSettings: (settings: Partial<WallSettings>) => void;
@@ -262,6 +912,7 @@ export const useDrawingStore = create<DrawingState>()(
     (set, get) => ({
       // Initial State
       dimensions: [],
+      dimensionSettings: { ...DEFAULT_DIMENSION_SETTINGS },
       annotations: [],
       sketches: [],
       guides: [],
@@ -270,8 +921,22 @@ export const useDrawingStore = create<DrawingState>()(
 
       // Wall State
       walls: [],
+      rooms: [],
+      materialLibrary: [...DEFAULT_ARCHITECTURAL_MATERIALS],
+      hvacDesignConditions: { ...DEFAULT_HVAC_DESIGN_CONDITIONS },
       wallDrawingState: { ...DEFAULT_WALL_DRAWING_STATE },
       wallSettings: { ...DEFAULT_WALL_SETTINGS },
+      sectionLines: [],
+      sectionLineDrawingState: { ...DEFAULT_SECTION_LINE_DRAWING_STATE },
+      elevationViews: INITIAL_ELEVATION_VIEWS.map((view) => ({
+        ...view,
+        walls: view.walls.map((projection) => ({
+          ...projection,
+          openings: projection.openings.map((opening) => ({ ...opening })),
+        })),
+      })),
+      activeElevationViewId: INITIAL_ELEVATION_VIEWS[0]?.id ?? null,
+      elevationSettings: { ...DEFAULT_ELEVATION_SETTINGS },
       importedDrawing: null,
       importProgress: 0,
       isProcessing: false,
@@ -356,23 +1021,92 @@ export const useDrawingStore = create<DrawingState>()(
       clearGuides: () => set({ guides: [] }),
 
       // Dimension Actions
-      addDimension: (dimension) => {
+      addDimension: (dimension, options) => {
         const id = generateId();
-        set((state) => ({ dimensions: [...state.dimensions, { ...dimension, id }] }));
-        get().saveToHistory('Add dimension');
+        const normalized = normalizeDimensionPayload(dimension, get().dimensionSettings);
+        set((state) => ({ dimensions: [...state.dimensions, { ...normalized, id }] }));
+        if (!options?.skipHistory) {
+          get().saveToHistory('Add dimension');
+        }
         return id;
       },
 
-      updateDimension: (id, data) => {
+      updateDimension: (id, data, options) => {
         set((state) => ({
-          dimensions: state.dimensions.map((d) => d.id === id ? { ...d, ...data } : d)
+          dimensions: state.dimensions.map((d) => {
+            if (d.id !== id) return d;
+            const merged = { ...d, ...data };
+            return {
+              ...normalizeDimensionPayload(
+                merged,
+                state.dimensionSettings
+              ),
+              id: d.id,
+            };
+          })
         }));
-        get().saveToHistory('Update dimension');
+        if (!options?.skipHistory) {
+          get().saveToHistory('Update dimension');
+        }
       },
 
       deleteDimension: (id) => {
         set((state) => ({ dimensions: state.dimensions.filter((d) => d.id !== id) }));
         get().saveToHistory('Delete dimension');
+      },
+
+      setDimensionSettings: (settings) => {
+        set((state) => ({
+          dimensionSettings: {
+            ...state.dimensionSettings,
+            ...settings,
+            precision:
+              settings.precision === 0 || settings.precision === 1 || settings.precision === 2
+                ? settings.precision
+                : state.dimensionSettings.precision,
+            defaultOffset: settings.defaultOffset !== undefined
+              ? Math.max(20, settings.defaultOffset)
+              : state.dimensionSettings.defaultOffset,
+            extensionGap: settings.extensionGap !== undefined
+              ? Math.max(0, settings.extensionGap)
+              : state.dimensionSettings.extensionGap,
+            extensionBeyond: settings.extensionBeyond !== undefined
+              ? Math.max(0, settings.extensionBeyond)
+              : state.dimensionSettings.extensionBeyond,
+          },
+        }));
+      },
+
+      autoDimensionExteriorWalls: () => {
+        const { walls, rooms, dimensionSettings, dimensions } = get();
+        const autoLinear = buildAutoWallDimensions(walls, rooms, dimensionSettings);
+        const autoArea = buildRoomAreaDimensions(rooms, dimensionSettings);
+        const preserved = dimensions.filter((dimension) => !dimension.baselineGroupId && !dimension.linkedRoomId);
+        set({
+          dimensions: [
+            ...preserved,
+            ...autoLinear.map((dimension) => ({ ...normalizeDimensionPayload(dimension, dimensionSettings), id: generateId() })),
+            ...autoArea.map((dimension) => ({ ...normalizeDimensionPayload(dimension, dimensionSettings), id: generateId() })),
+          ],
+        });
+        get().saveToHistory('Auto dimension exterior walls');
+        get().setProcessingStatus('Auto dimensions added (walls + room areas).', false);
+      },
+
+      addAreaDimensions: () => {
+        const { rooms, dimensionSettings } = get();
+        const areaDimensions = buildRoomAreaDimensions(rooms, dimensionSettings);
+        set((state) => ({
+          dimensions: [
+            ...state.dimensions.filter((dimension) => !dimension.linkedRoomId),
+            ...areaDimensions.map((dimension) => ({
+              ...normalizeDimensionPayload(dimension, dimensionSettings),
+              id: generateId(),
+            })),
+          ],
+        }));
+        get().saveToHistory('Add room area dimensions');
+        get().setProcessingStatus('Room area labels updated.', false);
       },
 
       // Annotation Actions
@@ -436,15 +1170,303 @@ export const useDrawingStore = create<DrawingState>()(
       },
 
       // Wall Actions
+      detectRooms: (options) => {
+        const runDetection = () => {
+          set((state) => {
+            const topology = roomTopologyHash(state.walls);
+            if (topology === lastRoomTopologyHash) {
+              return state;
+            }
+            const detectedRooms = buildAutoDetectedRooms(state.walls, state.rooms);
+            lastRoomTopologyHash = topology;
+            return {
+              rooms: detectedRooms,
+            };
+          });
+        };
+
+        if (options?.debounce) {
+          if (roomDetectionTimer) {
+            clearTimeout(roomDetectionTimer);
+          }
+          roomDetectionTimer = setTimeout(() => {
+            roomDetectionTimer = null;
+            runDetection();
+          }, ROOM_DETECTION_DEBOUNCE_MS);
+          return;
+        }
+
+        if (roomDetectionTimer) {
+          clearTimeout(roomDetectionTimer);
+          roomDetectionTimer = null;
+        }
+        runDetection();
+      },
+
+      regenerateElevations: (options) => {
+        const runRegeneration = () => {
+          set((state) => {
+            const nextViews = regenerateElevationViews(
+              state.walls,
+              state.sectionLines,
+              state.elevationViews,
+              state.elevationSettings
+            );
+            const nextActiveViewId =
+              state.activeElevationViewId &&
+              nextViews.some((view) => view.id === state.activeElevationViewId)
+                ? state.activeElevationViewId
+                : nextViews[0]?.id ?? null;
+            return {
+              elevationViews: nextViews,
+              activeElevationViewId: nextActiveViewId,
+            };
+          });
+        };
+
+        if (options?.debounce) {
+          if (elevationRegenTimer) {
+            clearTimeout(elevationRegenTimer);
+          }
+          elevationRegenTimer = setTimeout(() => {
+            elevationRegenTimer = null;
+            runRegeneration();
+          }, ELEVATION_REGEN_DEBOUNCE_MS);
+          return;
+        }
+
+        if (elevationRegenTimer) {
+          clearTimeout(elevationRegenTimer);
+          elevationRegenTimer = null;
+        }
+
+        runRegeneration();
+      },
+
+      setElevationSettings: (settings) => {
+        set((state) => ({
+          elevationSettings: {
+            ...state.elevationSettings,
+            ...settings,
+            defaultGridIncrementMm: settings.defaultGridIncrementMm !== undefined
+              ? Math.max(100, settings.defaultGridIncrementMm)
+              : state.elevationSettings.defaultGridIncrementMm,
+            defaultScale: settings.defaultScale !== undefined
+              ? Math.max(1, settings.defaultScale)
+              : state.elevationSettings.defaultScale,
+            sunAngleDeg: settings.sunAngleDeg !== undefined
+              ? clampValue(settings.sunAngleDeg, 0, 360)
+              : state.elevationSettings.sunAngleDeg,
+          },
+        }));
+        get().regenerateElevations();
+      },
+
+      setActiveElevationView: (id) =>
+        set((state) => ({
+          activeElevationViewId: id && state.elevationViews.some((view) => view.id === id) ? id : null,
+        })),
+
+      startSectionLineDrawing: (startPoint) => {
+        const sectionIndex = get().sectionLines.length + 1;
+        const nextKind = get().sectionLineDrawingState.nextKind;
+        const nextLabel = sectionLabelForIndex(nextKind, sectionIndex);
+        set((state) => ({
+          sectionLineDrawingState: {
+            ...state.sectionLineDrawingState,
+            isDrawing: true,
+            startPoint: { ...startPoint },
+            currentPoint: { ...startPoint },
+            nextLabel,
+          },
+        }));
+      },
+
+      updateSectionLinePreview: (currentPoint) =>
+        set((state) => ({
+          sectionLineDrawingState: {
+            ...state.sectionLineDrawingState,
+            currentPoint: { ...currentPoint },
+          },
+        })),
+
+      cancelSectionLineDrawing: () =>
+        set((state) => ({
+          sectionLineDrawingState: {
+            ...DEFAULT_SECTION_LINE_DRAWING_STATE,
+            direction: state.sectionLineDrawingState.direction,
+            nextKind: state.sectionLineDrawingState.nextKind,
+          },
+        })),
+
+      setSectionLineDirection: (direction) =>
+        set((state) => ({
+          sectionLineDrawingState: {
+            ...state.sectionLineDrawingState,
+            direction: direction === -1 ? -1 : 1,
+          },
+        })),
+
+      commitSectionLine: () => {
+        const { sectionLineDrawingState, wallSettings } = get();
+        if (
+          !sectionLineDrawingState.isDrawing ||
+          !sectionLineDrawingState.startPoint ||
+          !sectionLineDrawingState.currentPoint
+        ) {
+          return null;
+        }
+
+        const sectionLength = wallLengthMm(
+          sectionLineDrawingState.startPoint,
+          sectionLineDrawingState.currentPoint
+        );
+        if (sectionLength < MIN_WALL_LENGTH) {
+          return null;
+        }
+
+        const sectionIndex = get().sectionLines.length + 1;
+        const fallbackLabel = sectionLabelForIndex(sectionLineDrawingState.nextKind, sectionIndex);
+        const label =
+          sectionLineDrawingState.nextLabel.trim().length > 0
+            ? sectionLineDrawingState.nextLabel.trim()
+            : fallbackLabel;
+
+        const sectionLine: SectionLine = {
+          id: generateId(),
+          label,
+          name: label,
+          kind: sectionLineDrawingState.nextKind,
+          startPoint: { ...sectionLineDrawingState.startPoint },
+          endPoint: { ...sectionLineDrawingState.currentPoint },
+          direction: sectionLineDrawingState.direction,
+          color: DEFAULT_SECTION_LINE_COLOR,
+          depthMm: DEFAULT_SECTION_LINE_DEPTH_MM,
+          locked: false,
+          showReferenceIndicators: wallSettings.showSectionReferenceLines,
+        };
+
+        set((state) => ({
+          sectionLines: [...state.sectionLines, sectionLine],
+          sectionLineDrawingState: {
+            ...DEFAULT_SECTION_LINE_DRAWING_STATE,
+            direction: state.sectionLineDrawingState.direction,
+            nextKind: state.sectionLineDrawingState.nextKind,
+            nextLabel: sectionLabelForIndex(state.sectionLineDrawingState.nextKind, state.sectionLines.length + 2),
+          },
+        }));
+        get().generateElevationForSection(sectionLine.id);
+        get().saveToHistory('Add section line');
+        return sectionLine.id;
+      },
+
+      generateElevationForSection: (sectionLineId) => {
+        set((state) => {
+          const sectionLine = state.sectionLines.find((entry) => entry.id === sectionLineId);
+          if (!sectionLine) return state;
+
+          const existingCustom = state.elevationViews.find(
+            (view) => view.kind === 'custom' && view.sectionLineId === sectionLineId
+          ) ?? null;
+          const customView = generateCustomElevationView(
+            sectionLine,
+            state.walls,
+            existingCustom,
+            state.elevationSettings
+          );
+          const standardViews = createStandardElevationViews(
+            state.walls,
+            state.elevationViews,
+            state.elevationSettings
+          );
+          const customViews = state.elevationViews.filter(
+            (view) =>
+              view.kind === 'custom' &&
+              view.sectionLineId !== sectionLineId &&
+              view.sectionLineId &&
+              state.sectionLines.some((entry) => entry.id === view.sectionLineId)
+          );
+          return {
+            elevationViews: [...standardViews, ...customViews, customView],
+            activeElevationViewId: customView.id,
+          };
+        });
+      },
+
+      updateSectionLine: (id, updates) => {
+        const nextUpdates: Partial<SectionLine> = { ...updates };
+        if (nextUpdates.direction !== undefined) {
+          nextUpdates.direction = nextUpdates.direction === -1 ? -1 : 1;
+        }
+        if (nextUpdates.depthMm !== undefined) {
+          nextUpdates.depthMm = Math.max(100, nextUpdates.depthMm);
+        }
+        set((state) => ({
+          sectionLines: state.sectionLines.map((line) =>
+            line.id === id
+              ? {
+                ...line,
+                ...nextUpdates,
+              }
+              : line
+          ),
+        }));
+        get().generateElevationForSection(id);
+        get().saveToHistory('Update section line');
+      },
+
+      flipSectionLineDirection: (sectionLineId) => {
+        set((state) => ({
+          sectionLines: state.sectionLines.map((line) =>
+            line.id === sectionLineId
+              ? { ...line, direction: line.direction === 1 ? -1 : 1 }
+              : line
+          ),
+        }));
+        get().generateElevationForSection(sectionLineId);
+        get().saveToHistory('Flip section direction');
+      },
+
+      deleteSectionLine: (id) => {
+        set((state) => {
+          const nextSectionLines = state.sectionLines.filter((line) => line.id !== id);
+          const nextViews = state.elevationViews.filter((view) => view.sectionLineId !== id);
+          const nextActive =
+            state.activeElevationViewId &&
+            nextViews.some((view) => view.id === state.activeElevationViewId)
+              ? state.activeElevationViewId
+              : nextViews[0]?.id ?? null;
+          return {
+            sectionLines: nextSectionLines,
+            elevationViews: nextViews,
+            activeElevationViewId: nextActive,
+          };
+        });
+        get().regenerateElevations();
+        get().saveToHistory('Delete section line');
+      },
+
       addWall: (params) => {
         const id = generateId();
-        const thickness = params.thickness ?? 150;
+        const thickness = clampThickness(params.thickness ?? 150);
         const material = params.material ?? 'brick';
         const layer = params.layer ?? 'partition';
+        const existingWalls = get().walls;
+        const trimmedEndpoints = autoTrimWallEndpoints(
+          params.startPoint,
+          params.endPoint,
+          existingWalls
+        );
+        const connectedWallIds = Array.from(
+          new Set([
+            ...findWallsTouchingPoint(trimmedEndpoints.startPoint, existingWalls),
+            ...findWallsTouchingPoint(trimmedEndpoints.endPoint, existingWalls),
+          ])
+        );
 
         // Compute offset lines
-        const dx = params.endPoint.x - params.startPoint.x;
-        const dy = params.endPoint.y - params.startPoint.y;
+        const dx = trimmedEndpoints.endPoint.x - trimmedEndpoints.startPoint.x;
+        const dy = trimmedEndpoints.endPoint.y - trimmedEndpoints.startPoint.y;
         const length = Math.sqrt(dx * dx + dy * dy) || 1;
         const perpX = -dy / length;
         const perpY = dx / length;
@@ -452,37 +1474,100 @@ export const useDrawingStore = create<DrawingState>()(
 
         const wall: Wall = {
           id,
-          startPoint: { ...params.startPoint },
-          endPoint: { ...params.endPoint },
+          startPoint: { ...trimmedEndpoints.startPoint },
+          endPoint: { ...trimmedEndpoints.endPoint },
           thickness,
           material,
           layer,
           interiorLine: {
-            start: { x: params.startPoint.x + perpX * halfThickness, y: params.startPoint.y + perpY * halfThickness },
-            end: { x: params.endPoint.x + perpX * halfThickness, y: params.endPoint.y + perpY * halfThickness },
+            start: {
+              x: trimmedEndpoints.startPoint.x + perpX * halfThickness,
+              y: trimmedEndpoints.startPoint.y + perpY * halfThickness,
+            },
+            end: {
+              x: trimmedEndpoints.endPoint.x + perpX * halfThickness,
+              y: trimmedEndpoints.endPoint.y + perpY * halfThickness,
+            },
           },
           exteriorLine: {
-            start: { x: params.startPoint.x - perpX * halfThickness, y: params.startPoint.y - perpY * halfThickness },
-            end: { x: params.endPoint.x - perpX * halfThickness, y: params.endPoint.y - perpY * halfThickness },
+            start: {
+              x: trimmedEndpoints.startPoint.x - perpX * halfThickness,
+              y: trimmedEndpoints.startPoint.y - perpY * halfThickness,
+            },
+            end: {
+              x: trimmedEndpoints.endPoint.x - perpX * halfThickness,
+              y: trimmedEndpoints.endPoint.y - perpY * halfThickness,
+            },
           },
-          connectedWalls: [],
+          connectedWalls: connectedWallIds,
           openings: [],
-          properties3D: null,
+          properties3D: { ...DEFAULT_WALL_3D },
         };
+        const materialId = getDefaultMaterialIdForWallMaterial(wall.material);
+        const boundWall = bindWallAttributes(wall, {
+          materialId,
+          height: get().wallSettings.defaultHeight ?? DEFAULT_WALL_HEIGHT,
+          layerCount: get().wallSettings.defaultLayerCount ?? DEFAULT_WALL_LAYER_COUNT,
+          thermalResistance: getArchitecturalMaterial(materialId)?.thermalResistance ?? DEFAULT_WALL_3D.thermalResistance,
+        });
 
-        set((state) => ({ walls: [...state.walls, wall] }));
+        set((state) => ({
+          walls: [
+            ...state.walls.map((existingWall) => {
+              if (
+                connectedWallIds.includes(existingWall.id) &&
+                !existingWall.connectedWalls.includes(id)
+              ) {
+                return {
+                  ...existingWall,
+                  connectedWalls: [...existingWall.connectedWalls, id],
+                };
+              }
+              return existingWall;
+            }),
+            boundWall,
+          ],
+        }));
+        attributeChangeObserver.notify({
+          entity: 'wall',
+          entityId: boundWall.id,
+          previousValue: null,
+          nextValue: boundWall.properties3D,
+          source: 'binding',
+          timestamp: Date.now(),
+        });
+        get().detectRooms();
+        get().regenerateElevations();
         get().saveToHistory('Add wall');
         return id;
       },
 
-      updateWall: (id, updates) => {
-        set((state) => ({
-          walls: state.walls.map((wall) => {
+      updateWall: (id, updates, options) => {
+        const safeUpdates = updates.thickness !== undefined
+          ? { ...updates, thickness: clampThickness(updates.thickness) }
+          : updates;
+        let previousValue: Wall3D | null = null;
+        let nextValue: Wall3D | null = null;
+        const geometryChanged = Boolean(
+          safeUpdates.startPoint ||
+          safeUpdates.endPoint ||
+          safeUpdates.thickness !== undefined ||
+          safeUpdates.openings
+        );
+        const elevationChanged = Boolean(
+          geometryChanged ||
+          safeUpdates.material !== undefined ||
+          safeUpdates.layer !== undefined
+        );
+
+        set((state) => {
+          const nextWalls = state.walls.map((wall) => {
             if (wall.id !== id) return wall;
-            const updatedWall = { ...wall, ...updates };
+            previousValue = wall.properties3D;
+            const updatedWall = { ...wall, ...safeUpdates };
 
             // Recompute geometry if relevant fields changed
-            if (updates.startPoint || updates.endPoint || updates.thickness) {
+            if (safeUpdates.startPoint || safeUpdates.endPoint || safeUpdates.thickness) {
               const dx = updatedWall.endPoint.x - updatedWall.startPoint.x;
               const dy = updatedWall.endPoint.y - updatedWall.startPoint.y;
               const length = Math.sqrt(dx * dx + dy * dy) || 1;
@@ -500,10 +1585,78 @@ export const useDrawingStore = create<DrawingState>()(
               };
             }
 
-            return updatedWall;
-          }),
-        }));
-        get().saveToHistory('Update wall');
+            const reboundWall = bindWallAttributes(updatedWall, updatedWall.properties3D);
+            nextValue = reboundWall.properties3D;
+            return reboundWall;
+          });
+          return { walls: nextWalls };
+        });
+        if (nextValue) {
+          attributeChangeObserver.notify({
+            entity: 'wall',
+            entityId: id,
+            previousValue,
+            nextValue,
+            source: options?.source ?? 'ui',
+            timestamp: Date.now(),
+          });
+        }
+        if (!options?.skipHistory) {
+          get().saveToHistory('Update wall');
+        }
+        if (geometryChanged && !options?.skipRoomDetection) {
+          get().detectRooms({ debounce: options?.source === 'drag' });
+        }
+        if (elevationChanged) {
+          get().regenerateElevations({ debounce: options?.source === 'drag' });
+        }
+      },
+
+      updateWall3DAttributes: (id, updates) => {
+        let previousValue: Wall3D | null = null;
+        let nextValue: Wall3D | null = null;
+
+        set((state) => {
+          const nextWalls = state.walls.map((wall) => {
+            if (wall.id !== id) return wall;
+            previousValue = wall.properties3D;
+
+            const merged = {
+              ...wall.properties3D,
+              ...updates,
+            };
+            const validation = validateWall3DAttributes(merged);
+            const nextWall = bindWallAttributes(
+              {
+                ...wall,
+                thickness: updates.materialId
+                  ? getArchitecturalMaterial(updates.materialId)?.defaultThicknessMm ?? wall.thickness
+                  : wall.thickness,
+                material: updates.materialId
+                  ? resolveWallMaterialFromLibrary(updates.materialId)
+                  : wall.material,
+                properties3D: validation.value,
+              },
+              validation.value
+            );
+            nextValue = nextWall.properties3D;
+            return nextWall;
+          });
+          return { walls: nextWalls };
+        });
+
+        if (nextValue) {
+          attributeChangeObserver.notify({
+            entity: 'wall',
+            entityId: id,
+            previousValue,
+            nextValue,
+            source: 'ui',
+            timestamp: Date.now(),
+          });
+        }
+        get().regenerateElevations();
+        get().saveToHistory('Update wall 3D attributes');
       },
 
       deleteWall: (id) => {
@@ -514,11 +1667,206 @@ export const useDrawingStore = create<DrawingState>()(
               ...wall,
               connectedWalls: wall.connectedWalls.filter((cid) => cid !== id),
             })),
+          rooms: state.rooms.map((room) => ({
+            ...room,
+            wallIds: room.wallIds.filter((wallId) => wallId !== id),
+          })),
         }));
+        get().detectRooms();
+        get().regenerateElevations();
         get().saveToHistory('Delete wall');
       },
 
       getWall: (id) => get().walls.find((w) => w.id === id),
+
+      addRoom: (params) => {
+        const room = createRoomModel(params);
+        set((state) => ({
+          rooms: [...state.rooms, room],
+        }));
+        attributeChangeObserver.notify({
+          entity: 'room',
+          entityId: room.id,
+          previousValue: null,
+          nextValue: room.properties3D,
+          source: 'binding',
+          timestamp: Date.now(),
+        });
+        get().saveToHistory('Add room');
+        return room.id;
+      },
+
+      updateRoom: (id, updates) => {
+        let previousValue: Room3D | null = null;
+        let nextValue: Room3D | null = null;
+        set((state) => ({
+          rooms: state.rooms.map((room) => {
+            if (room.id !== id) return room;
+            previousValue = room.properties3D;
+            const mergedRoom = {
+              ...room,
+              ...updates,
+            };
+            const reboundRoom = bindRoomAttributes(mergedRoom, mergedRoom.properties3D);
+            nextValue = reboundRoom.properties3D;
+            return reboundRoom;
+          }),
+        }));
+        if (nextValue) {
+          attributeChangeObserver.notify({
+            entity: 'room',
+            entityId: id,
+            previousValue,
+            nextValue,
+            source: 'ui',
+            timestamp: Date.now(),
+          });
+        }
+        get().saveToHistory('Update room');
+      },
+
+      updateRoom3DAttributes: (id, updates) => {
+        let previousValue: Room3D | null = null;
+        let nextValue: Room3D | null = null;
+        set((state) => ({
+          rooms: state.rooms.map((room) => {
+            if (room.id !== id) return room;
+            previousValue = room.properties3D;
+            const validation = validateRoom3DAttributes({
+              ...room.properties3D,
+              ...updates,
+            });
+            const reboundRoom = bindRoomAttributes(
+              {
+                ...room,
+                properties3D: validation.value,
+              },
+              validation.value
+            );
+            nextValue = reboundRoom.properties3D;
+            return reboundRoom;
+          }),
+        }));
+        if (nextValue) {
+          attributeChangeObserver.notify({
+            entity: 'room',
+            entityId: id,
+            previousValue,
+            nextValue,
+            source: 'ui',
+            timestamp: Date.now(),
+          });
+        }
+        get().saveToHistory('Update room 3D attributes');
+      },
+
+      setHvacDesignConditions: (updates) => {
+        set((state) => ({
+          hvacDesignConditions: {
+            ...state.hvacDesignConditions,
+            ...updates,
+            peakCoolingHour: updates.peakCoolingHour !== undefined
+              ? clampValue(updates.peakCoolingHour, 0, 23)
+              : state.hvacDesignConditions.peakCoolingHour,
+            internalGainDiversityFactor: updates.internalGainDiversityFactor !== undefined
+              ? clampValue(updates.internalGainDiversityFactor, 0, 1)
+              : state.hvacDesignConditions.internalGainDiversityFactor,
+            defaultWindowShgc: updates.defaultWindowShgc !== undefined
+              ? clampValue(updates.defaultWindowShgc, 0, 1)
+              : state.hvacDesignConditions.defaultWindowShgc,
+            seasonalVariation: {
+              ...state.hvacDesignConditions.seasonalVariation,
+              ...(updates.seasonalVariation ?? {}),
+            },
+          },
+        }));
+      },
+
+      applyRoomTemplateToSelectedRooms: (templateId) => {
+        const template = DEFAULT_ROOM_HVAC_TEMPLATES.find((entry) => entry.id === templateId);
+        if (!template) return;
+        const selectedSet = new Set(get().selectedElementIds);
+        let affectedCount = 0;
+
+        set((state) => ({
+          rooms: state.rooms.map((room) => {
+            if (!selectedSet.has(room.id)) return room;
+            affectedCount += 1;
+            const areaM2 = room.area / 1_000_000;
+            const occupancyFromDensity = template.occupantsPer10m2 > 0
+              ? (areaM2 / 10) * template.occupantsPer10m2
+              : 0;
+            const occupantCount = Math.max(1, Math.round(Math.max(template.occupantsBase, occupancyFromDensity) * 10) / 10);
+            const validation = validateRoom3DAttributes({
+              ...room.properties3D,
+              hvacTemplateId: template.id,
+              occupantCount,
+              occupancySchedule: template.schedule,
+              lightingLoadWm2: template.lightingWm2,
+              equipmentLoadWm2: template.equipmentWm2,
+              requiresExhaust: template.requiresExhaust,
+            });
+            return bindRoomAttributes(
+              {
+                ...room,
+                properties3D: validation.value,
+              },
+              validation.value
+            );
+          }),
+        }));
+
+        if (affectedCount > 0) {
+          get().saveToHistory('Apply HVAC template');
+          get().setProcessingStatus(`Applied template to ${affectedCount} room(s).`, false);
+        }
+      },
+
+      deleteRoom: (id) => {
+        const room = get().rooms.find((entry) => entry.id === id);
+        set((state) => ({
+          rooms: state.rooms.filter((room) => room.id !== id),
+        }));
+        if (room) {
+          get().setProcessingStatus(`Removed room "${room.name}". Walls were kept.`, false);
+        }
+        get().saveToHistory('Delete room');
+      },
+
+      getRoom: (id) => get().rooms.find((room) => room.id === id),
+
+      moveRoom: (id, delta, options) => {
+        const room = get().rooms.find((entry) => entry.id === id);
+        if (!room) return;
+
+        room.wallIds.forEach((wallId) => {
+          const wall = get().walls.find((entry) => entry.id === wallId);
+          if (!wall) return;
+          get().updateWall(
+            wallId,
+            {
+              startPoint: {
+                x: wall.startPoint.x + delta.x,
+                y: wall.startPoint.y + delta.y,
+              },
+              endPoint: {
+                x: wall.endPoint.x + delta.x,
+                y: wall.endPoint.y + delta.y,
+              },
+            },
+            {
+              skipHistory: true,
+              source: 'drag',
+              skipRoomDetection: true,
+            }
+          );
+        });
+
+        get().detectRooms({ debounce: options?.skipHistory });
+        if (!options?.skipHistory) {
+          get().saveToHistory('Move room');
+        }
+      },
 
       startWallDrawing: (startPoint) => {
         const { wallSettings } = get();
@@ -528,7 +1876,7 @@ export const useDrawingStore = create<DrawingState>()(
             startPoint: { ...startPoint },
             currentPoint: { ...startPoint },
             chainMode: wallSettings.chainModeEnabled,
-            previewThickness: wallSettings.defaultThickness,
+            previewThickness: clampThickness(wallSettings.defaultThickness),
             previewMaterial: wallSettings.defaultMaterial,
           },
         });
@@ -550,12 +1898,8 @@ export const useDrawingStore = create<DrawingState>()(
           return null;
         }
 
-        // Don't create zero-length walls
-        const dx = wallDrawingState.currentPoint.x - wallDrawingState.startPoint.x;
-        const dy = wallDrawingState.currentPoint.y - wallDrawingState.startPoint.y;
-        const length = Math.sqrt(dx * dx + dy * dy);
-
-        if (length < 1) {
+        const length = wallLengthMm(wallDrawingState.startPoint, wallDrawingState.currentPoint);
+        if (length < MIN_WALL_LENGTH) {
           return null;
         }
 
@@ -635,8 +1979,26 @@ export const useDrawingStore = create<DrawingState>()(
       },
 
       setWallSettings: (settings) => {
+        const safeSettings = { ...settings };
+        if (safeSettings.defaultThickness !== undefined) {
+          safeSettings.defaultThickness = clampThickness(safeSettings.defaultThickness);
+        }
+        if (safeSettings.defaultHeight !== undefined) {
+          safeSettings.defaultHeight = clampValue(
+            safeSettings.defaultHeight,
+            MIN_WALL_HEIGHT,
+            MAX_WALL_HEIGHT
+          );
+        }
+        if (safeSettings.defaultLayerCount !== undefined) {
+          safeSettings.defaultLayerCount = Math.max(1, Math.round(safeSettings.defaultLayerCount));
+        }
+        if (safeSettings.gridSize !== undefined) {
+          safeSettings.gridSize = Math.max(1, safeSettings.gridSize);
+        }
+
         set((state) => ({
-          wallSettings: { ...state.wallSettings, ...settings },
+          wallSettings: { ...state.wallSettings, ...safeSettings },
         }));
       },
 
@@ -653,7 +2015,7 @@ export const useDrawingStore = create<DrawingState>()(
         set((state) => ({
           wallDrawingState: {
             ...state.wallDrawingState,
-            previewThickness: thickness,
+            previewThickness: clampThickness(thickness),
           },
         }));
       },
@@ -699,12 +2061,20 @@ export const useDrawingStore = create<DrawingState>()(
               ...wall,
               connectedWalls: wall.connectedWalls.filter((cid) => !idsSet.has(cid)),
             })),
+          rooms: state.rooms.map((room) => ({
+            ...room,
+            wallIds: room.wallIds.filter((wallId) => !idsSet.has(wallId)),
+          })),
         }));
+        get().detectRooms();
+        get().regenerateElevations();
         get().saveToHistory('Delete walls');
       },
 
       clearAllWalls: () => {
-        set({ walls: [] });
+        set({ walls: [], rooms: [] });
+        lastRoomTopologyHash = '';
+        get().regenerateElevations();
         get().saveToHistory('Clear all walls');
       },
 
@@ -732,6 +2102,8 @@ export const useDrawingStore = create<DrawingState>()(
           ...state.sketches.map((s) => s.id),
           ...state.symbols.map((s) => s.id),
           ...state.walls.map((w) => w.id),
+          ...state.rooms.map((room) => room.id),
+          ...state.sectionLines.map((line) => line.id),
         ],
         selectedIds: [
           ...state.dimensions.map((d) => d.id),
@@ -739,14 +2111,48 @@ export const useDrawingStore = create<DrawingState>()(
           ...state.sketches.map((s) => s.id),
           ...state.symbols.map((s) => s.id),
           ...state.walls.map((w) => w.id),
+          ...state.rooms.map((room) => room.id),
+          ...state.sectionLines.map((line) => line.id),
         ],
       })),
 
       setHoveredElement: (id) => set({ hoveredElementId: id }),
 
       deleteSelectedElements: () => {
-        const { selectedElementIds, dimensions, annotations, sketches, symbols, walls } = get();
+        const {
+          selectedElementIds,
+          dimensions,
+          annotations,
+          sketches,
+          symbols,
+          walls,
+          rooms,
+          sectionLines,
+          elevationViews,
+          activeElevationViewId,
+        } = get();
         const selectedSet = new Set(selectedElementIds);
+        const selectedRoomCount = rooms.filter((room) => selectedSet.has(room.id)).length;
+        const selectedWallCount = walls.filter((wall) => selectedSet.has(wall.id)).length;
+        const roomsAtRisk = rooms.filter((room) =>
+          room.wallIds.some((wallId) => selectedSet.has(wallId))
+        );
+        const brokenRoomNames = roomsAtRisk
+          .filter((room) => room.wallIds.filter((wallId) => !selectedSet.has(wallId)).length < 3)
+          .map((room) => room.name);
+        const nextSectionLines = sectionLines.filter((line) => !selectedSet.has(line.id));
+        const removedSectionIds = new Set(
+          sectionLines
+            .filter((line) => selectedSet.has(line.id))
+            .map((line) => line.id)
+        );
+        const nextElevationViews = elevationViews.filter(
+          (view) => !selectedSet.has(view.id) && (!view.sectionLineId || !removedSectionIds.has(view.sectionLineId))
+        );
+        const nextActiveElevationViewId =
+          activeElevationViewId && nextElevationViews.some((view) => view.id === activeElevationViewId)
+            ? activeElevationViewId
+            : nextElevationViews[0]?.id ?? null;
         set({
           dimensions: dimensions.filter((d) => !selectedSet.has(d.id)),
           annotations: annotations.filter((a) => !selectedSet.has(a.id)),
@@ -758,9 +2164,31 @@ export const useDrawingStore = create<DrawingState>()(
               ...wall,
               connectedWalls: wall.connectedWalls.filter((cid) => !selectedSet.has(cid)),
             })),
+          rooms: rooms
+            .filter((room) => !selectedSet.has(room.id))
+            .map((room) => ({
+              ...room,
+              wallIds: room.wallIds.filter((wallId) => !selectedSet.has(wallId)),
+            })),
+          sectionLines: nextSectionLines,
+          elevationViews: nextElevationViews,
+          activeElevationViewId: nextActiveElevationViewId,
           selectedElementIds: [],
           selectedIds: [],
         });
+        if (brokenRoomNames.length > 0) {
+          get().setProcessingStatus(
+            `Warning: room enclosure may be broken (${brokenRoomNames.join(', ')}).`,
+            false
+          );
+        } else if (selectedRoomCount > 0 && selectedWallCount === 0) {
+          get().setProcessingStatus(
+            `Removed ${selectedRoomCount} room object(s); walls were kept.`,
+            false
+          );
+        }
+        get().detectRooms();
+        get().regenerateElevations();
         get().saveToHistory('Delete selected');
       },
 
@@ -768,7 +2196,15 @@ export const useDrawingStore = create<DrawingState>()(
       setSelectedIds: (ids) => set({ selectedElementIds: ids, selectedIds: ids }),
       deleteSelected: () => get().deleteSelectedElements(),
       setTool: (tool) => set({ activeTool: tool, tool }),
-      loadData: (data) => { void data; },
+      loadData: (data) => {
+        try {
+          const normalized = typeof data === 'string' ? data : JSON.stringify(data);
+          get().importFromJSON(normalized);
+        } catch (error) {
+          console.error('Failed to load drawing data:', error);
+          get().setProcessingStatus('Failed to load drawing data.', false);
+        }
+      },
       exportData: () => get().exportToJSON(),
 
       // Tool Actions
@@ -938,6 +2374,10 @@ export const useDrawingStore = create<DrawingState>()(
           sketches: prevEntry.snapshot.sketches,
           symbols: prevEntry.snapshot.symbols,
           walls: prevEntry.snapshot.walls ?? [],
+          rooms: prevEntry.snapshot.rooms ?? [],
+          sectionLines: prevEntry.snapshot.sectionLines ?? [],
+          elevationViews: prevEntry.snapshot.elevationViews ?? [],
+          activeElevationViewId: prevEntry.snapshot.activeElevationViewId ?? null,
           historyIndex: nextHistoryIndex,
           canUndo: nextHistoryIndex > 0,
           canRedo: nextHistoryIndex < state.history.length - 1,
@@ -956,6 +2396,10 @@ export const useDrawingStore = create<DrawingState>()(
           sketches: nextEntry.snapshot.sketches,
           symbols: nextEntry.snapshot.symbols,
           walls: nextEntry.snapshot.walls ?? [],
+          rooms: nextEntry.snapshot.rooms ?? [],
+          sectionLines: nextEntry.snapshot.sectionLines ?? [],
+          elevationViews: nextEntry.snapshot.elevationViews ?? [],
+          activeElevationViewId: nextEntry.snapshot.activeElevationViewId ?? null,
           historyIndex: nextHistoryIndex,
           canUndo: nextHistoryIndex > 0,
           canRedo: nextHistoryIndex < state.history.length - 1,
@@ -971,15 +2415,45 @@ export const useDrawingStore = create<DrawingState>()(
 
       // Export/Import Actions
       exportToJSON: () => {
-        const { importedDrawing, dimensions, annotations, sketches, symbols, guides, walls } = get();
+        const {
+          importedDrawing,
+          dimensions,
+          annotations,
+          sketches,
+          symbols,
+          guides,
+          walls,
+          rooms,
+          sectionLines,
+          elevationViews,
+          activeElevationViewId,
+          elevationSettings,
+          wallSettings,
+          dimensionSettings,
+          hvacDesignConditions,
+          materialLibrary,
+        } = get();
+
+        const attributeEnvelope = createAttributeEnvelope(walls, rooms);
         return JSON.stringify({
           version: '1.0',
+          attributeSchemaVersion: 1,
           dimensions,
           annotations,
           sketches,
           guides,
           symbols,
           walls,
+          rooms,
+          sectionLines,
+          elevationViews,
+          activeElevationViewId,
+          elevationSettings,
+          wallSettings,
+          dimensionSettings,
+          hvacDesignConditions,
+          materialLibrary,
+          attributeEnvelope,
           scale: importedDrawing?.scale || 100,
           exportedAt: new Date().toISOString(),
         }, null, 2);
@@ -988,14 +2462,171 @@ export const useDrawingStore = create<DrawingState>()(
       importFromJSON: (json) => {
         try {
           const data = JSON.parse(json);
+          const rawWalls = Array.isArray(data.walls) ? data.walls : [];
+          const importedWalls: Wall[] = rawWalls.map((rawWall: Partial<Wall>) => {
+            const baseWall: Wall = {
+              id: rawWall.id ?? generateId(),
+              startPoint: rawWall.startPoint ?? { x: 0, y: 0 },
+              endPoint: rawWall.endPoint ?? { x: 0, y: 0 },
+              thickness: clampThickness(rawWall.thickness ?? 150),
+              material: rawWall.material ?? 'partition',
+              layer: rawWall.layer ?? 'partition',
+              interiorLine: rawWall.interiorLine ?? { start: { x: 0, y: 0 }, end: { x: 0, y: 0 } },
+              exteriorLine: rawWall.exteriorLine ?? { start: { x: 0, y: 0 }, end: { x: 0, y: 0 } },
+              connectedWalls: Array.isArray(rawWall.connectedWalls) ? rawWall.connectedWalls : [],
+              openings: Array.isArray(rawWall.openings) ? rawWall.openings : [],
+              properties3D: rawWall.properties3D ?? { ...DEFAULT_WALL_3D },
+            };
+            const rebuilt = rebuildWallGeometry(baseWall);
+            return bindWallAttributes(rebuilt, rawWall.properties3D ?? undefined);
+          });
+
+          const rawRooms = Array.isArray(data.rooms) ? data.rooms : [];
+          const importedRooms: Room[] = rawRooms.map((rawRoom: Partial<Room>) => {
+            const fallbackVertices = Array.isArray(rawRoom.vertices) ? rawRoom.vertices : [];
+            const fallbackArea = typeof rawRoom.area === 'number' ? rawRoom.area : polygonArea(fallbackVertices);
+            const baseRoom: Room = {
+              id: rawRoom.id ?? generateId(),
+              name: rawRoom.name ?? 'Room',
+              roomType: rawRoom.roomType ?? inferRoomType(fallbackArea / 1_000_000),
+              vertices: fallbackVertices,
+              wallIds: Array.isArray(rawRoom.wallIds) ? rawRoom.wallIds : [],
+              area: fallbackArea,
+              perimeter: typeof rawRoom.perimeter === 'number' ? rawRoom.perimeter : polygonPerimeter(fallbackVertices),
+              centroid: rawRoom.centroid ?? polygonCentroid(fallbackVertices),
+              finishes: rawRoom.finishes ?? '',
+              notes: rawRoom.notes ?? '',
+              fillColor: rawRoom.fillColor ?? roomTypeFillColor(rawRoom.roomType ?? inferRoomType(fallbackArea / 1_000_000)),
+              showLabel: rawRoom.showLabel ?? true,
+              adjacentRoomIds: Array.isArray(rawRoom.adjacentRoomIds) ? rawRoom.adjacentRoomIds : [],
+              hasWindows: rawRoom.hasWindows ?? false,
+              validationWarnings: Array.isArray(rawRoom.validationWarnings) ? rawRoom.validationWarnings : [],
+              isExterior: rawRoom.isExterior ?? false,
+              properties3D: rawRoom.properties3D ?? { ...DEFAULT_ROOM_3D },
+            };
+            return bindRoomAttributes(baseRoom, rawRoom.properties3D ?? undefined);
+          });
+
+          const rawSectionLines = Array.isArray(data.sectionLines) ? data.sectionLines : [];
+          const importedSectionLines: SectionLine[] = rawSectionLines.map(
+            (rawLine: Partial<SectionLine>, index: number) => {
+              const fallbackLabel = sectionLabelForIndex(rawLine.kind ?? 'section', index + 1);
+              return {
+                id: rawLine.id ?? generateId(),
+                label: rawLine.label ?? fallbackLabel,
+                name: rawLine.name ?? rawLine.label ?? fallbackLabel,
+                kind: rawLine.kind === 'elevation' ? 'elevation' : 'section',
+                startPoint: rawLine.startPoint ?? { x: 0, y: 0 },
+                endPoint: rawLine.endPoint ?? { x: 0, y: 0 },
+                direction: rawLine.direction === -1 ? -1 : 1,
+                color: rawLine.color ?? DEFAULT_SECTION_LINE_COLOR,
+                depthMm: Math.max(100, rawLine.depthMm ?? DEFAULT_SECTION_LINE_DEPTH_MM),
+                locked: rawLine.locked ?? false,
+                showReferenceIndicators: rawLine.showReferenceIndicators ?? true,
+              };
+            }
+          );
+
+          const attributeHydration = deserializeAttributeEnvelope(
+            data.attributeEnvelope,
+            importedWalls,
+            importedRooms
+          );
+
+          const nextWallSettings = {
+            ...DEFAULT_WALL_SETTINGS,
+            ...(typeof data.wallSettings === 'object' && data.wallSettings ? data.wallSettings : {}),
+          } as WallSettings;
+          nextWallSettings.defaultThickness = clampThickness(nextWallSettings.defaultThickness);
+          nextWallSettings.defaultHeight = clampHeight(nextWallSettings.defaultHeight);
+          nextWallSettings.defaultLayerCount = Math.max(1, Math.round(nextWallSettings.defaultLayerCount));
+          nextWallSettings.gridSize = Math.max(1, nextWallSettings.gridSize);
+
+          const nextMaterialLibrary = Array.isArray(data.materialLibrary) && data.materialLibrary.length > 0
+            ? data.materialLibrary
+            : [...DEFAULT_ARCHITECTURAL_MATERIALS];
+
+          const nextDimensionSettings = {
+            ...DEFAULT_DIMENSION_SETTINGS,
+            ...(typeof data.dimensionSettings === 'object' && data.dimensionSettings ? data.dimensionSettings : {}),
+          } as DimensionSettings;
+          nextDimensionSettings.precision = nextDimensionSettings.precision === 0 || nextDimensionSettings.precision === 1 || nextDimensionSettings.precision === 2
+            ? nextDimensionSettings.precision
+            : DEFAULT_DIMENSION_SETTINGS.precision;
+          nextDimensionSettings.defaultOffset = Math.max(20, nextDimensionSettings.defaultOffset);
+          nextDimensionSettings.extensionGap = Math.max(0, nextDimensionSettings.extensionGap);
+          nextDimensionSettings.extensionBeyond = Math.max(0, nextDimensionSettings.extensionBeyond);
+
+          const nextHvacDesignConditions = {
+            ...DEFAULT_HVAC_DESIGN_CONDITIONS,
+            ...(typeof data.hvacDesignConditions === 'object' && data.hvacDesignConditions ? data.hvacDesignConditions : {}),
+          } as HvacDesignConditions;
+          nextHvacDesignConditions.peakCoolingHour = clampValue(nextHvacDesignConditions.peakCoolingHour, 0, 23);
+          nextHvacDesignConditions.internalGainDiversityFactor = clampValue(nextHvacDesignConditions.internalGainDiversityFactor, 0, 1);
+          nextHvacDesignConditions.defaultWindowShgc = clampValue(nextHvacDesignConditions.defaultWindowShgc, 0, 1);
+          nextHvacDesignConditions.seasonalVariation = {
+            summerAdjustment: Number.isFinite(nextHvacDesignConditions.seasonalVariation?.summerAdjustment)
+              ? nextHvacDesignConditions.seasonalVariation.summerAdjustment
+              : DEFAULT_HVAC_DESIGN_CONDITIONS.seasonalVariation.summerAdjustment,
+            winterAdjustment: Number.isFinite(nextHvacDesignConditions.seasonalVariation?.winterAdjustment)
+              ? nextHvacDesignConditions.seasonalVariation.winterAdjustment
+              : DEFAULT_HVAC_DESIGN_CONDITIONS.seasonalVariation.winterAdjustment,
+          };
+
+          const nextElevationSettings = {
+            ...DEFAULT_ELEVATION_SETTINGS,
+            ...(typeof data.elevationSettings === 'object' && data.elevationSettings ? data.elevationSettings : {}),
+          } as ElevationSettings;
+          nextElevationSettings.defaultGridIncrementMm = Math.max(100, nextElevationSettings.defaultGridIncrementMm);
+          nextElevationSettings.defaultScale = Math.max(1, nextElevationSettings.defaultScale);
+          nextElevationSettings.sunAngleDeg = clampValue(nextElevationSettings.sunAngleDeg, 0, 360);
+
+          const importedElevationViews = Array.isArray(data.elevationViews)
+            ? data.elevationViews as ElevationView[]
+            : [];
+          const importedActiveElevationViewId =
+            typeof data.activeElevationViewId === 'string'
+              ? data.activeElevationViewId
+              : null;
+
           set({
-            dimensions: data.dimensions || [],
+            dimensions: Array.isArray(data.dimensions)
+              ? data.dimensions.map((dimension: Omit<Dimension2D, 'id'> & { id: string }) => ({
+                ...normalizeDimensionPayload(dimension, nextDimensionSettings),
+                id: dimension.id ?? generateId(),
+              }))
+              : [],
+            dimensionSettings: nextDimensionSettings,
             annotations: data.annotations || [],
             sketches: data.sketches || [],
             guides: data.guides || [],
             symbols: data.symbols || [],
-            walls: data.walls || [],
+            walls: attributeHydration.walls,
+            rooms: attributeHydration.rooms,
+            sectionLines: importedSectionLines,
+            elevationViews: importedElevationViews,
+            activeElevationViewId: importedActiveElevationViewId,
+            elevationSettings: nextElevationSettings,
+            sectionLineDrawingState: { ...DEFAULT_SECTION_LINE_DRAWING_STATE },
+            wallSettings: nextWallSettings,
+            hvacDesignConditions: nextHvacDesignConditions,
+            materialLibrary: nextMaterialLibrary,
           });
+          lastRoomTopologyHash = '';
+          get().detectRooms();
+          get().regenerateElevations();
+          importedSectionLines.forEach((line) => {
+            get().generateElevationForSection(line.id);
+          });
+          if (
+            importedActiveElevationViewId &&
+            get().elevationViews.some((view) => view.id === importedActiveElevationViewId)
+          ) {
+            get().setActiveElevationView(importedActiveElevationViewId);
+          }
+          if (attributeHydration.warnings.length > 0) {
+            console.warn('Attribute hydration warnings', attributeHydration.warnings);
+          }
           get().setProcessingStatus('Imported drawing JSON.', false);
         } catch (error) {
           console.error('Failed to import JSON:', error);
@@ -1092,3 +2723,10 @@ export const useSmartDrawingStore = useDrawingStore;
 export type SmartDrawingState = DrawingState;
 
 export default useDrawingStore;
+export {
+  useRoomStore,
+  getRoomWallIds,
+  getRoomHoles,
+  getArchivedRoom,
+  type RoomStore,
+} from './roomStore';

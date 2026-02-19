@@ -9,6 +9,8 @@ import type {
     Point2D,
     DisplayUnit,
     Dimension2D,
+    DimensionSettings,
+    HvacDesignConditions,
     Annotation2D,
     Sketch2D,
     Guide,
@@ -30,6 +32,8 @@ import type {
 export interface DrawingState {
     // Drawing Elements
     dimensions: Dimension2D[];
+    dimensionSettings: DimensionSettings;
+    hvacDesignConditions: HvacDesignConditions;
     annotations: Annotation2D[];
     sketches: Sketch2D[];
     guides: Guide[];
@@ -109,9 +113,14 @@ export interface DetectionActions {
 }
 
 export interface AnnotationActions {
-    addDimension: (dimension: Omit<Dimension2D, 'id'>) => string;
-    updateDimension: (id: string, data: Partial<Dimension2D>) => void;
+    addDimension: (dimension: Omit<Dimension2D, 'id'>, options?: { skipHistory?: boolean }) => string;
+    updateDimension: (id: string, data: Partial<Dimension2D>, options?: { skipHistory?: boolean }) => void;
     deleteDimension: (id: string) => void;
+    setDimensionSettings: (settings: Partial<DimensionSettings>) => void;
+    autoDimensionExteriorWalls: () => void;
+    addAreaDimensions: () => void;
+    setHvacDesignConditions: (updates: Partial<HvacDesignConditions>) => void;
+    applyRoomTemplateToSelectedRooms: (templateId: string) => void;
     addAnnotation: (annotation: Omit<Annotation2D, 'id'>) => string;
     updateAnnotation: (id: string, data: Partial<Annotation2D>) => void;
     deleteAnnotation: (id: string) => void;
