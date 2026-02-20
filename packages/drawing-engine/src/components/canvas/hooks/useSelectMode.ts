@@ -22,6 +22,15 @@ import {
 } from '../../../types/wall';
 import { SnapManager } from '../../../utils/SnapManager';
 import { GeometryEngine } from '../../../utils/geometry-engine';
+import {
+  clampBevelOffset,
+  countWallsTouchingEndpoint,
+  computeCornerBevelDotsForEndpoint,
+  computeDeadEndBevelDotsForEndpoint,
+  projectPointToLine,
+  type CornerBevelKind,
+  type CornerEnd,
+} from '../../../utils/wallBevel';
 import { MM_TO_PX } from '../scale';
 import { computeWallPolygon } from '../wall/WallGeometry';
 import { snapToGrid } from '../wall/WallSnapping';
@@ -37,6 +46,10 @@ type WallControlType =
   | 'wall-center-handle'
   | 'wall-endpoint-start'
   | 'wall-endpoint-end'
+  | 'wall-bevel-outer-start'
+  | 'wall-bevel-outer-end'
+  | 'wall-bevel-inner-start'
+  | 'wall-bevel-inner-end'
   | 'wall-thickness-interior'
   | 'wall-thickness-exterior'
   | 'wall-rotation-handle'
@@ -64,6 +77,19 @@ export interface UseSelectModeOptions {
   setSelectedIds: (ids: string[]) => void;
   setHoveredElement: (id: string | null) => void;
   updateWall: (id: string, updates: Partial<Wall>, options?: WallUpdateOptions) => void;
+  updateWallBevel: (
+    wallId: string,
+    end: CornerEnd,
+    bevel: Partial<{ outerOffset: number; innerOffset: number }>,
+    options?: WallUpdateOptions
+  ) => void;
+  resetWallBevel: (wallId: string, end: CornerEnd) => void;
+  getCornerBevelDots: (cornerPoint: Point2D) => {
+    outerDotPosition: Point2D;
+    innerDotPosition: Point2D;
+    outerOffset: number;
+    innerOffset: number;
+  } | null;
   moveRoom: (id: string, delta: Point2D, options?: RoomMoveOptions) => void;
   connectWalls: (wallId: string, otherWallId: string) => void;
   detectRooms: (options?: { debounce?: boolean }) => void;
@@ -170,6 +196,19 @@ interface RotateDragState {
   operation: WallRotationOperation;
 }
 
+interface BevelDragState {
+  mode: 'bevel';
+  wallId: string;
+  endpoint: CornerEnd;
+  kind: CornerBevelKind;
+  cornerPoint: Point2D;
+  origin: Point2D;
+  direction: Point2D;
+  maxOffset: number;
+  otherWallId: string;
+  otherEndpoint: CornerEnd;
+}
+
 type DragState =
   | IdleDragState
   | ThicknessDragState
@@ -178,7 +217,8 @@ type DragState =
   | RoomMoveDragState
   | RoomCornerDragState
   | RoomScaleDragState
-  | RotateDragState;
+  | RotateDragState
+  | BevelDragState;
 
 interface DragApplyResult {
   label: string;
@@ -346,6 +386,23 @@ function perpendicularDirection(reference: Wall, atPoint: Point2D): Point2D | nu
   return normalize({ x: -dir.y, y: dir.x });
 }
 
+function parseBevelControl(
+  controlType?: WallControlType
+): { endpoint: CornerEnd; kind: CornerBevelKind } | null {
+  switch (controlType) {
+    case 'wall-bevel-outer-start':
+      return { endpoint: 'start', kind: 'outer' };
+    case 'wall-bevel-inner-start':
+      return { endpoint: 'start', kind: 'inner' };
+    case 'wall-bevel-outer-end':
+      return { endpoint: 'end', kind: 'outer' };
+    case 'wall-bevel-inner-end':
+      return { endpoint: 'end', kind: 'inner' };
+    default:
+      return null;
+  }
+}
+
 function roomBounds(vertices: Point2D[]): { minX: number; minY: number; maxX: number; maxY: number } {
   const xs = vertices.map((vertex) => vertex.x);
   const ys = vertices.map((vertex) => vertex.y);
@@ -414,6 +471,9 @@ export function useSelectMode({
   setSelectedIds,
   setHoveredElement,
   updateWall,
+  updateWallBevel,
+  resetWallBevel,
+  getCornerBevelDots,
   moveRoom,
   connectWalls,
   detectRooms,
@@ -440,6 +500,9 @@ export function useSelectMode({
     setSelectedIds,
     setHoveredElement,
     updateWall,
+    updateWallBevel,
+    resetWallBevel,
+    getCornerBevelDots,
     moveRoom,
     connectWalls,
     detectRooms,
@@ -457,6 +520,9 @@ export function useSelectMode({
       setSelectedIds,
       setHoveredElement,
       updateWall,
+      updateWallBevel,
+      resetWallBevel,
+      getCornerBevelDots,
       moveRoom,
       connectWalls,
       detectRooms,
@@ -472,6 +538,9 @@ export function useSelectMode({
     setSelectedIds,
     setHoveredElement,
     updateWall,
+    updateWallBevel,
+    resetWallBevel,
+    getCornerBevelDots,
     moveRoom,
     connectWalls,
     detectRooms,
@@ -954,6 +1023,64 @@ export function useSelectMode({
 
     isWallHandleDraggingRef.current = true;
 
+    const bevelControl = parseBevelControl(meta.controlType);
+    if (bevelControl) {
+      const cornerTolerance = Math.max(
+        2,
+        optionsRef.current.wallSettings.endpointSnapTolerance / (MM_TO_PX * Math.max(optionsRef.current.zoom, 0.01))
+      );
+      const connectionCount = countWallsTouchingEndpoint(
+        wall,
+        bevelControl.endpoint,
+        optionsRef.current.walls,
+        cornerTolerance
+      );
+      const corner = computeCornerBevelDotsForEndpoint(
+        wall,
+        bevelControl.endpoint,
+        optionsRef.current.walls,
+        cornerTolerance
+      ) ?? (connectionCount === 0
+        ? computeDeadEndBevelDotsForEndpoint(wall, bevelControl.endpoint)
+        : null);
+      if (!corner) {
+        isWallHandleDraggingRef.current = false;
+        return false;
+      }
+
+      const bevelDirection = normalize(corner.bisector);
+      if (magnitude(bevelDirection) < 0.0001) {
+        isWallHandleDraggingRef.current = false;
+        return false;
+      }
+
+      const origin = bevelControl.kind === 'outer' ? corner.outerMiterPoint : corner.innerMiterPoint;
+      if (!origin) {
+        isWallHandleDraggingRef.current = false;
+        return false;
+      }
+
+      dragStateRef.current = {
+        mode: 'bevel',
+        wallId: wall.id,
+        endpoint: bevelControl.endpoint,
+        kind: bevelControl.kind,
+        cornerPoint: corner.cornerPoint,
+        origin,
+        direction: bevelDirection,
+        maxOffset: corner.maxOffset,
+        otherWallId:
+          'otherWallId' in corner && typeof corner.otherWallId === 'string'
+            ? corner.otherWallId
+            : wall.id,
+        otherEndpoint:
+          'otherEnd' in corner && (corner.otherEnd === 'start' || corner.otherEnd === 'end')
+            ? corner.otherEnd
+            : bevelControl.endpoint,
+      };
+      return true;
+    }
+
     if (meta.controlType === 'wall-thickness-exterior' || meta.controlType === 'wall-thickness-interior') {
       dragStateRef.current = {
         mode: 'thickness',
@@ -1195,6 +1322,39 @@ export function useSelectMode({
 
       return {
         label: `Thickness ${Math.round(nextThickness)} mm`,
+        point: handlePoint,
+      };
+    }
+
+    if (state.mode === 'bevel') {
+      const projection = projectPointToLine(point, state.origin, state.direction);
+      const nextOffset = clampBevelOffset(projection.t, state.maxOffset);
+      const direction = normalize(state.direction);
+      const fallbackPoint = add(state.origin, scale(direction, nextOffset));
+      const bevelUpdate =
+        state.kind === 'outer'
+          ? { outerOffset: nextOffset }
+          : { innerOffset: nextOffset };
+
+      optionsRef.current.updateWallBevel(
+        state.wallId,
+        state.endpoint,
+        bevelUpdate,
+        {
+          skipHistory: true,
+          source: 'drag',
+          skipRoomDetection: true,
+        }
+      );
+
+      const updatedCorner = optionsRef.current.getCornerBevelDots(state.cornerPoint);
+      const handlePoint =
+        state.kind === 'outer'
+          ? updatedCorner?.outerDotPosition ?? fallbackPoint
+          : updatedCorner?.innerDotPosition ?? fallbackPoint;
+
+      return {
+        label: `${state.kind === 'outer' ? 'Outer' : 'Inner'} bevel ${Math.round(nextOffset)} mm`,
         point: handlePoint,
       };
     }
@@ -1803,10 +1963,12 @@ export function useSelectMode({
               ? 'Rotate wall'
             : mode === 'room-corner'
               ? 'Edit room corner'
-              : mode === 'room-scale'
+            : mode === 'room-scale'
                 ? 'Scale room'
             : mode === 'room-move'
               ? 'Move room'
+            : mode === 'bevel'
+              ? 'Adjust wall bevel'
             : 'Edit wall endpoint';
       optionsRef.current.detectRooms();
       optionsRef.current.saveToHistory(action);
@@ -1821,9 +1983,36 @@ export function useSelectMode({
     finishDrag();
   }, [finishDrag]);
 
-  const handleDoubleClick = useCallback((_event: MouseEvent) => {
-    return false;
-  }, []);
+  const handleDoubleClick = useCallback((event: MouseEvent) => {
+    const canvas = fabricRef.current;
+    if (!canvas) return false;
+    const target = canvas.findTarget(event as unknown as fabric.TPointerEvent);
+    const meta = getTargetMeta((target as FabricObject | undefined | null) ?? null);
+    const bevelControl = parseBevelControl(meta.controlType);
+    if (!bevelControl || !meta.wallId) {
+      return false;
+    }
+
+    const bevelUpdate =
+      bevelControl.kind === 'outer'
+        ? { outerOffset: 0 }
+        : { innerOffset: 0 };
+    optionsRef.current.updateWallBevel(
+      meta.wallId,
+      bevelControl.endpoint,
+      bevelUpdate,
+      {
+        skipHistory: false,
+        source: 'ui',
+        skipRoomDetection: false,
+      }
+    );
+    optionsRef.current.setProcessingStatus(
+      `${bevelControl.kind === 'outer' ? 'Outer' : 'Inner'} bevel reset.`,
+      false
+    );
+    return true;
+  }, [fabricRef, getTargetMeta]);
 
   const handleObjectMoving = useCallback((_target: FabricObject) => {
     // Object moving is disabled for wall groups. Editing is handle-driven.

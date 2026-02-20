@@ -156,6 +156,14 @@ export class RoomTool {
         endPoint: { ...endPoint },
         thickness: 8,
         snapToGrid: true,
+        startBevel: {
+          outerOffset: 0,
+          innerOffset: 0,
+        },
+        endBevel: {
+          outerOffset: 0,
+          innerOffset: 0,
+        },
       };
       const existingWalls = this.options.getWalls?.() ?? [];
       const existingRooms = this.options.getRooms?.() ?? [];
@@ -170,4 +178,3 @@ export class RoomTool {
     this.options.runDetection();
   }
 }
-

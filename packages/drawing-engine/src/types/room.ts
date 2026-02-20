@@ -9,6 +9,13 @@ export interface WallSegment {
   thickness: number; // default 8px
   snapToGrid: boolean;
   parentRoomId?: string; // set when wall divides an existing room
+  startBevel: RoomWallBevelControl;
+  endBevel: RoomWallBevelControl;
+}
+
+export interface RoomWallBevelControl {
+  outerOffset: number;
+  innerOffset: number;
 }
 
 export interface RoomLabelTag {
@@ -64,4 +71,3 @@ export const DEFAULT_ROOM_DETECTION_CONFIG: RoomDetectionConfig = {
 
 export const ROOM_LABEL_MIN_FONT = 10;
 export const ROOM_LABEL_MAX_FONT = 16;
-

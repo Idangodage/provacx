@@ -16,6 +16,11 @@ export interface Line {
   end: Point2D;
 }
 
+export interface BevelControl {
+  outerOffset: number;
+  innerOffset: number;
+}
+
 export type WallMaterial = 'brick' | 'concrete' | 'partition';
 export type WallLayer = 'structural' | 'partition';
 export type JoinType = 'miter' | 'butt';
@@ -211,6 +216,8 @@ export interface Wall {
   layer: WallLayer;
   interiorLine: Line;            // computed from center + thickness/2
   exteriorLine: Line;            // computed from center - thickness/2
+  startBevel: BevelControl;      // bevel controls at start endpoint
+  endBevel: BevelControl;        // bevel controls at end endpoint
   connectedWalls: string[];      // IDs of walls sharing endpoints
   openings: Opening[];
   properties3D: Wall3D;
@@ -348,11 +355,14 @@ export interface RoomConfig {
 export interface JoinData {
   wallId: string;
   otherWallId: string;
+  endpoint?: 'start' | 'end';
   joinPoint: Point2D;
   joinType: JoinType;
   angle: number;
   interiorVertex: Point2D;
   exteriorVertex: Point2D;
+  bevelDirection?: Point2D;
+  maxBevelOffset?: number;
 }
 
 /**
@@ -392,6 +402,10 @@ export const DEFAULT_WALL_LAYER_COUNT = 1;
 export const DEFAULT_ROOM_SLAB_THICKNESS = 150;
 export const DEFAULT_SECTION_LINE_COLOR = '#D81B60';
 export const DEFAULT_SECTION_LINE_DEPTH_MM = 10000;
+export const DEFAULT_BEVEL_CONTROL: BevelControl = {
+  outerOffset: 0,
+  innerOffset: 0,
+};
 
 export const DEFAULT_WALL_THICKNESS: Record<WallLayer, number> = {
   structural: 200,

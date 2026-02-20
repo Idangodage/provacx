@@ -227,6 +227,9 @@ export function DrawingCanvas({
         addWall,
         deleteSelected,
         updateWall,
+        updateWallBevel,
+        resetWallBevel,
+        getCornerBevelDots,
         deleteWall,
         getWall,
         // Wall state and actions
@@ -1059,6 +1062,9 @@ export function DrawingCanvas({
         setSelectedIds,
         setHoveredElement,
         updateWall,
+        updateWallBevel,
+        resetWallBevel,
+        getCornerBevelDots,
         moveRoom,
         connectWalls,
         detectRooms,
@@ -1171,6 +1177,8 @@ export function DrawingCanvas({
                 },
                 openings: wall.openings.map((opening) => ({ ...opening })),
                 connectedWalls: [...wall.connectedWalls],
+                startBevel: { ...wall.startBevel },
+                endBevel: { ...wall.endBevel },
             }));
         if (selectedWalls.length === 0) return;
         wallClipboardRef.current = selectedWalls;
@@ -1200,6 +1208,8 @@ export function DrawingCanvas({
                         ...opening,
                         id: generateId(),
                     })),
+                    startBevel: { ...wall.startBevel },
+                    endBevel: { ...wall.endBevel },
                 },
                 { skipHistory: true, source: 'ui' }
             );
@@ -1940,7 +1950,10 @@ export function DrawingCanvas({
                 if (dimensionHandled) {
                     return;
                 }
-                handleSelectDoubleClick(event);
+                const selectHandled = handleSelectDoubleClick(event);
+                if (selectHandled) {
+                    return;
+                }
                 const roomId = resolveRoomIdFromTarget(target ?? null);
                 if (roomId && typeof window !== 'undefined') {
                     setSelectedIds([roomId]);

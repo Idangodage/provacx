@@ -21,6 +21,10 @@ let pendingChangedWallIds = new Set<string>();
 let roomWallIndexById = new Map<string, string[]>();
 let roomHoleIndexById = new Map<string, Point[][]>();
 let archivedRooms = new Map<string, DetectedRoom>();
+const DEFAULT_ROOM_BEVEL = {
+  outerOffset: 0,
+  innerOffset: 0,
+};
 
 function scheduleSync(getState: () => RoomStore): void {
   if (detectionTimer) {
@@ -70,6 +74,14 @@ export const useRoomStore: UseBoundStore<StoreApi<RoomStore>> = create<RoomStore
         {
           ...wall,
           thickness: Number.isFinite(wall.thickness) ? wall.thickness : 8,
+          startBevel: {
+            outerOffset: wall.startBevel?.outerOffset ?? DEFAULT_ROOM_BEVEL.outerOffset,
+            innerOffset: wall.startBevel?.innerOffset ?? DEFAULT_ROOM_BEVEL.innerOffset,
+          },
+          endBevel: {
+            outerOffset: wall.endBevel?.outerOffset ?? DEFAULT_ROOM_BEVEL.outerOffset,
+            innerOffset: wall.endBevel?.innerOffset ?? DEFAULT_ROOM_BEVEL.innerOffset,
+          },
         },
         existingWalls,
         existingRooms,
@@ -102,6 +114,14 @@ export const useRoomStore: UseBoundStore<StoreApi<RoomStore>> = create<RoomStore
         ...updates,
         startPoint: updates.startPoint ?? existing.startPoint,
         endPoint: updates.endPoint ?? existing.endPoint,
+        startBevel: {
+          outerOffset: updates.startBevel?.outerOffset ?? existing.startBevel.outerOffset,
+          innerOffset: updates.startBevel?.innerOffset ?? existing.startBevel.innerOffset,
+        },
+        endBevel: {
+          outerOffset: updates.endBevel?.outerOffset ?? existing.endBevel.outerOffset,
+          innerOffset: updates.endBevel?.innerOffset ?? existing.endBevel.innerOffset,
+        },
       };
       const otherWalls = Array.from(get().walls.values()).filter((wall) => wall.id !== wallId);
       const prepared = prepareWallSegmentForInsertion(

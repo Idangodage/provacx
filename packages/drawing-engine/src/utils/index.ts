@@ -69,3 +69,15 @@ export {
 // Interactive editing utilities
 export { GripManager } from './GripManager';
 export { SnapManager, SnapType, type SnapContext, type SnapTarget } from './SnapManager';
+export {
+  countWallsTouchingEndpoint,
+  computeCornerBevelDotsForEndpoint,
+  computeDeadEndBevelDotsForEndpoint,
+  projectPointToLine,
+  clampBevelOffset,
+  withUpdatedBevel,
+  type CornerEnd,
+  type CornerBevelKind,
+  type CornerBevelDots,
+  type EndpointBevelDots,
+} from './wallBevel';

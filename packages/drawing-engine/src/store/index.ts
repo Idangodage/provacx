@@ -52,6 +52,7 @@ import type {
   ElevationView,
   Wall,
   Wall3D,
+  BevelControl,
   WallDrawingState,
   WallSettings,
   WallMaterial,
@@ -69,6 +70,7 @@ import {
   DEFAULT_SECTION_LINE_COLOR,
   DEFAULT_SECTION_LINE_DEPTH_MM,
   DEFAULT_SECTION_LINE_DRAWING_STATE,
+  DEFAULT_BEVEL_CONTROL,
   DEFAULT_WALL_3D,
   DEFAULT_WALL_SETTINGS,
   DEFAULT_WALL_DRAWING_STATE,
@@ -82,6 +84,12 @@ import {
 } from '../types/wall';
 import { generateId } from '../utils/geometry';
 import { GeometryEngine } from '../utils/geometry-engine';
+import {
+  clampBevelOffset,
+  computeCornerBevelDotsForEndpoint,
+  withUpdatedBevel,
+  type CornerEnd,
+} from '../utils/wallBevel';
 import { DEFAULT_SPLINE_SETTINGS } from '../utils/spline';
 
 // Import from extracted modules
@@ -143,6 +151,46 @@ function clampHeight(height: number): number {
   return clampValue(height, MIN_WALL_HEIGHT, MAX_WALL_HEIGHT);
 }
 
+function normalizeBevelControl(bevel?: Partial<BevelControl> | null): BevelControl {
+  return {
+    outerOffset: clampBevelOffset(bevel?.outerOffset ?? DEFAULT_BEVEL_CONTROL.outerOffset, Number.MAX_SAFE_INTEGER),
+    innerOffset: clampBevelOffset(bevel?.innerOffset ?? DEFAULT_BEVEL_CONTROL.innerOffset, Number.MAX_SAFE_INTEGER),
+  };
+}
+
+function normalizeWallBevel(wall: Wall): Wall {
+  return {
+    ...wall,
+    startBevel: normalizeBevelControl(wall.startBevel),
+    endBevel: normalizeBevelControl(wall.endBevel),
+  };
+}
+
+function bevelKeyForEnd(end: CornerEnd): 'startBevel' | 'endBevel' {
+  return end === 'start' ? 'startBevel' : 'endBevel';
+}
+
+function applyWallEndpointBevel(
+  wall: Wall,
+  end: CornerEnd,
+  bevel: Partial<BevelControl>,
+  maxOffset: number
+): Wall {
+  const normalized = normalizeWallBevel(wall);
+  const key = bevelKeyForEnd(end);
+  const nextBevel = withUpdatedBevel(normalized[key], bevel, maxOffset);
+  if (key === 'startBevel') {
+    return {
+      ...normalized,
+      startBevel: nextBevel,
+    };
+  }
+  return {
+    ...normalized,
+    endBevel: nextBevel,
+  };
+}
+
 function rebuildWallGeometry(wall: Wall): Wall {
   const dx = wall.endPoint.x - wall.startPoint.x;
   const dy = wall.endPoint.y - wall.startPoint.y;
@@ -152,7 +200,7 @@ function rebuildWallGeometry(wall: Wall): Wall {
   const halfThickness = wall.thickness / 2;
 
   return {
-    ...wall,
+    ...normalizeWallBevel(wall),
     interiorLine: {
       start: { x: wall.startPoint.x + perpX * halfThickness, y: wall.startPoint.y + perpY * halfThickness },
       end: { x: wall.endPoint.x + perpX * halfThickness, y: wall.endPoint.y + perpY * halfThickness },
@@ -767,6 +815,21 @@ export interface DrawingState {
     updates: Partial<Wall>,
     options?: { skipHistory?: boolean; source?: 'ui' | 'drag'; skipRoomDetection?: boolean }
   ) => void;
+  updateWallBevel: (
+    wallId: string,
+    end: CornerEnd,
+    bevel: Partial<BevelControl>,
+    options?: { skipHistory?: boolean; source?: 'ui' | 'drag'; skipRoomDetection?: boolean }
+  ) => void;
+  resetWallBevel: (wallId: string, end: CornerEnd) => void;
+  getCornerBevelDots: (
+    cornerPoint: Point2D
+  ) => {
+    outerDotPosition: Point2D;
+    innerDotPosition: Point2D;
+    outerOffset: number;
+    innerOffset: number;
+  } | null;
   updateWall3DAttributes: (id: string, updates: Partial<Wall3D>) => void;
   deleteWall: (id: string) => void;
   getWall: (id: string) => Wall | undefined;
@@ -1499,6 +1562,8 @@ export const useDrawingStore = create<DrawingState>()(
               y: trimmedEndpoints.endPoint.y - perpY * halfThickness,
             },
           },
+          startBevel: { ...DEFAULT_BEVEL_CONTROL },
+          endBevel: { ...DEFAULT_BEVEL_CONTROL },
           connectedWalls: connectedWallIds,
           openings: [],
           properties3D: { ...DEFAULT_WALL_3D },
@@ -1564,7 +1629,12 @@ export const useDrawingStore = create<DrawingState>()(
           const nextWalls = state.walls.map((wall) => {
             if (wall.id !== id) return wall;
             previousValue = wall.properties3D;
-            const updatedWall = { ...wall, ...safeUpdates };
+            const updatedWall = normalizeWallBevel({
+              ...wall,
+              ...safeUpdates,
+              startBevel: safeUpdates.startBevel ?? wall.startBevel,
+              endBevel: safeUpdates.endBevel ?? wall.endBevel,
+            });
 
             // Recompute geometry if relevant fields changed
             if (safeUpdates.startPoint || safeUpdates.endPoint || safeUpdates.thickness) {
@@ -1610,6 +1680,76 @@ export const useDrawingStore = create<DrawingState>()(
         if (elevationChanged) {
           get().regenerateElevations({ debounce: options?.source === 'drag' });
         }
+      },
+
+      updateWallBevel: (wallId, end, bevel, options) => {
+        const walls = get().walls;
+        const targetWall = walls.find((wall) => wall.id === wallId);
+        if (!targetWall) return;
+
+        const corner = computeCornerBevelDotsForEndpoint(targetWall, end, walls, 2);
+        const fallbackMax = wallLengthMm(targetWall.startPoint, targetWall.endPoint) / 2;
+        const maxOffset = Math.max(0, corner?.maxOffset ?? fallbackMax);
+
+        set((state) => ({
+          walls: state.walls.map((wall) => {
+            if (wall.id === wallId) {
+              return applyWallEndpointBevel(wall, end, bevel, maxOffset);
+            }
+            if (corner && wall.id === corner.otherWallId) {
+              return applyWallEndpointBevel(wall, corner.otherEnd, bevel, maxOffset);
+            }
+            return wall;
+          }),
+        }));
+
+        if (!options?.skipHistory) {
+          get().saveToHistory('Adjust wall bevel');
+        }
+        if (!options?.skipRoomDetection) {
+          get().detectRooms({ debounce: options?.source === 'drag' });
+        }
+      },
+
+      resetWallBevel: (wallId, end) => {
+        get().updateWallBevel(
+          wallId,
+          end,
+          {
+            outerOffset: 0,
+            innerOffset: 0,
+          },
+          {
+            skipHistory: false,
+            source: 'ui',
+            skipRoomDetection: false,
+          }
+        );
+      },
+
+      getCornerBevelDots: (cornerPoint) => {
+        const walls = get().walls;
+        for (const wall of walls) {
+          const startCorner = computeCornerBevelDotsForEndpoint(wall, 'start', walls, 2);
+          if (startCorner && pointsNear(startCorner.cornerPoint, cornerPoint, 2)) {
+            return {
+              outerDotPosition: startCorner.outerDotPosition,
+              innerDotPosition: startCorner.innerDotPosition,
+              outerOffset: startCorner.outerOffset,
+              innerOffset: startCorner.innerOffset,
+            };
+          }
+          const endCorner = computeCornerBevelDotsForEndpoint(wall, 'end', walls, 2);
+          if (endCorner && pointsNear(endCorner.cornerPoint, cornerPoint, 2)) {
+            return {
+              outerDotPosition: endCorner.outerDotPosition,
+              innerDotPosition: endCorner.innerDotPosition,
+              outerOffset: endCorner.outerOffset,
+              innerOffset: endCorner.innerOffset,
+            };
+          }
+        }
+        return null;
       },
 
       updateWall3DAttributes: (id, updates) => {
@@ -1660,13 +1800,27 @@ export const useDrawingStore = create<DrawingState>()(
       },
 
       deleteWall: (id) => {
+        const wallToDelete = get().walls.find((wall) => wall.id === id);
+        if (!wallToDelete) return;
+
         set((state) => ({
           walls: state.walls
             .filter((w) => w.id !== id)
-            .map((wall) => ({
-              ...wall,
-              connectedWalls: wall.connectedWalls.filter((cid) => cid !== id),
-            })),
+            .map((wall) => {
+              const cleaned = normalizeWallBevel({
+                ...wall,
+                connectedWalls: wall.connectedWalls.filter((cid) => cid !== id),
+              });
+              const touchesStart = pointsNear(cleaned.startPoint, wallToDelete.startPoint, 2)
+                || pointsNear(cleaned.startPoint, wallToDelete.endPoint, 2);
+              const touchesEnd = pointsNear(cleaned.endPoint, wallToDelete.startPoint, 2)
+                || pointsNear(cleaned.endPoint, wallToDelete.endPoint, 2);
+              return {
+                ...cleaned,
+                startBevel: touchesStart ? { ...DEFAULT_BEVEL_CONTROL } : cleaned.startBevel,
+                endBevel: touchesEnd ? { ...DEFAULT_BEVEL_CONTROL } : cleaned.endBevel,
+              };
+            }),
           rooms: state.rooms.map((room) => ({
             ...room,
             wallIds: room.wallIds.filter((wallId) => wallId !== id),
@@ -2054,13 +2208,31 @@ export const useDrawingStore = create<DrawingState>()(
 
       deleteWalls: (ids) => {
         const idsSet = new Set(ids);
+        const deletedWalls = get().walls.filter((wall) => idsSet.has(wall.id));
         set((state) => ({
           walls: state.walls
             .filter((w) => !idsSet.has(w.id))
-            .map((wall) => ({
-              ...wall,
-              connectedWalls: wall.connectedWalls.filter((cid) => !idsSet.has(cid)),
-            })),
+            .map((wall) => {
+              const cleaned = normalizeWallBevel({
+                ...wall,
+                connectedWalls: wall.connectedWalls.filter((cid) => !idsSet.has(cid)),
+              });
+              const touchesStart = deletedWalls.some(
+                (deleted) =>
+                  pointsNear(cleaned.startPoint, deleted.startPoint, 2)
+                  || pointsNear(cleaned.startPoint, deleted.endPoint, 2)
+              );
+              const touchesEnd = deletedWalls.some(
+                (deleted) =>
+                  pointsNear(cleaned.endPoint, deleted.startPoint, 2)
+                  || pointsNear(cleaned.endPoint, deleted.endPoint, 2)
+              );
+              return {
+                ...cleaned,
+                startBevel: touchesStart ? { ...DEFAULT_BEVEL_CONTROL } : cleaned.startBevel,
+                endBevel: touchesEnd ? { ...DEFAULT_BEVEL_CONTROL } : cleaned.endBevel,
+              };
+            }),
           rooms: state.rooms.map((room) => ({
             ...room,
             wallIds: room.wallIds.filter((wallId) => !idsSet.has(wallId)),
@@ -2473,6 +2645,8 @@ export const useDrawingStore = create<DrawingState>()(
               layer: rawWall.layer ?? 'partition',
               interiorLine: rawWall.interiorLine ?? { start: { x: 0, y: 0 }, end: { x: 0, y: 0 } },
               exteriorLine: rawWall.exteriorLine ?? { start: { x: 0, y: 0 }, end: { x: 0, y: 0 } },
+              startBevel: normalizeBevelControl(rawWall.startBevel),
+              endBevel: normalizeBevelControl(rawWall.endBevel),
               connectedWalls: Array.isArray(rawWall.connectedWalls) ? rawWall.connectedWalls : [],
               openings: Array.isArray(rawWall.openings) ? rawWall.openings : [],
               properties3D: rawWall.properties3D ?? { ...DEFAULT_WALL_3D },

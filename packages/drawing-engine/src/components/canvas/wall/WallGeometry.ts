@@ -281,12 +281,16 @@ export function computeMiterJoin(
  */
 export function computeWallPolygon(wall: Wall, joins?: JoinData[]): Point2D[] {
   const JOIN_ENDPOINT_TOLERANCE = 2;
+  const clampOffset = (value: number, maxOffset: number): number =>
+    Math.min(maxOffset, Math.max(0, Number.isFinite(value) ? value : 0));
 
   // Start with basic rectangle from offset lines
   let interiorStart = wall.interiorLine.start;
   let interiorEnd = wall.interiorLine.end;
   let exteriorStart = wall.exteriorLine.start;
   let exteriorEnd = wall.exteriorLine.end;
+  let startJoin: JoinData | null = null;
+  let endJoin: JoinData | null = null;
 
   // Apply join modifications if provided
   if (joins && joins.length > 0) {
@@ -310,10 +314,42 @@ export function computeWallPolygon(wall: Wall, joins?: JoinData[]): Point2D[] {
       if (isStart) {
         interiorStart = join.interiorVertex;
         exteriorStart = join.exteriorVertex;
+        startJoin = join;
       } else {
         interiorEnd = join.interiorVertex;
         exteriorEnd = join.exteriorVertex;
+        endJoin = join;
       }
+    }
+  }
+
+  // Apply optional bevel offsets on joined endpoints.
+  if (startJoin?.bevelDirection) {
+    const direction = normalize(startJoin.bevelDirection);
+    if (Math.hypot(direction.x, direction.y) > 0.0001) {
+      const maxOffset = Math.max(
+        0,
+        startJoin.maxBevelOffset ?? wallLength(wall) / 2
+      );
+      const innerOffset = clampOffset(wall.startBevel?.innerOffset ?? 0, maxOffset);
+      const outerOffset = clampOffset(wall.startBevel?.outerOffset ?? 0, maxOffset);
+      // Bevel drag moves the control away from corner, while geometry cuts back toward corner.
+      interiorStart = add(interiorStart, scale(direction, -innerOffset));
+      exteriorStart = add(exteriorStart, scale(direction, -outerOffset));
+    }
+  }
+
+  if (endJoin?.bevelDirection) {
+    const direction = normalize(endJoin.bevelDirection);
+    if (Math.hypot(direction.x, direction.y) > 0.0001) {
+      const maxOffset = Math.max(
+        0,
+        endJoin.maxBevelOffset ?? wallLength(wall) / 2
+      );
+      const innerOffset = clampOffset(wall.endBevel?.innerOffset ?? 0, maxOffset);
+      const outerOffset = clampOffset(wall.endBevel?.outerOffset ?? 0, maxOffset);
+      interiorEnd = add(interiorEnd, scale(direction, -innerOffset));
+      exteriorEnd = add(exteriorEnd, scale(direction, -outerOffset));
     }
   }
 

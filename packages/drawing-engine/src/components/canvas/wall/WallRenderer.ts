@@ -9,6 +9,11 @@ import * as fabric from 'fabric';
 import { colorFromExposure, getArchitecturalMaterial, heatColorFromUValue } from '../../../attributes';
 import type { Point2D, Wall, WallColorMode, WallMaterial, JoinData } from '../../../types';
 import { WALL_MATERIAL_COLORS } from '../../../types/wall';
+import {
+  computeCornerBevelDotsForEndpoint,
+  computeDeadEndBevelDotsForEndpoint,
+  countWallsTouchingEndpoint,
+} from '../../../utils/wallBevel';
 import { MM_TO_PX } from '../scale';
 
 import {
@@ -34,6 +39,10 @@ type WallControlType =
   | 'wall-center-handle'
   | 'wall-endpoint-start'
   | 'wall-endpoint-end'
+  | 'wall-bevel-outer-start'
+  | 'wall-bevel-outer-end'
+  | 'wall-bevel-inner-start'
+  | 'wall-bevel-inner-end'
   | 'wall-thickness-interior'
   | 'wall-thickness-exterior'
   | 'wall-rotation-handle';
@@ -459,6 +468,8 @@ export class WallRenderer {
     this.removeControlPoints(wallId);
     const endpointSize = this.toSceneSize(14);
     const endpointStroke = this.toSceneSize(2.5);
+    const bevelRadius = this.toSceneSize(5);
+    const bevelStroke = this.toSceneSize(1.5);
     const thicknessRadius = this.toSceneSize(7);
     const centerRadius = this.toSceneSize(10);
     const rotationRadius = this.toSceneSize(10);
@@ -524,6 +535,66 @@ export class WallRenderer {
       lockMovementY: true,
     });
     this.annotateControlTarget(endHandle, wallId, 'wall-endpoint-end');
+
+    const allWalls = Array.from(this.wallData.values());
+    const cornerTolerance = this.toSceneTolerance(10, 2, 180);
+    const startCornerConnectionCount = countWallsTouchingEndpoint(wall, 'start', allWalls, cornerTolerance);
+    const endCornerConnectionCount = countWallsTouchingEndpoint(wall, 'end', allWalls, cornerTolerance);
+    const startCorner =
+      computeCornerBevelDotsForEndpoint(wall, 'start', allWalls, cornerTolerance)
+      ?? (startCornerConnectionCount === 0
+        ? computeDeadEndBevelDotsForEndpoint(wall, 'start')
+        : null);
+    const endCorner =
+      computeCornerBevelDotsForEndpoint(wall, 'end', allWalls, cornerTolerance)
+      ?? (endCornerConnectionCount === 0
+        ? computeDeadEndBevelDotsForEndpoint(wall, 'end')
+        : null);
+
+    const createBevelDot = (
+      corner: NonNullable<typeof startCorner>,
+      endpoint: 'start' | 'end',
+      kind: 'outer' | 'inner'
+    ): fabric.Circle => {
+      const dotPosition = kind === 'outer' ? corner.outerDotPosition : corner.innerDotPosition;
+      const controlType: WallControlType =
+        endpoint === 'start'
+          ? kind === 'outer'
+            ? 'wall-bevel-outer-start'
+            : 'wall-bevel-inner-start'
+          : kind === 'outer'
+            ? 'wall-bevel-outer-end'
+            : 'wall-bevel-inner-end';
+
+      const bevelDot = new fabric.Circle({
+        left: dotPosition.x * MM_TO_PX,
+        top: this.toCanvasY(dotPosition.y),
+        radius: bevelRadius,
+        fill: kind === 'outer' ? '#FF6B35' : '#4ECDC4',
+        stroke: '#FFFFFF',
+        strokeWidth: bevelStroke,
+        originX: 'center',
+        originY: 'center',
+        hoverCursor: 'ew-resize',
+        lockMovementX: true,
+        lockMovementY: true,
+      });
+      this.annotateControlTarget(bevelDot, wallId, controlType);
+      return bevelDot;
+    };
+
+    const startOuterBevelDot = startCorner
+      ? createBevelDot(startCorner, 'start', 'outer')
+      : null;
+    const startInnerBevelDot = startCorner
+      ? createBevelDot(startCorner, 'start', 'inner')
+      : null;
+    const endOuterBevelDot = endCorner
+      ? createBevelDot(endCorner, 'end', 'outer')
+      : null;
+    const endInnerBevelDot = endCorner
+      ? createBevelDot(endCorner, 'end', 'inner')
+      : null;
 
     const interiorThicknessHandle = new fabric.Circle({
       left: interiorMid.x * MM_TO_PX,
@@ -637,6 +708,10 @@ export class WallRenderer {
     const controls: fabric.FabricObject[] = [
       startHandle,
       endHandle,
+      ...(startOuterBevelDot ? [startOuterBevelDot] : []),
+      ...(startInnerBevelDot ? [startInnerBevelDot] : []),
+      ...(endOuterBevelDot ? [endOuterBevelDot] : []),
+      ...(endInnerBevelDot ? [endInnerBevelDot] : []),
       interiorThicknessHandle,
       exteriorThicknessHandle,
       centerHandle,
@@ -778,15 +853,20 @@ export class WallRenderer {
           const { interiorVertex, exteriorVertex } = isTJunction
             ? this.computeButtJoinVertices(wall, otherWall, match.endpoint)
             : computeMiterJoin(wall, otherWall, match.point);
+          const bevelDirection = this.computeBevelDirection(wall, otherWall, match.endpoint, match.point);
+          const maxBevelOffset = this.computeMaxBevelOffset(wall, otherWall);
 
           const join: JoinData = {
             wallId: wall.id,
             otherWallId: otherWall.id,
+            endpoint: match.endpoint,
             joinPoint: match.point,
             joinType,
             angle,
             interiorVertex,
             exteriorVertex,
+            bevelDirection,
+            maxBevelOffset,
           };
 
           const priority = match.matchType === 'endpoint' ? 2 : 1;
@@ -929,6 +1009,74 @@ export class WallRenderer {
       ) ?? exteriorFallback;
 
     return { interiorVertex, exteriorVertex };
+  }
+
+  private directionAwayFromEndpoint(wall: Wall, endpoint: 'start' | 'end'): Point2D {
+    const vector =
+      endpoint === 'start'
+        ? {
+            x: wall.endPoint.x - wall.startPoint.x,
+            y: wall.endPoint.y - wall.startPoint.y,
+          }
+        : {
+            x: wall.startPoint.x - wall.endPoint.x,
+            y: wall.startPoint.y - wall.endPoint.y,
+          };
+    const length = Math.hypot(vector.x, vector.y);
+    if (length < 0.000001) {
+      return { x: 0, y: 0 };
+    }
+    return {
+      x: vector.x / length,
+      y: vector.y / length,
+    };
+  }
+
+  private computeBevelDirection(
+    wall: Wall,
+    otherWall: Wall,
+    endpoint: 'start' | 'end',
+    joinPoint: Point2D
+  ): Point2D {
+    const tolerance = this.toSceneTolerance(10, 2, 180);
+    const wallDirection = this.directionAwayFromEndpoint(wall, endpoint);
+    const otherEndpoint: 'start' | 'end' =
+      this.pointDistance(otherWall.startPoint, joinPoint) <=
+      this.pointDistance(otherWall.endPoint, joinPoint)
+        ? 'start'
+        : 'end';
+    const otherDirection = this.directionAwayFromEndpoint(otherWall, otherEndpoint);
+    const bisector = {
+      x: wallDirection.x + otherDirection.x,
+      y: wallDirection.y + otherDirection.y,
+    };
+    const length = Math.hypot(bisector.x, bisector.y);
+    if (length < 0.000001) {
+      return wallDirection;
+    }
+    const normalized = {
+      x: bisector.x / length,
+      y: bisector.y / length,
+    };
+    if (Math.hypot(normalized.x, normalized.y) < 0.000001) {
+      return wallDirection;
+    }
+
+    // Keep direction stable even when the join point drifts within tolerance.
+    if (this.pointDistance(otherWall.startPoint, joinPoint) <= tolerance || this.pointDistance(otherWall.endPoint, joinPoint) <= tolerance) {
+      return normalized;
+    }
+    return normalized;
+  }
+
+  private computeMaxBevelOffset(wall: Wall, otherWall: Wall): number {
+    const lengthA = this.pointDistance(wall.startPoint, wall.endPoint);
+    const lengthB = this.pointDistance(otherWall.startPoint, otherWall.endPoint);
+    let maxOffset = Math.min(lengthA / 2, lengthB / 2);
+    if (lengthA * MM_TO_PX < 20 || lengthB * MM_TO_PX < 20) {
+      maxOffset = Math.min(maxOffset, Math.min(lengthA, lengthB) / 3);
+    }
+    return Math.max(0, maxOffset);
   }
 
   private pointDistance(a: Point2D, b: Point2D): number {

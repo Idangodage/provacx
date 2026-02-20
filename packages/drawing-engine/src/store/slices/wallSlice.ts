@@ -19,6 +19,7 @@ import type {
 } from '../../types';
 import {
   DEFAULT_WALL_3D,
+  DEFAULT_BEVEL_CONTROL,
   DEFAULT_WALL_SETTINGS,
   DEFAULT_WALL_DRAWING_STATE,
   DEFAULT_WALL_THICKNESS,
@@ -162,6 +163,8 @@ function createWall(params: CreateWallParams): Wall {
     layer,
     interiorLine,
     exteriorLine,
+    startBevel: { ...DEFAULT_BEVEL_CONTROL },
+    endBevel: { ...DEFAULT_BEVEL_CONTROL },
     connectedWalls: [],
     openings: [],
     properties3D: {
