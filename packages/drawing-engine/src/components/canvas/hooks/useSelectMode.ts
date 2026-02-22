@@ -1453,65 +1453,33 @@ export function useSelectMode({
       const enableThicknessPresetSnap = modifierKeysRef.current.shift;
       const center = midpoint(baseline.startPoint, baseline.endPoint);
       const centerOffset = dot(center, normal);
-      const interiorOffset = centerOffset + baseline.thickness / 2;
-      const exteriorOffset = centerOffset - baseline.thickness / 2;
       const pointerOffset = dot(point, normal);
 
-      let nextInteriorOffset = interiorOffset;
-      let nextExteriorOffset = exteriorOffset;
-
-      if (state.side === 'exterior') {
-        let nextThickness = enableThicknessPresetSnap
-          ? snapThickness(interiorOffset - pointerOffset)
-          : interiorOffset - pointerOffset;
-        nextThickness = clamp(nextThickness, MIN_WALL_THICKNESS, MAX_WALL_THICKNESS);
-        nextExteriorOffset = interiorOffset - nextThickness;
-      } else {
-        let nextThickness = enableThicknessPresetSnap
-          ? snapThickness(pointerOffset - exteriorOffset)
-          : pointerOffset - exteriorOffset;
-        nextThickness = clamp(nextThickness, MIN_WALL_THICKNESS, MAX_WALL_THICKNESS);
-        nextInteriorOffset = exteriorOffset + nextThickness;
-      }
-
+      // Compute thickness as 2× the perpendicular distance from the centerline to
+      // the pointer. Keeping startPoint/endPoint fixed preserves endpoint connections
+      // to neighboring walls, ensuring uniform and consistent thickness appearance.
+      const rawThickness = 2 * Math.abs(pointerOffset - centerOffset);
       const nextThickness = clamp(
-        enableThicknessPresetSnap
-          ? snapThickness(nextInteriorOffset - nextExteriorOffset)
-          : nextInteriorOffset - nextExteriorOffset,
+        enableThicknessPresetSnap ? snapThickness(rawThickness) : rawThickness,
         MIN_WALL_THICKNESS,
         MAX_WALL_THICKNESS
       );
-      if (state.side === 'exterior') {
-        nextExteriorOffset = interiorOffset - nextThickness;
-      } else {
-        nextInteriorOffset = exteriorOffset + nextThickness;
-      }
 
-      const nextCenterOffset = (nextInteriorOffset + nextExteriorOffset) / 2;
-      const translation = scale(normal, nextCenterOffset - centerOffset);
-      const startPoint = add(baseline.startPoint, translation);
-      const endPoint = add(baseline.endPoint, translation);
-
+      // Only update thickness; centerline (startPoint/endPoint) stays fixed.
       updateWallIfChanged(
         baseline.id,
-        {
-          startPoint,
-          endPoint,
-          thickness: nextThickness,
-        },
+        { thickness: nextThickness },
         { skipHistory: true, source: 'drag' }
       );
 
       const updatedWall: Wall = {
         ...baseline,
-        startPoint,
-        endPoint,
         thickness: nextThickness,
       };
       setStatusFromWall(updatedWall);
 
       const handlePoint = add(
-        midpoint(startPoint, endPoint),
+        center,
         scale(normal, state.side === 'interior' ? nextThickness / 2 : -nextThickness / 2)
       );
 
