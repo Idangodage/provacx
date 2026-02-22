@@ -101,11 +101,10 @@ function TabButton({
     <button
       type="button"
       onClick={onClick}
-      className={`rounded border px-2 py-1 text-xs ${
-        active
+      className={`rounded border px-2 py-1 text-xs ${active
           ? 'border-amber-400 bg-amber-200 text-amber-900'
           : 'border-amber-200/80 bg-white text-slate-600 hover:bg-amber-50'
-      }`}
+        }`}
     >
       {label}
     </button>
@@ -363,11 +362,10 @@ function WallSection({ propertyUnit }: { propertyUnit: PropertyUnit }) {
             <span className="text-sm text-slate-700">{selectedWall.properties3D.thermalResistance.toFixed(2)} m²K/W</span>
           </PropertyRow>
           <PropertyRow label="Overall U-Value">
-            <span className={`text-sm ${
-              selectedWall.properties3D.overallUValue < MIN_U_VALUE || selectedWall.properties3D.overallUValue > MAX_U_VALUE
+            <span className={`text-sm ${selectedWall.properties3D.overallUValue < MIN_U_VALUE || selectedWall.properties3D.overallUValue > MAX_U_VALUE
                 ? 'text-rose-600'
                 : 'text-slate-700'
-            }`}>
+              }`}>
               {selectedWall.properties3D.overallUValue.toFixed(2)} W/(m².K)
             </span>
           </PropertyRow>
@@ -477,9 +475,8 @@ function WallSection({ propertyUnit }: { propertyUnit: PropertyUnit }) {
                   reorderThermalLayer(dragLayerIndex, index);
                   setDragLayerIndex(null);
                 }}
-                className={`grid grid-cols-[1fr_auto_auto] gap-1 items-center rounded px-1 ${
-                  dragLayerIndex === index ? 'bg-amber-100/70' : ''
-                }`}
+                className={`grid grid-cols-[1fr_auto_auto] gap-1 items-center rounded px-1 ${dragLayerIndex === index ? 'bg-amber-100/70' : ''
+                  }`}
               >
                 <select
                   value={layer.materialId}

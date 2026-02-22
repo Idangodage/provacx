@@ -75,6 +75,14 @@ export type {
   DetectedRoom,
   RoomLabelTag,
   RoomDetectionConfig,
+  HvacElement,
+  HvacElementType,
+  HvacMountType,
+  ElevationHvacProjection,
+  EditorViewMode,
+  ElevationView,
+  ElevationSettings,
+  SectionLine,
 } from './types';
 
 // Utilities

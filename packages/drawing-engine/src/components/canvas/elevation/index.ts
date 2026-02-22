@@ -4,4 +4,4 @@ export {
   generateCustomElevationView,
   regenerateElevationViews,
 } from './elevationGenerator';
-
+export { ElevationViewCanvas, type ElevationViewCanvasProps } from './ElevationViewCanvas';

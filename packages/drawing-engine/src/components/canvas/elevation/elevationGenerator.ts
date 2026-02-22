@@ -1,15 +1,17 @@
 /**
  * Elevation projection helpers.
  *
- * Transforms plan walls + openings into 2D elevation geometry.
+ * Transforms plan walls + openings + HVAC elements into 2D elevation geometry.
  */
 
 import type {
   CompassDirection,
+  ElevationHvacProjection,
   ElevationSettings,
   ElevationView,
   ElevationViewKind,
   ElevationWallProjection,
+  HvacElement,
   Opening,
   Point2D,
   SectionLine,
@@ -161,6 +163,73 @@ function projectWall(
   };
 }
 
+/**
+ * Projects an HVAC element into an elevation view.
+ *
+ * The HVAC element has a plan-view bounding box (position, width, depth)
+ * and a vertical extent (elevation, height). We project the four corners
+ * of the plan bounding box onto the elevation basis to find xStart/xEnd,
+ * and check the depth axis to determine visibility.
+ */
+function projectHvacElement(
+  element: HvacElement,
+  basis: Basis,
+  _settings: ElevationSettings,
+  sectionDepthMm: number
+): ElevationHvacProjection | null {
+  // HVAC element corners in plan
+  const corners = [
+    element.position,
+    { x: element.position.x + element.width, y: element.position.y },
+    { x: element.position.x + element.width, y: element.position.y + element.depth },
+    { x: element.position.x, y: element.position.y + element.depth },
+  ];
+
+  // Project corners onto the elevation axis
+  const projections = corners.map((corner) => {
+    const relative = subtract(corner, basis.origin);
+    return {
+      x: dot(relative, basis.axisX),
+      depth: dot(relative, basis.axisDepth),
+    };
+  });
+
+  const xValues = projections.map((p) => p.x);
+  const depthValues = projections.map((p) => p.depth);
+  const xStart = Math.min(...xValues);
+  const xEnd = Math.max(...xValues);
+  const minDepth = Math.min(...depthValues);
+  const maxDepth = Math.max(...depthValues);
+  const avgDepth = (minDepth + maxDepth) / 2;
+
+  // Determine visibility based on depth relative to section plane
+  let visibility: ElevationHvacProjection['visibility'];
+  if (maxDepth < 0) {
+    // Entirely behind the viewer — not visible
+    return null;
+  } else if (minDepth >= 0 && maxDepth <= sectionDepthMm) {
+    visibility = 'visible';
+  } else if (minDepth < 0 || maxDepth > sectionDepthMm) {
+    // Section plane cuts through the element
+    visibility = 'cut';
+  } else {
+    visibility = 'ghost';
+  }
+
+  return {
+    id: `hvac-elev-${element.id}`,
+    hvacElementId: element.id,
+    type: element.type,
+    xStart,
+    xEnd,
+    yBottom: element.elevation,
+    yTop: element.elevation + element.height,
+    depth: Math.max(0, avgDepth),
+    visibility,
+    label: element.label,
+  };
+}
+
 function computeViewBounds(projectedWalls: ElevationWallProjection[]): {
   minX: number;
   maxX: number;
@@ -184,6 +253,7 @@ function computeViewBounds(projectedWalls: ElevationWallProjection[]): {
 
 function buildViewHash(
   walls: Wall[],
+  hvacElements: HvacElement[],
   sectionLine: SectionLine | null,
   settings: ElevationSettings,
   kind: ElevationViewKind
@@ -209,6 +279,11 @@ function buildViewHash(
     .sort()
     .join('|');
 
+  const hvacHash = hvacElements
+    .map((el) => `${el.id}:${el.position.x.toFixed(0)}:${el.position.y.toFixed(0)}:${el.width}:${el.depth}:${el.elevation}:${el.height}`)
+    .sort()
+    .join('|');
+
   const sectionHash = sectionLine
     ? [
       sectionLine.id,
@@ -221,7 +296,7 @@ function buildViewHash(
     ].join(':')
     : 'none';
 
-  return `${kind}:${sectionHash}:${settings.showDepthCueing ? 1 : 0}:${settings.renderMode}:${wallHash}`;
+  return `${kind}:${sectionHash}:${settings.showDepthCueing ? 1 : 0}:${settings.renderMode}:${wallHash}:${hvacHash}`;
 }
 
 function createBasisForStandard(kind: ElevationViewKind): { basis: Basis; viewDirection: CompassDirection } {
@@ -268,11 +343,12 @@ function createBasisForStandard(kind: ElevationViewKind): { basis: Basis; viewDi
 export function createStandardElevationViews(
   walls: Wall[],
   existingViews: ElevationView[],
-  settings: ElevationSettings = DEFAULT_ELEVATION_SETTINGS
+  settings: ElevationSettings = DEFAULT_ELEVATION_SETTINGS,
+  hvacElements: HvacElement[] = []
 ): ElevationView[] {
   return STANDARD_VIEW_ORDER.map((kind) => {
     const existing = existingViews.find((view) => view.kind === kind);
-    const sourceHash = buildViewHash(walls, null, settings, kind);
+    const sourceHash = buildViewHash(walls, hvacElements, null, settings, kind);
     if (existing && existing.sourceHash === sourceHash) {
       return existing;
     }
@@ -292,6 +368,11 @@ export function createStandardElevationViews(
       .filter((wall): wall is ElevationWallProjection => Boolean(wall))
       .sort((a, b) => b.depth - a.depth);
 
+    // Project HVAC elements
+    const projectedHvac = hvacElements
+      .map((el) => projectHvacElement(el, basis, settings, Infinity))
+      .filter((el): el is ElevationHvacProjection => Boolean(el));
+
     const bounds = computeViewBounds(projected);
     return {
       id: existing?.id ?? `elevation-${kind}`,
@@ -300,6 +381,7 @@ export function createStandardElevationViews(
       sectionLineId: null,
       viewDirection,
       walls: projected,
+      hvacElements: projectedHvac,
       minX: bounds.minX,
       maxX: bounds.maxX,
       maxHeightMm: bounds.maxHeightMm,
@@ -315,7 +397,8 @@ export function generateCustomElevationView(
   sectionLine: SectionLine,
   walls: Wall[],
   existing: ElevationView | null,
-  settings: ElevationSettings = DEFAULT_ELEVATION_SETTINGS
+  settings: ElevationSettings = DEFAULT_ELEVATION_SETTINGS,
+  hvacElements: HvacElement[] = []
 ): ElevationView {
   const lineVector = normalize(subtract(sectionLine.endPoint, sectionLine.startPoint));
   const basis: Basis = {
@@ -326,7 +409,7 @@ export function generateCustomElevationView(
       y: perpendicular(lineVector).y * sectionLine.direction,
     },
   };
-  const sourceHash = buildViewHash(walls, sectionLine, settings, 'custom');
+  const sourceHash = buildViewHash(walls, hvacElements, sectionLine, settings, 'custom');
   if (existing && existing.sourceHash === sourceHash) {
     return existing;
   }
@@ -352,6 +435,11 @@ export function generateCustomElevationView(
     .filter((wall): wall is ElevationWallProjection => Boolean(wall))
     .sort((a, b) => b.depth - a.depth);
 
+  // Project HVAC elements with section line depth
+  const projectedHvac = hvacElements
+    .map((el) => projectHvacElement(el, basis, settings, sectionLine.depthMm))
+    .filter((el): el is ElevationHvacProjection => Boolean(el));
+
   const bounds = computeViewBounds(projected);
   return {
     id: existing?.id ?? generateId(),
@@ -360,6 +448,7 @@ export function generateCustomElevationView(
     sectionLineId: sectionLine.id,
     viewDirection: 'custom',
     walls: projected,
+    hvacElements: projectedHvac,
     minX: bounds.minX,
     maxX: bounds.maxX,
     maxHeightMm: bounds.maxHeightMm,
@@ -374,9 +463,10 @@ export function regenerateElevationViews(
   walls: Wall[],
   sectionLines: SectionLine[],
   existingViews: ElevationView[],
-  settings: ElevationSettings = DEFAULT_ELEVATION_SETTINGS
+  settings: ElevationSettings = DEFAULT_ELEVATION_SETTINGS,
+  hvacElements: HvacElement[] = []
 ): ElevationView[] {
-  const standardViews = createStandardElevationViews(walls, existingViews, settings);
+  const standardViews = createStandardElevationViews(walls, existingViews, settings, hvacElements);
   const sectionsById = new Map(sectionLines.map((sectionLine) => [sectionLine.id, sectionLine]));
   const existingCustom = existingViews.filter((view) => view.kind === 'custom');
 
@@ -385,7 +475,7 @@ export function regenerateElevationViews(
       if (!view.sectionLineId) return null;
       const line = sectionsById.get(view.sectionLineId);
       if (!line) return null;
-      return generateCustomElevationView(line, walls, view, settings);
+      return generateCustomElevationView(line, walls, view, settings, hvacElements);
     })
     .filter((view): view is ElevationView => Boolean(view));
 

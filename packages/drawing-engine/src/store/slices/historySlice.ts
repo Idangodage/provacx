@@ -14,6 +14,7 @@ import type {
     SymbolInstance2D,
     HistoryEntry,
     ElevationView,
+    HvacElement,
     Room,
     SectionLine,
     Wall,
@@ -55,6 +56,7 @@ interface SliceDependencies {
     sectionLines: SectionLine[];
     elevationViews: ElevationView[];
     activeElevationViewId: string | null;
+    hvacElements: HvacElement[];
 }
 
 // =============================================================================
@@ -87,6 +89,7 @@ export const createHistorySlice: StateCreator<
             sectionLines: state.sectionLines,
             elevationViews: state.elevationViews,
             activeElevationViewId: state.activeElevationViewId,
+            hvacElements: state.hvacElements,
         });
         const entry = createHistoryEntry(action, snapshot);
         const trimmedHistory = state.history.slice(0, state.historyIndex + 1);
@@ -118,6 +121,7 @@ export const createHistorySlice: StateCreator<
             sectionLines: snapshot.sectionLines ?? [],
             elevationViews: snapshot.elevationViews ?? [],
             activeElevationViewId: snapshot.activeElevationViewId ?? null,
+            hvacElements: snapshot.hvacElements ?? [],
             historyIndex: targetIndex,
             canUndo: targetIndex > 0,
             canRedo: true,
@@ -141,6 +145,7 @@ export const createHistorySlice: StateCreator<
             sectionLines: snapshot.sectionLines ?? [],
             elevationViews: snapshot.elevationViews ?? [],
             activeElevationViewId: snapshot.activeElevationViewId ?? null,
+            hvacElements: snapshot.hvacElements ?? [],
             historyIndex: targetIndex,
             canUndo: true,
             canRedo: targetIndex < history.length - 1,

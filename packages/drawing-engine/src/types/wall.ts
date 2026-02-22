@@ -32,6 +32,9 @@ export type SectionLineKind = 'elevation' | 'section';
 export type ElevationViewKind = 'north' | 'south' | 'east' | 'west' | 'custom';
 export type ElevationRenderMode = 'simplified' | 'realistic';
 export type SectionLineDirection = 1 | -1;
+export type EditorViewMode = 'plan' | 'split' | 'front-elevation' | 'end-elevation';
+export type HvacElementType = 'ducted-ac' | 'split-ac' | 'diffuser' | 'return-grille';
+export type HvacMountType = 'ceiling' | 'floor' | 'wall';
 
 export interface ElevationOpeningProjection {
   id: string;
@@ -48,6 +51,41 @@ export interface ElevationOpeningProjection {
   wallXEnd: number;
   wallLength: number;
   wallOpeningPosition: number;
+}
+
+/**
+ * HvacElement - HVAC equipment placed in the drawing.
+ * Coordinates are in mm. Position is the SW corner in plan view.
+ */
+export interface HvacElement {
+  id: string;
+  type: HvacElementType;
+  position: Point2D;        // plan XY in mm (SW corner of bounding box)
+  width: number;            // mm — extent along X axis in plan
+  depth: number;            // mm — extent along Y axis in plan
+  height: number;           // mm — unit thickness in Z
+  elevation: number;        // mm from floor to bottom face of unit
+  mountType: HvacMountType;
+  label: string;
+  roomId?: string;
+  supplyZoneRatio: number;  // 0–1, portion of width that is supply (rest is return)
+  properties: Record<string, unknown>;
+}
+
+/**
+ * ElevationHvacProjection - Projected HVAC element for elevation display.
+ */
+export interface ElevationHvacProjection {
+  id: string;
+  hvacElementId: string;
+  type: HvacElementType;
+  xStart: number;           // mm along the elevation X axis
+  xEnd: number;
+  yBottom: number;          // mm from floor
+  yTop: number;
+  depth: number;            // distance from section plane
+  visibility: 'visible' | 'cut' | 'ghost';
+  label: string;
 }
 
 export interface ElevationWallProjection {
@@ -86,6 +124,7 @@ export interface ElevationView {
   sectionLineId: string | null;
   viewDirection: CompassDirection | 'custom';
   walls: ElevationWallProjection[];
+  hvacElements: ElevationHvacProjection[];
   minX: number;
   maxX: number;
   maxHeightMm: number;
@@ -545,6 +584,19 @@ export const DEFAULT_HVAC_DESIGN_CONDITIONS: HvacDesignConditions = {
     summerAdjustment: 1,
     winterAdjustment: 1,
   },
+};
+
+export const DEFAULT_DUCTED_AC: Omit<HvacElement, 'id'> = {
+  type: 'ducted-ac',
+  position: { x: 0, y: 0 },
+  width: 2200,
+  depth: 1000,
+  height: 280,
+  elevation: 2700 - 280,   // ceiling-mounted, default ceiling at 2700mm
+  mountType: 'ceiling',
+  label: 'Ducted A/C',
+  supplyZoneRatio: 0.5,
+  properties: {},
 };
 
 export const ANGLE_CONSTRAINTS = [0, 90, 180, 270];

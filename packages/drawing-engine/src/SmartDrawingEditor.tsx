@@ -26,6 +26,10 @@ import {
   Home,
   RotateCcw,
   RotateCw,
+  Layers,
+  SplitSquareVertical,
+  ArrowUpFromLine,
+  ArrowRightFromLine,
 } from 'lucide-react';
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 
@@ -39,6 +43,7 @@ import {
   ZoomIndicator,
   CoordinatesDisplay,
 } from './components';
+import { ElevationViewCanvas } from './components/canvas/elevation';
 import { MM_TO_PX } from './components/canvas';
 import {
   DEFAULT_ARCHITECTURAL_OBJECT_LIBRARY,
@@ -511,6 +516,12 @@ export function SmartDrawingEditor({
     setPanOffset,
     displayUnit,
     processingStatus,
+    editorViewMode,
+    setEditorViewMode,
+    elevationViews,
+    elevationSettings,
+    sectionLines,
+    hvacElements,
   } = store;
   const canUndo = historyIndex > 0;
   const canRedo = historyIndex < history.length - 1;
@@ -1121,30 +1132,152 @@ export function SmartDrawingEditor({
         )}
 
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          <AttributeQuickToolbar className="!px-2 !py-1.5" />
+          <div className="flex items-center gap-1 border-b border-amber-200/70 bg-[#fef9ec] px-2 py-1">
+            <AttributeQuickToolbar className="!px-0 !py-0 !border-0 flex-1" />
+            <div className="h-4 w-px bg-amber-200/80 mx-1" />
+            <div className="flex items-center gap-0.5">
+              <button
+                type="button"
+                onClick={() => setEditorViewMode('plan')}
+                className={`inline-flex items-center gap-1 rounded px-2 py-1 text-[10px] font-medium transition-colors ${
+                  editorViewMode === 'plan'
+                    ? 'bg-amber-200 text-amber-900 border border-amber-300'
+                    : 'text-slate-500 hover:bg-amber-50 border border-transparent'
+                }`}
+                title="Plan view"
+              >
+                <Layers size={12} />
+                Plan
+              </button>
+              <button
+                type="button"
+                onClick={() => setEditorViewMode('split')}
+                className={`inline-flex items-center gap-1 rounded px-2 py-1 text-[10px] font-medium transition-colors ${
+                  editorViewMode === 'split'
+                    ? 'bg-amber-200 text-amber-900 border border-amber-300'
+                    : 'text-slate-500 hover:bg-amber-50 border border-transparent'
+                }`}
+                title="Split view (Plan + Elevation)"
+              >
+                <SplitSquareVertical size={12} />
+                Split
+              </button>
+              <button
+                type="button"
+                onClick={() => setEditorViewMode('front-elevation')}
+                className={`inline-flex items-center gap-1 rounded px-2 py-1 text-[10px] font-medium transition-colors ${
+                  editorViewMode === 'front-elevation'
+                    ? 'bg-amber-200 text-amber-900 border border-amber-300'
+                    : 'text-slate-500 hover:bg-amber-50 border border-transparent'
+                }`}
+                title="Front elevation"
+              >
+                <ArrowUpFromLine size={12} />
+                Front
+              </button>
+              <button
+                type="button"
+                onClick={() => setEditorViewMode('end-elevation')}
+                className={`inline-flex items-center gap-1 rounded px-2 py-1 text-[10px] font-medium transition-colors ${
+                  editorViewMode === 'end-elevation'
+                    ? 'bg-amber-200 text-amber-900 border border-amber-300'
+                    : 'text-slate-500 hover:bg-amber-50 border border-transparent'
+                }`}
+                title="End elevation"
+              >
+                <ArrowRightFromLine size={12} />
+                End
+              </button>
+            </div>
+          </div>
 
-          <DrawingCanvas
-            className="flex-1"
-            onCanvasReady={handleCanvasReady}
-            showGrid={showGrid}
-            showRulers={showRulers}
-            snapToGrid={snapToGrid}
-            paperUnit={paperUnit}
-            realWorldUnit={displayUnit}
-            scaleDrawing={scaleDrawing}
-            scaleReal={scaleReal}
-            rulerMode={rulerMode}
-            majorTickInterval={majorTickInterval}
-            tickSubdivisions={tickSubdivisions}
-            showRulerLabels={showRulerLabels}
-            gridMode={gridMode}
-            majorGridSize={majorGridSize}
-            gridSubdivisions={gridSubdivisions}
-            objectDefinitions={architecturalObjects}
-            pendingPlacementObjectId={pendingPlacementObjectId}
-            onObjectPlaced={handleObjectPlaced}
-            onCancelObjectPlacement={handleCancelObjectPlacement}
-          />
+          {editorViewMode === 'plan' && (
+            <DrawingCanvas
+              className="flex-1"
+              onCanvasReady={handleCanvasReady}
+              showGrid={showGrid}
+              showRulers={showRulers}
+              snapToGrid={snapToGrid}
+              paperUnit={paperUnit}
+              realWorldUnit={displayUnit}
+              scaleDrawing={scaleDrawing}
+              scaleReal={scaleReal}
+              rulerMode={rulerMode}
+              majorTickInterval={majorTickInterval}
+              tickSubdivisions={tickSubdivisions}
+              showRulerLabels={showRulerLabels}
+              gridMode={gridMode}
+              majorGridSize={majorGridSize}
+              gridSubdivisions={gridSubdivisions}
+              objectDefinitions={architecturalObjects}
+              pendingPlacementObjectId={pendingPlacementObjectId}
+              onObjectPlaced={handleObjectPlaced}
+              onCancelObjectPlacement={handleCancelObjectPlacement}
+            />
+          )}
+
+          {editorViewMode === 'split' && (
+            <div className="flex flex-1 overflow-hidden">
+              <DrawingCanvas
+                className="flex-1 border-r border-amber-200/70"
+                onCanvasReady={handleCanvasReady}
+                showGrid={showGrid}
+                showRulers={showRulers}
+                snapToGrid={snapToGrid}
+                paperUnit={paperUnit}
+                realWorldUnit={displayUnit}
+                scaleDrawing={scaleDrawing}
+                scaleReal={scaleReal}
+                rulerMode={rulerMode}
+                majorTickInterval={majorTickInterval}
+                tickSubdivisions={tickSubdivisions}
+                showRulerLabels={showRulerLabels}
+                gridMode={gridMode}
+                majorGridSize={majorGridSize}
+                gridSubdivisions={gridSubdivisions}
+                objectDefinitions={architecturalObjects}
+                pendingPlacementObjectId={pendingPlacementObjectId}
+                onObjectPlaced={handleObjectPlaced}
+                onCancelObjectPlacement={handleCancelObjectPlacement}
+              />
+              <div className="flex flex-1 flex-col overflow-hidden">
+                <ElevationViewCanvas
+                  className="flex-1 border-b border-amber-200/40"
+                  elevationView={elevationViews.find((v) => v.kind === 'north') ?? null}
+                  elevationSettings={elevationSettings}
+                  viewLabel="FRONT ELEVATION"
+                  roomHeightMm={rooms[0]?.properties3D?.ceilingHeight ?? 2700}
+                />
+                <ElevationViewCanvas
+                  className="flex-1"
+                  elevationView={elevationViews.find((v) => v.kind === 'east') ?? null}
+                  elevationSettings={elevationSettings}
+                  viewLabel="END ELEVATION"
+                  roomHeightMm={rooms[0]?.properties3D?.ceilingHeight ?? 2700}
+                />
+              </div>
+            </div>
+          )}
+
+          {editorViewMode === 'front-elevation' && (
+            <ElevationViewCanvas
+              className="flex-1"
+              elevationView={elevationViews.find((v) => v.kind === 'north') ?? elevationViews.find((v) => v.kind === 'custom') ?? null}
+              elevationSettings={elevationSettings}
+              viewLabel="FRONT ELEVATION"
+              roomHeightMm={rooms[0]?.properties3D?.ceilingHeight ?? 2700}
+            />
+          )}
+
+          {editorViewMode === 'end-elevation' && (
+            <ElevationViewCanvas
+              className="flex-1"
+              elevationView={elevationViews.find((v) => v.kind === 'east') ?? elevationViews.find((v) => v.kind === 'custom') ?? null}
+              elevationSettings={elevationSettings}
+              viewLabel="END ELEVATION"
+              roomHeightMm={rooms[0]?.properties3D?.ceilingHeight ?? 2700}
+            />
+          )}
         </div>
 
         <button

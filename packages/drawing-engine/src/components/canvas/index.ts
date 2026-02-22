@@ -50,5 +50,8 @@ export * from './object';
 // Elevation module
 export * from './elevation';
 
+// HVAC module
+export * from './hvac';
+
 // UI Components
 export * from './ui';

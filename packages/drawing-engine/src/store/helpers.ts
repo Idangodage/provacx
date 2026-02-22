@@ -11,6 +11,7 @@ import type {
     Annotation2D,
     Sketch2D,
     ElevationView,
+    HvacElement,
     SectionLine,
     SymbolInstance2D,
     HistoryEntry,
@@ -43,6 +44,7 @@ export function createEmptyHistorySnapshot(): HistoryEntry['snapshot'] {
         sectionLines: [],
         elevationViews: [],
         activeElevationViewId: null,
+        hvacElements: [],
     };
 }
 
@@ -66,6 +68,7 @@ export function createHistorySnapshot(state: {
     sectionLines: SectionLine[];
     elevationViews: ElevationView[];
     activeElevationViewId: string | null;
+    hvacElements: HvacElement[];
 }): HistoryEntry['snapshot'] {
     return {
         detectedElements: deepClone(state.detectedElements),
@@ -78,5 +81,6 @@ export function createHistorySnapshot(state: {
         sectionLines: deepClone(state.sectionLines),
         elevationViews: deepClone(state.elevationViews),
         activeElevationViewId: state.activeElevationViewId,
+        hvacElements: deepClone(state.hvacElements),
     };
 }

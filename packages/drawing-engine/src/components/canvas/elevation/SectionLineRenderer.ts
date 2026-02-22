@@ -48,9 +48,19 @@ export class SectionLineRenderer {
   private hoveredSectionLineId: string | null = null;
   private previewObjects: fabric.FabricObject[] = [];
   private showReferenceIndicators = true;
+  private draggable = true;
+  private onSectionLineMoved: ((id: string, deltaX: number, deltaY: number) => void) | null = null;
 
   constructor(canvas: fabric.Canvas) {
     this.canvas = canvas;
+  }
+
+  setDraggable(draggable: boolean): void {
+    this.draggable = draggable;
+  }
+
+  onMoved(callback: (id: string, deltaX: number, deltaY: number) => void): void {
+    this.onSectionLineMoved = callback;
   }
 
   setShowReferenceIndicators(show: boolean): void {
@@ -209,19 +219,37 @@ export class SectionLineRenderer {
       objects.push(reference);
     }
 
+    const isDraggable = this.draggable && !sectionLine.locked;
     const group = new fabric.Group(objects, {
       selectable: true,
       evented: true,
       subTargetCheck: true,
       hasControls: false,
       hasBorders: false,
-      lockMovementX: true,
-      lockMovementY: true,
+      lockMovementX: !isDraggable,
+      lockMovementY: !isDraggable,
       objectCaching: false,
     }) as SectionGroup;
     group.id = sectionLine.id;
     group.sectionLineId = sectionLine.id;
     group.name = `section-line-${sectionLine.id}`;
+
+    // Track drag for position updates
+    if (isDraggable) {
+      let dragStartLeft = 0;
+      let dragStartTop = 0;
+      group.on('mousedown', () => {
+        dragStartLeft = group.left ?? 0;
+        dragStartTop = group.top ?? 0;
+      });
+      group.on('mouseup', () => {
+        const deltaX = (group.left ?? 0) - dragStartLeft;
+        const deltaY = (group.top ?? 0) - dragStartTop;
+        if ((Math.abs(deltaX) > 1 || Math.abs(deltaY) > 1) && this.onSectionLineMoved) {
+          this.onSectionLineMoved(sectionLine.id, deltaX, deltaY);
+        }
+      });
+    }
 
     this.canvas.add(group);
     this.groups.set(sectionLine.id, group);

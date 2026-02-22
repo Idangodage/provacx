@@ -321,7 +321,7 @@ export interface PageLayout {
 // History Types
 // =============================================================================
 
-import type { ElevationView, Room, SectionLine, Wall } from './wall';
+import type { ElevationView, HvacElement, Room, SectionLine, Wall } from './wall';
 
 export interface HistorySnapshot {
   detectedElements: DetectedElement[];
@@ -334,6 +334,7 @@ export interface HistorySnapshot {
   sectionLines: SectionLine[];
   elevationViews: ElevationView[];
   activeElevationViewId: string | null;
+  hvacElements: HvacElement[];
 }
 
 export interface HistoryEntry {

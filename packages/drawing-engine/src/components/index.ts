@@ -13,3 +13,5 @@ export { Rulers as DrawingRulers, type RulersProps as DrawingRulersProps } from 
 export { PageLayout as DrawingPageLayout, type PageLayoutProps as DrawingPageLayoutProps } from './canvas/PageLayout';
 export { RoomLayer, type RoomLayerProps } from './RoomLayer';
 export { RoomTag, type RoomTagProps } from './RoomTag';
+export { ElevationViewCanvas, type ElevationViewCanvasProps } from './canvas/elevation';
+export { HvacPlanRenderer } from './canvas/hvac';

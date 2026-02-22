@@ -1132,13 +1132,13 @@ export class WallRenderer {
     const vector =
       endpoint === 'start'
         ? {
-            x: wall.endPoint.x - wall.startPoint.x,
-            y: wall.endPoint.y - wall.startPoint.y,
-          }
+          x: wall.endPoint.x - wall.startPoint.x,
+          y: wall.endPoint.y - wall.startPoint.y,
+        }
         : {
-            x: wall.startPoint.x - wall.endPoint.x,
-            y: wall.startPoint.y - wall.endPoint.y,
-          };
+          x: wall.startPoint.x - wall.endPoint.x,
+          y: wall.startPoint.y - wall.endPoint.y,
+        };
     const length = Math.hypot(vector.x, vector.y);
     if (length < 0.000001) {
       return { x: 0, y: 0 };
@@ -1159,7 +1159,7 @@ export class WallRenderer {
     const wallDirection = this.directionAwayFromEndpoint(wall, endpoint);
     const otherEndpoint: 'start' | 'end' =
       this.pointDistance(otherWall.startPoint, joinPoint) <=
-      this.pointDistance(otherWall.endPoint, joinPoint)
+        this.pointDistance(otherWall.endPoint, joinPoint)
         ? 'start'
         : 'end';
     const otherDirection = this.directionAwayFromEndpoint(otherWall, otherEndpoint);

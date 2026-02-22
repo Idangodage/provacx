@@ -37,6 +37,7 @@ import {
     DimensionRenderer,
     ObjectRenderer,
     SectionLineRenderer,
+    HvacPlanRenderer,
 } from './canvas';
 import { RoomConfigPopup } from './canvas/wall';
 
@@ -148,6 +149,7 @@ export function DrawingCanvas({
     const dimensionRendererRef = useRef<DimensionRenderer | null>(null);
     const objectRendererRef = useRef<ObjectRenderer | null>(null);
     const sectionLineRendererRef = useRef<SectionLineRenderer | null>(null);
+    const hvacRendererRef = useRef<HvacPlanRenderer | null>(null);
     const zoomRef = useRef(1);
     const panOffsetRef = useRef<Point2D>({ x: 0, y: 0 });
     const paperScaleRatioRef = useRef(1);
@@ -252,9 +254,11 @@ export function DrawingCanvas({
         updateSectionLine,
         deleteSectionLine,
         generateElevationForSection,
+        regenerateElevations,
         connectWalls,
         createRoomWalls,
         moveRoom,
+        hvacElements,
     } = useSmartDrawingStore();
 
     // Derived values
@@ -1274,6 +1278,29 @@ export function DrawingCanvas({
         dimensionRendererRef.current = new DimensionRenderer(canvas);
         objectRendererRef.current = new ObjectRenderer(canvas);
         sectionLineRendererRef.current = new SectionLineRenderer(canvas);
+        hvacRendererRef.current = new HvacPlanRenderer(canvas);
+
+        // Enable section line dragging with store update
+        sectionLineRendererRef.current.setDraggable(true);
+        sectionLineRendererRef.current.onMoved((id, deltaX, deltaY) => {
+            const { sectionLines: lines, updateSectionLine: update, regenerateElevations: regen } =
+                useSmartDrawingStore.getState();
+            const line = lines.find((l) => l.id === id);
+            if (!line) return;
+            const pxToMm = 1 / MM_TO_PX;
+            update(id, {
+                startPoint: {
+                    x: line.startPoint.x + deltaX * pxToMm,
+                    y: line.startPoint.y + deltaY * pxToMm,
+                },
+                endPoint: {
+                    x: line.endPoint.x + deltaX * pxToMm,
+                    y: line.endPoint.y + deltaY * pxToMm,
+                },
+            });
+            regen({ debounce: true });
+        });
+
         setFabricCanvas(canvas);
         onCanvasReady?.(canvas);
         setViewportSize({ width: outer.clientWidth, height: outer.clientHeight });
@@ -1302,6 +1329,8 @@ export function DrawingCanvas({
             objectRendererRef.current = null;
             sectionLineRendererRef.current?.dispose();
             sectionLineRendererRef.current = null;
+            hvacRendererRef.current?.dispose();
+            hvacRendererRef.current = null;
             resizeObserver.disconnect();
             canvas.dispose();
             fabricRef.current = null;
@@ -1416,6 +1445,12 @@ export function DrawingCanvas({
         sectionLineRendererRef.current.setShowReferenceIndicators(wallSettings.showSectionReferenceLines);
         sectionLineRendererRef.current.renderAll(sectionLines);
     }, [sectionLines, wallSettings.showSectionReferenceLines]);
+
+    // Render HVAC elements on plan canvas
+    useEffect(() => {
+        if (!hvacRendererRef.current) return;
+        hvacRendererRef.current.renderAll(hvacElements);
+    }, [hvacElements]);
 
     useEffect(() => {
         const sectionIds = new Set(sectionLines.map((line) => line.id));
@@ -1869,8 +1904,8 @@ export function DrawingCanvas({
             const rect = getSelectionRect(currentSelection);
             const hasMarqueeDrag = Boolean(
                 rect &&
-                    rect.maxX - rect.minX > 2 &&
-                    rect.maxY - rect.minY > 2
+                rect.maxX - rect.minX > 2 &&
+                rect.maxY - rect.minY > 2
             );
             lastMarqueeSelectionRef.current = {
                 ...currentSelection,

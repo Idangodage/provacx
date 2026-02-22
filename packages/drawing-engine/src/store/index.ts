@@ -1277,7 +1277,7 @@ export const useDrawingStore = create<DrawingState>()(
             );
             const nextActiveViewId =
               state.activeElevationViewId &&
-              nextViews.some((view) => view.id === state.activeElevationViewId)
+                nextViews.some((view) => view.id === state.activeElevationViewId)
                 ? state.activeElevationViewId
                 : nextViews[0]?.id ?? null;
             return {
@@ -1496,7 +1496,7 @@ export const useDrawingStore = create<DrawingState>()(
           const nextViews = state.elevationViews.filter((view) => view.sectionLineId !== id);
           const nextActive =
             state.activeElevationViewId &&
-            nextViews.some((view) => view.id === state.activeElevationViewId)
+              nextViews.some((view) => view.id === state.activeElevationViewId)
               ? state.activeElevationViewId
               : nextViews[0]?.id ?? null;
           return {

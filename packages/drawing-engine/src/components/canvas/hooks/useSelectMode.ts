@@ -1893,9 +1893,8 @@ export function useSelectMode({
         endPoint: rotationPreview.endPoint,
       });
       return {
-        label: `Angle ${rotationPreview.absoluteAngleDeg.toFixed(1)}deg | Delta ${
-          rotationPreview.deltaAngleDeg >= 0 ? '+' : ''
-        }${rotationPreview.deltaAngleDeg.toFixed(1)}deg`,
+        label: `Angle ${rotationPreview.absoluteAngleDeg.toFixed(1)}deg | Delta ${rotationPreview.deltaAngleDeg >= 0 ? '+' : ''
+          }${rotationPreview.deltaAngleDeg.toFixed(1)}deg`,
         point: midpoint(rotationPreview.startPoint, rotationPreview.endPoint),
       };
     }
@@ -2160,15 +2159,15 @@ export function useSelectMode({
             ? 'Move wall'
             : mode === 'rotate'
               ? 'Rotate wall'
-            : mode === 'room-corner'
-              ? 'Edit room corner'
-            : mode === 'room-scale'
-                ? 'Scale room'
-            : mode === 'room-move'
-              ? 'Move room'
-            : mode === 'bevel'
-              ? 'Adjust wall bevel'
-            : 'Edit wall endpoint';
+              : mode === 'room-corner'
+                ? 'Edit room corner'
+                : mode === 'room-scale'
+                  ? 'Scale room'
+                  : mode === 'room-move'
+                    ? 'Move room'
+                    : mode === 'bevel'
+                      ? 'Adjust wall bevel'
+                      : 'Edit wall endpoint';
       optionsRef.current.detectRooms();
       optionsRef.current.saveToHistory(action);
     }
