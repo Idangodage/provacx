@@ -49,6 +49,7 @@ type WallControlType =
 type WallControlObject = NamedObject & {
   isWallControl?: boolean;
   controlType?: WallControlType;
+  isControlHitTarget?: boolean;
 };
 
 interface WallJoinMatch {
@@ -458,6 +459,31 @@ export class WallRenderer {
     typed.hasBorders = false;
   }
 
+  private createControlHitTarget(
+    point: Point2D,
+    wallId: string,
+    controlType: WallControlType,
+    cursor: string,
+    hitRadiusPx: number
+  ): fabric.Circle {
+    const hitTarget = new fabric.Circle({
+      left: point.x * MM_TO_PX,
+      top: this.toCanvasY(point.y),
+      radius: this.toSceneSize(hitRadiusPx),
+      fill: 'rgba(0,0,0,0.001)',
+      strokeWidth: 0,
+      originX: 'center',
+      originY: 'center',
+      hoverCursor: cursor,
+      lockMovementX: true,
+      lockMovementY: true,
+    });
+    const typed = hitTarget as WallControlObject;
+    this.annotateControlTarget(hitTarget, wallId, controlType);
+    typed.isControlHitTarget = true;
+    return hitTarget;
+  }
+
   /**
    * Create endpoint, thickness, and midpoint controls for selected walls.
    */
@@ -466,16 +492,21 @@ export class WallRenderer {
     if (!wall) return;
 
     this.removeControlPoints(wallId);
-    const endpointSize = this.toSceneSize(14);
-    const endpointStroke = this.toSceneSize(2.5);
-    const bevelRadius = this.toSceneSize(5);
+    const endpointSize = this.toSceneSize(16);
+    const endpointStroke = this.toSceneSize(2.8);
+    const bevelRadius = this.toSceneSize(5.5);
     const bevelStroke = this.toSceneSize(1.5);
-    const thicknessRadius = this.toSceneSize(7);
-    const centerRadius = this.toSceneSize(10);
-    const rotationRadius = this.toSceneSize(10);
+    const thicknessRadius = this.toSceneSize(8);
+    const centerRadius = this.toSceneSize(11);
+    const rotationRadius = this.toSceneSize(11);
     const crossHalf = this.toSceneSize(5);
     const crossStroke = this.toSceneSize(1.8);
     const stemStroke = this.toSceneSize(1.8);
+    const endpointHitRadiusPx = 16;
+    const bevelHitRadiusPx = 14;
+    const thicknessHitRadiusPx = 16;
+    const centerHitRadiusPx = 16;
+    const rotationHitRadiusPx = 16;
 
     const midpoint = {
       x: (wall.startPoint.x + wall.endPoint.x) / 2,
@@ -519,6 +550,17 @@ export class WallRenderer {
       lockMovementY: true,
     });
     this.annotateControlTarget(startHandle, wallId, 'wall-endpoint-start');
+    startHandle.set({
+      selectable: false,
+      evented: false,
+    });
+    const startHandleHit = this.createControlHitTarget(
+      wall.startPoint,
+      wallId,
+      'wall-endpoint-start',
+      'crosshair',
+      endpointHitRadiusPx
+    );
 
     const endHandle = new fabric.Rect({
       left: wall.endPoint.x * MM_TO_PX,
@@ -535,6 +577,17 @@ export class WallRenderer {
       lockMovementY: true,
     });
     this.annotateControlTarget(endHandle, wallId, 'wall-endpoint-end');
+    endHandle.set({
+      selectable: false,
+      evented: false,
+    });
+    const endHandleHit = this.createControlHitTarget(
+      wall.endPoint,
+      wallId,
+      'wall-endpoint-end',
+      'crosshair',
+      endpointHitRadiusPx
+    );
 
     const allWalls = Array.from(this.wallData.values());
     const cornerTolerance = this.toSceneTolerance(10, 2, 180);
@@ -555,7 +608,7 @@ export class WallRenderer {
       corner: NonNullable<typeof startCorner>,
       endpoint: 'start' | 'end',
       kind: 'outer' | 'inner'
-    ): fabric.Circle => {
+    ): { visual: fabric.Circle; hit: fabric.Circle } => {
       const dotPosition = kind === 'outer' ? corner.outerDotPosition : corner.innerDotPosition;
       const controlType: WallControlType =
         endpoint === 'start'
@@ -580,7 +633,21 @@ export class WallRenderer {
         lockMovementY: true,
       });
       this.annotateControlTarget(bevelDot, wallId, controlType);
-      return bevelDot;
+      bevelDot.set({
+        selectable: false,
+        evented: false,
+      });
+      const hitTarget = this.createControlHitTarget(
+        dotPosition,
+        wallId,
+        controlType,
+        'ew-resize',
+        bevelHitRadiusPx
+      );
+      return {
+        visual: bevelDot,
+        hit: hitTarget,
+      };
     };
 
     const startOuterBevelDot = startCorner
@@ -610,6 +677,17 @@ export class WallRenderer {
       lockMovementY: true,
     });
     this.annotateControlTarget(interiorThicknessHandle, wallId, 'wall-thickness-interior');
+    interiorThicknessHandle.set({
+      selectable: false,
+      evented: false,
+    });
+    const interiorThicknessHandleHit = this.createControlHitTarget(
+      interiorMid,
+      wallId,
+      'wall-thickness-interior',
+      'ew-resize',
+      thicknessHitRadiusPx
+    );
 
     const exteriorThicknessHandle = new fabric.Circle({
       left: exteriorMid.x * MM_TO_PX,
@@ -625,6 +703,17 @@ export class WallRenderer {
       lockMovementY: true,
     });
     this.annotateControlTarget(exteriorThicknessHandle, wallId, 'wall-thickness-exterior');
+    exteriorThicknessHandle.set({
+      selectable: false,
+      evented: false,
+    });
+    const exteriorThicknessHandleHit = this.createControlHitTarget(
+      exteriorMid,
+      wallId,
+      'wall-thickness-exterior',
+      'ew-resize',
+      thicknessHitRadiusPx
+    );
 
     const centerHandle = new fabric.Circle({
       left: midpoint.x * MM_TO_PX,
@@ -640,6 +729,17 @@ export class WallRenderer {
       lockMovementY: true,
     });
     this.annotateControlTarget(centerHandle, wallId, 'wall-center-handle');
+    centerHandle.set({
+      selectable: false,
+      evented: false,
+    });
+    const centerHandleHit = this.createControlHitTarget(
+      midpoint,
+      wallId,
+      'wall-center-handle',
+      'move',
+      centerHitRadiusPx
+    );
 
     const centerCrossH = new fabric.Line(
       [
@@ -704,20 +804,37 @@ export class WallRenderer {
       lockMovementY: true,
     });
     this.annotateControlTarget(rotationHandle, wallId, 'wall-rotation-handle');
+    rotationHandle.set({
+      selectable: false,
+      evented: false,
+    });
+    const rotationHandleHit = this.createControlHitTarget(
+      rotationPoint,
+      wallId,
+      'wall-rotation-handle',
+      'alias',
+      rotationHitRadiusPx
+    );
 
     const controls: fabric.FabricObject[] = [
+      startHandleHit,
       startHandle,
+      endHandleHit,
       endHandle,
-      ...(startOuterBevelDot ? [startOuterBevelDot] : []),
-      ...(startInnerBevelDot ? [startInnerBevelDot] : []),
-      ...(endOuterBevelDot ? [endOuterBevelDot] : []),
-      ...(endInnerBevelDot ? [endInnerBevelDot] : []),
+      ...(startOuterBevelDot ? [startOuterBevelDot.hit, startOuterBevelDot.visual] : []),
+      ...(startInnerBevelDot ? [startInnerBevelDot.hit, startInnerBevelDot.visual] : []),
+      ...(endOuterBevelDot ? [endOuterBevelDot.hit, endOuterBevelDot.visual] : []),
+      ...(endInnerBevelDot ? [endInnerBevelDot.hit, endInnerBevelDot.visual] : []),
+      interiorThicknessHandleHit,
       interiorThicknessHandle,
+      exteriorThicknessHandleHit,
       exteriorThicknessHandle,
+      centerHandleHit,
       centerHandle,
       centerCrossH,
       centerCrossV,
       rotationStem,
+      rotationHandleHit,
       rotationHandle,
     ];
 

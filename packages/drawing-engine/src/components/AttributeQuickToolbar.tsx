@@ -30,7 +30,7 @@ function PresetButton({
     <button
       type="button"
       onClick={onClick}
-      className={`rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
+      className={`rounded-md border px-1.5 py-1 text-[11px] font-medium transition-colors ${
         active
           ? 'border-amber-400 bg-amber-200 text-amber-900'
           : 'border-amber-200/80 bg-white text-slate-600 hover:bg-amber-50'
@@ -106,8 +106,8 @@ export function AttributeQuickToolbar({ className = '' }: AttributeQuickToolbarP
   };
 
   return (
-    <div className={`border-b border-amber-200/70 bg-[#fff8e8] px-3 py-2 ${className}`}>
-      <div className="flex flex-wrap items-center gap-2">
+    <div className={`border-b border-amber-200/70 bg-[#fff8e8] px-2 py-1.5 ${className}`}>
+      <div className="flex flex-wrap items-center gap-1.5">
         <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Height</span>
         {HEIGHT_PRESETS.map((heightMm) => (
           <PresetButton
@@ -129,7 +129,7 @@ export function AttributeQuickToolbar({ className = '' }: AttributeQuickToolbarP
           }}
         />
 
-        <span className="mx-1 h-4 w-px bg-amber-200/80" />
+        <span className="mx-0.5 h-4 w-px bg-amber-200/80" />
 
         <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Material</span>
         {DEFAULT_ARCHITECTURAL_MATERIALS.map((material) => (
@@ -152,7 +152,7 @@ export function AttributeQuickToolbar({ className = '' }: AttributeQuickToolbarP
           </button>
         ))}
 
-        <span className="mx-1 h-4 w-px bg-amber-200/80" />
+        <span className="mx-0.5 h-4 w-px bg-amber-200/80" />
 
         <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Thickness</span>
         {THICKNESS_PRESETS.map((thicknessMm) => (

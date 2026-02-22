@@ -226,6 +226,17 @@ interface DragApplyResult {
   snapPoint?: Point2D;
 }
 
+interface EndpointSnapMemory {
+  mode: 'endpoint';
+  wallId: string;
+  point: Point2D;
+  snappedWallId?: string;
+  visual?: {
+    color: string;
+    indicator: 'circle' | 'square' | 'triangle' | 'cross';
+  };
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
@@ -253,6 +264,11 @@ function magnitude(v: Point2D): number {
 function normalize(v: Point2D): Point2D {
   const len = magnitude(v) || 1;
   return { x: v.x / len, y: v.y / len };
+}
+
+function pointCacheKey(point?: Point2D): string {
+  if (!point) return '';
+  return `${point.x.toFixed(3)},${point.y.toFixed(3)}`;
 }
 
 function midpoint(a: Point2D, b: Point2D): Point2D {
@@ -489,6 +505,11 @@ export function useSelectMode({
   const snapObjectsRef = useRef<fabric.FabricObject[]>([]);
   const lastAppliedStatusRef = useRef<string>('');
   const snapManagerRef = useRef(new SnapManager());
+  const smoothedPointerRef = useRef<Point2D | null>(null);
+  const endpointSnapMemoryRef = useRef<EndpointSnapMemory | null>(null);
+  const wallUpdateCacheRef = useRef<Map<string, string>>(new Map());
+  const wallBevelUpdateCacheRef = useRef<Map<string, string>>(new Map());
+  const connectedPairCacheRef = useRef<Set<string>>(new Set());
   const modifierKeysRef = useRef({ shift: false, ctrl: false, alt: false });
 
   const optionsRef = useRef({
@@ -763,6 +784,46 @@ export function useSelectMode({
     clearDimensionLabel();
   }, [clearGhostWalls, clearSnapIndicators, clearDimensionLabel]);
 
+  const getSnapReleaseDistanceMm = useCallback((): number => {
+    const safeZoom = Math.max(optionsRef.current.zoom, 0.01);
+    const snapDistancePx = Math.max(
+      optionsRef.current.wallSettings.endpointSnapTolerance,
+      optionsRef.current.wallSettings.midpointSnapTolerance
+    );
+    return Math.max(6, (snapDistancePx * 1.8) / (MM_TO_PX * safeZoom));
+  }, []);
+
+  const smoothDragPoint = useCallback((point: Point2D, mode: DragState['mode']): Point2D => {
+    const previous = smoothedPointerRef.current;
+    if (!previous) {
+      smoothedPointerRef.current = { ...point };
+      return point;
+    }
+
+    const alpha =
+      mode === 'endpoint'
+        ? 0.72
+        : mode === 'bevel'
+          ? 0.68
+          : mode === 'move'
+            ? 0.58
+            : mode === 'thickness'
+              ? 0.62
+              : 0.66;
+    const jumpDistance = magnitude(subtract(point, previous));
+    if (jumpDistance > 180) {
+      smoothedPointerRef.current = { ...point };
+      return point;
+    }
+
+    const next = {
+      x: previous.x + (point.x - previous.x) * alpha,
+      y: previous.y + (point.y - previous.y) * alpha,
+    };
+    smoothedPointerRef.current = next;
+    return next;
+  }, []);
+
   const findWallById = useCallback((wallId: string): Wall | undefined => {
     return optionsRef.current.walls.find((wall) => wall.id === wallId);
   }, []);
@@ -938,6 +999,132 @@ export function useSelectMode({
     }
   }, []);
 
+  const updateWallIfChanged = useCallback(
+    (wallId: string, updates: Partial<Wall>, options?: WallUpdateOptions) => {
+      const cacheKey = [
+        `s:${pointCacheKey(updates.startPoint)}`,
+        `e:${pointCacheKey(updates.endPoint)}`,
+        `t:${updates.thickness !== undefined ? updates.thickness.toFixed(3) : ''}`,
+      ].join('|');
+      const cached = wallUpdateCacheRef.current.get(wallId);
+      if (cached === cacheKey) {
+        return;
+      }
+
+      const current = findWallById(wallId);
+      if (!current) {
+        const normalizedOptions =
+          options?.source === 'drag' && options.skipRoomDetection === undefined
+            ? { ...options, skipRoomDetection: true }
+            : options;
+        optionsRef.current.updateWall(wallId, updates, normalizedOptions);
+        wallUpdateCacheRef.current.set(wallId, cacheKey);
+        return;
+      }
+
+      const threshold = 0.08;
+      const startChanged = updates.startPoint
+        ? magnitude(subtract(updates.startPoint, current.startPoint)) > threshold
+        : false;
+      const endChanged = updates.endPoint
+        ? magnitude(subtract(updates.endPoint, current.endPoint)) > threshold
+        : false;
+      const thicknessChanged =
+        updates.thickness !== undefined
+          ? Math.abs(updates.thickness - current.thickness) > threshold
+          : false;
+
+      if (!startChanged && !endChanged && !thicknessChanged) {
+        wallUpdateCacheRef.current.set(wallId, cacheKey);
+        return;
+      }
+      const normalizedOptions =
+        options?.source === 'drag' && options.skipRoomDetection === undefined
+          ? { ...options, skipRoomDetection: true }
+          : options;
+      optionsRef.current.updateWall(wallId, updates, normalizedOptions);
+      wallUpdateCacheRef.current.set(wallId, cacheKey);
+    },
+    [findWallById]
+  );
+
+  const updateWallBevelIfChanged = useCallback(
+    (
+      wallId: string,
+      end: CornerEnd,
+      bevel: Partial<{ outerOffset: number; innerOffset: number }>,
+      options?: WallUpdateOptions
+    ) => {
+      const cacheKey = [
+        end,
+        `o:${bevel.outerOffset !== undefined ? bevel.outerOffset.toFixed(3) : ''}`,
+        `i:${bevel.innerOffset !== undefined ? bevel.innerOffset.toFixed(3) : ''}`,
+      ].join('|');
+      const bevelCacheKey = `${wallId}:${end}`;
+      if (wallBevelUpdateCacheRef.current.get(bevelCacheKey) === cacheKey) {
+        return;
+      }
+
+      const current = findWallById(wallId);
+      if (!current) {
+        const normalizedOptions =
+          options?.source === 'drag' && options.skipRoomDetection === undefined
+            ? { ...options, skipRoomDetection: true }
+            : options;
+        optionsRef.current.updateWallBevel(wallId, end, bevel, normalizedOptions);
+        wallBevelUpdateCacheRef.current.set(bevelCacheKey, cacheKey);
+        return;
+      }
+      const currentBevel = end === 'start' ? current.startBevel : current.endBevel;
+      const outerChanged =
+        bevel.outerOffset !== undefined
+          ? Math.abs(bevel.outerOffset - currentBevel.outerOffset) > 0.01
+          : false;
+      const innerChanged =
+        bevel.innerOffset !== undefined
+          ? Math.abs(bevel.innerOffset - currentBevel.innerOffset) > 0.01
+          : false;
+      if (!outerChanged && !innerChanged) {
+        wallBevelUpdateCacheRef.current.set(bevelCacheKey, cacheKey);
+        return;
+      }
+      const normalizedOptions =
+        options?.source === 'drag' && options.skipRoomDetection === undefined
+          ? { ...options, skipRoomDetection: true }
+          : options;
+      optionsRef.current.updateWallBevel(wallId, end, bevel, normalizedOptions);
+      wallBevelUpdateCacheRef.current.set(bevelCacheKey, cacheKey);
+    },
+    [findWallById]
+  );
+
+  const connectWallsIfNeeded = useCallback((wallId: string, otherWallId: string) => {
+    if (wallId === otherWallId) return;
+    const pairKey = wallId < otherWallId ? `${wallId}|${otherWallId}` : `${otherWallId}|${wallId}`;
+    if (connectedPairCacheRef.current.has(pairKey)) return;
+
+    const wall = findWallById(wallId);
+    const otherWall = findWallById(otherWallId);
+    if (
+      wall?.connectedWalls.includes(otherWallId) &&
+      otherWall?.connectedWalls.includes(wallId)
+    ) {
+      connectedPairCacheRef.current.add(pairKey);
+      return;
+    }
+
+    optionsRef.current.connectWalls(wallId, otherWallId);
+    connectedPairCacheRef.current.add(pairKey);
+  }, [findWallById]);
+
+  const resetDragDynamics = useCallback((point: Point2D) => {
+    smoothedPointerRef.current = { ...point };
+    endpointSnapMemoryRef.current = null;
+    wallUpdateCacheRef.current.clear();
+    wallBevelUpdateCacheRef.current.clear();
+    connectedPairCacheRef.current.clear();
+  }, []);
+
   const beginControlDrag = useCallback((meta: TargetMeta, point: Point2D) => {
     if (!meta.controlType) return false;
 
@@ -946,6 +1133,7 @@ export function useSelectMode({
       if (!room) return false;
 
       isWallHandleDraggingRef.current = true;
+      resetDragDynamics(point);
       const ghostWalls = room.wallIds
         .map((wallId) => findWallById(wallId))
         .filter((wall): wall is Wall => Boolean(wall));
@@ -973,6 +1161,7 @@ export function useSelectMode({
       });
 
       isWallHandleDraggingRef.current = true;
+      resetDragDynamics(point);
       showGhostWalls(Array.from(baselineWalls.values()));
       dragStateRef.current = {
         mode: 'room-corner',
@@ -1001,6 +1190,7 @@ export function useSelectMode({
       });
 
       isWallHandleDraggingRef.current = true;
+      resetDragDynamics(point);
       showGhostWalls(Array.from(baselineWalls.values()));
       dragStateRef.current = {
         mode: 'room-scale',
@@ -1022,6 +1212,7 @@ export function useSelectMode({
     if (!wall) return false;
 
     isWallHandleDraggingRef.current = true;
+    resetDragDynamics(point);
 
     const bevelControl = parseBevelControl(meta.controlType);
     if (bevelControl) {
@@ -1174,7 +1365,11 @@ export function useSelectMode({
         connectedEndpoints,
         operation: new WallRotationOperation(wall, {
           updateWall: (id, updates) =>
-            optionsRef.current.updateWall(id, updates, { skipHistory: true, source: 'drag' }),
+            optionsRef.current.updateWall(id, updates, {
+              skipHistory: true,
+              source: 'drag',
+              skipRoomDetection: true,
+            }),
         }),
       };
       showGhostWalls([{ ...wall }]);
@@ -1204,7 +1399,7 @@ export function useSelectMode({
     }
 
     return false;
-  }, [buildEndpointConstraints, findRoomById, findWallById, showGhostWalls]);
+  }, [buildEndpointConstraints, findRoomById, findWallById, resetDragDynamics, showGhostWalls]);
 
   const computePerpendicularSnap = useCallback(
     (state: EndpointDragState, candidatePoint: Point2D): { snapped: Point2D; line?: { start: Point2D; end: Point2D } } => {
@@ -1297,7 +1492,7 @@ export function useSelectMode({
       const startPoint = add(baseline.startPoint, translation);
       const endPoint = add(baseline.endPoint, translation);
 
-      optionsRef.current.updateWall(
+      updateWallIfChanged(
         baseline.id,
         {
           startPoint,
@@ -1336,7 +1531,7 @@ export function useSelectMode({
           ? { outerOffset: nextOffset }
           : { innerOffset: nextOffset };
 
-      optionsRef.current.updateWallBevel(
+      updateWallBevelIfChanged(
         state.wallId,
         state.endpoint,
         bevelUpdate,
@@ -1428,7 +1623,7 @@ export function useSelectMode({
       }
 
       candidates.forEach((candidateWall, wallId) => {
-        optionsRef.current.updateWall(
+        updateWallIfChanged(
           wallId,
           {
             startPoint: candidateWall.startPoint,
@@ -1456,12 +1651,12 @@ export function useSelectMode({
             pending.endPoint = movedPoint;
           }
           followerUpdates.set(connected.wallId, pending);
-          optionsRef.current.connectWalls(endpointConstraint.wallId, connected.wallId);
+          connectWallsIfNeeded(endpointConstraint.wallId, connected.wallId);
         }
       }
 
       followerUpdates.forEach((updates, wallId) => {
-        optionsRef.current.updateWall(
+        updateWallIfChanged(
           wallId,
           updates,
           { skipHistory: true, source: 'drag' }
@@ -1545,7 +1740,7 @@ export function useSelectMode({
           }
         });
         if (!pointsNear(nextStart, baselineWall.startPoint) || !pointsNear(nextEnd, baselineWall.endPoint)) {
-          optionsRef.current.updateWall(
+          updateWallIfChanged(
             wallId,
             { startPoint: nextStart, endPoint: nextEnd },
             { skipHistory: true, source: 'drag', skipRoomDetection: true }
@@ -1639,7 +1834,7 @@ export function useSelectMode({
           }
         });
         if (!pointsNear(nextStart, baselineWall.startPoint) || !pointsNear(nextEnd, baselineWall.endPoint)) {
-          optionsRef.current.updateWall(
+          updateWallIfChanged(
             wallId,
             { startPoint: nextStart, endPoint: nextEnd },
             { skipHistory: true, source: 'drag', skipRoomDetection: true }
@@ -1666,7 +1861,7 @@ export function useSelectMode({
         ctrl: modifierKeysRef.current.ctrl,
       });
 
-      optionsRef.current.updateWall(
+      updateWallIfChanged(
         state.wallId,
         {
           startPoint: rotationPreview.startPoint,
@@ -1678,12 +1873,12 @@ export function useSelectMode({
       for (const connected of state.connectedEndpoints) {
         const baselineConnected = findWallById(connected.wallId);
         if (!baselineConnected) continue;
-        optionsRef.current.connectWalls(state.wallId, connected.wallId);
+        connectWallsIfNeeded(state.wallId, connected.wallId);
         if (
           connected.endpoint === 'start' &&
           pointsNear(baselineConnected.startPoint, state.baselineWall.startPoint)
         ) {
-          optionsRef.current.updateWall(
+          updateWallIfChanged(
             connected.wallId,
             { startPoint: rotationPreview.startPoint },
             { skipHistory: true, source: 'drag' }
@@ -1694,7 +1889,7 @@ export function useSelectMode({
           connected.endpoint === 'end' &&
           pointsNear(baselineConnected.endPoint, state.baselineWall.startPoint)
         ) {
-          optionsRef.current.updateWall(
+          updateWallIfChanged(
             connected.wallId,
             { endPoint: rotationPreview.startPoint },
             { skipHistory: true, source: 'drag' }
@@ -1705,7 +1900,7 @@ export function useSelectMode({
           connected.endpoint === 'start' &&
           pointsNear(baselineConnected.startPoint, state.baselineWall.endPoint)
         ) {
-          optionsRef.current.updateWall(
+          updateWallIfChanged(
             connected.wallId,
             { startPoint: rotationPreview.endPoint },
             { skipHistory: true, source: 'drag' }
@@ -1716,7 +1911,7 @@ export function useSelectMode({
           connected.endpoint === 'end' &&
           pointsNear(baselineConnected.endPoint, state.baselineWall.endPoint)
         ) {
-          optionsRef.current.updateWall(
+          updateWallIfChanged(
             connected.wallId,
             { endPoint: rotationPreview.endPoint },
             { skipHistory: true, source: 'drag' }
@@ -1742,6 +1937,10 @@ export function useSelectMode({
     let snapPoint: Point2D | undefined;
     let snapLine: { start: Point2D; end: Point2D } | undefined;
     let snappedWallId: string | undefined;
+    const snapReleaseDistanceMm = getSnapReleaseDistanceMm();
+    const snapMemory = endpointSnapMemoryRef.current;
+    const canReuseSnapMemory =
+      snapMemory?.mode === 'endpoint' && snapMemory.wallId === endpointState.wallId;
 
     if (!modifierKeysRef.current.ctrl) {
       const snap = snapManagerRef.current.findBestSnap({
@@ -1760,11 +1959,37 @@ export function useSelectMode({
         snappedPoint = snap.point;
         snappedWallId = snap.wallId;
         snapPoint = snap.point;
+        endpointSnapMemoryRef.current = {
+          mode: 'endpoint',
+          wallId: endpointState.wallId,
+          point: { ...snap.point },
+          snappedWallId: snap.wallId,
+          visual: {
+            color: snap.visual.color,
+            indicator: snap.visual.indicator,
+          },
+        };
         showSnapIndicator(snap.point, undefined, {
           color: snap.visual.color,
           indicator: snap.visual.indicator,
         });
+      } else if (canReuseSnapMemory && snapMemory) {
+        const distanceToMemory = magnitude(subtract(snappedPoint, snapMemory.point));
+        if (distanceToMemory <= snapReleaseDistanceMm) {
+          snappedPoint = { ...snapMemory.point };
+          snapPoint = { ...snapMemory.point };
+          snappedWallId = snapMemory.snappedWallId;
+          const memoryVisual = snapMemory.visual ?? { color: '#2563EB', indicator: 'circle' as const };
+          showSnapIndicator(snapMemory.point, undefined, {
+            color: memoryVisual.color,
+            indicator: memoryVisual.indicator,
+          });
+        } else {
+          endpointSnapMemoryRef.current = null;
+        }
       }
+    } else if (canReuseSnapMemory) {
+      endpointSnapMemoryRef.current = null;
     }
 
     if (optionsRef.current.wallSettings.snapToGrid && modifierKeysRef.current.shift && !snapPoint) {
@@ -1815,17 +2040,17 @@ export function useSelectMode({
       snappedPoint = bestProjection.point;
       snapPoint = snappedPoint;
       snapLine = { start: bestConstraint.startPoint, end: bestConstraint.endPoint };
-      optionsRef.current.connectWalls(endpointState.wallId, bestConstraint.wallId);
+      connectWallsIfNeeded(endpointState.wallId, bestConstraint.wallId);
     }
 
     if (endpointState.endpoint === 'start') {
-      optionsRef.current.updateWall(
+      updateWallIfChanged(
         endpointState.wallId,
         { startPoint: snappedPoint },
         { skipHistory: true, source: 'drag' }
       );
     } else {
-      optionsRef.current.updateWall(
+      updateWallIfChanged(
         endpointState.wallId,
         { endPoint: snappedPoint },
         { skipHistory: true, source: 'drag' }
@@ -1834,23 +2059,23 @@ export function useSelectMode({
 
     for (const connected of endpointState.connectedEndpoints) {
       if (connected.endpoint === 'start') {
-        optionsRef.current.updateWall(
+        updateWallIfChanged(
           connected.wallId,
           { startPoint: snappedPoint },
           { skipHistory: true, source: 'drag' }
         );
       } else {
-        optionsRef.current.updateWall(
+        updateWallIfChanged(
           connected.wallId,
           { endPoint: snappedPoint },
           { skipHistory: true, source: 'drag' }
         );
       }
-      optionsRef.current.connectWalls(endpointState.wallId, connected.wallId);
+      connectWallsIfNeeded(endpointState.wallId, connected.wallId);
     }
 
     if (snappedWallId) {
-      optionsRef.current.connectWalls(endpointState.wallId, snappedWallId);
+      connectWallsIfNeeded(endpointState.wallId, snappedWallId);
     }
 
     if (snapPoint || snapLine) {
@@ -1879,12 +2104,17 @@ export function useSelectMode({
     };
   }, [
     clearSnapIndicators,
+    connectWallsIfNeeded,
     computePerpendicularSnap,
+    findWallById,
     findRoomById,
+    getSnapReleaseDistanceMm,
     hasOverlapWithUnselectedWalls,
     setStatusFromRoom,
     setStatusFromWall,
     showSnapIndicator,
+    updateWallBevelIfChanged,
+    updateWallIfChanged,
   ]);
 
   const flushDragFrame = useCallback(() => {
@@ -1899,14 +2129,15 @@ export function useSelectMode({
   }, [applyDrag, setDimensionLabel]);
 
   const scheduleDragFrame = useCallback((point: Point2D) => {
-    pendingPointRef.current = point;
+    const mode = dragStateRef.current.mode;
+    pendingPointRef.current = mode === 'idle' ? point : smoothDragPoint(point, mode);
     if (frameRef.current !== null) return;
     if (typeof window === 'undefined') {
       flushDragFrame();
       return;
     }
     frameRef.current = window.requestAnimationFrame(flushDragFrame);
-  }, [flushDragFrame]);
+  }, [flushDragFrame, smoothDragPoint]);
 
   const handleMouseMove = useCallback(
     (scenePoint: Point2D, target?: FabricObject | null): boolean => {
@@ -1976,6 +2207,11 @@ export function useSelectMode({
 
     dragStateRef.current = { mode: 'idle' };
     isWallHandleDraggingRef.current = false;
+    smoothedPointerRef.current = null;
+    endpointSnapMemoryRef.current = null;
+    wallUpdateCacheRef.current.clear();
+    wallBevelUpdateCacheRef.current.clear();
+    connectedPairCacheRef.current.clear();
     clearEditVisuals();
   }, [applyDrag, clearEditVisuals, setDimensionLabel]);
 

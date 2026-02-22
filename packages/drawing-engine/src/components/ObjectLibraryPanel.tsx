@@ -201,11 +201,11 @@ export function ObjectLibraryPanel({
 
   return (
     <div className={`flex h-full flex-col overflow-hidden bg-[#fbf7ee] ${className}`}>
-      <div className="border-b border-amber-200/70 px-3 py-3">
+      <div className="border-b border-amber-200/70 px-2.5 py-2">
         <div className="flex items-center justify-between gap-2">
           <div>
-            <h3 className="text-sm font-semibold text-slate-800">Object Library</h3>
-            <p className="text-[11px] text-slate-500">Doors, windows, furniture, fixtures</p>
+            <h3 className="text-xs font-semibold text-slate-800">Object Library</h3>
+            <p className="text-[10px] text-slate-500">Doors, windows, furniture, fixtures</p>
           </div>
           <button
             type="button"
@@ -220,7 +220,7 @@ export function ObjectLibraryPanel({
           </button>
         </div>
 
-        <div className="mt-3 grid grid-cols-6 gap-1">
+        <div className="mt-2 grid grid-cols-3 gap-1">
           {ARCHITECTURAL_OBJECT_CATEGORIES.map((category) => (
             <button
               key={category.id}
@@ -237,7 +237,7 @@ export function ObjectLibraryPanel({
           ))}
         </div>
 
-        <div className="mt-3 flex gap-1">
+        <div className="mt-2 flex gap-1">
           <label className="relative flex-1">
             <Search size={13} className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
@@ -276,8 +276,8 @@ export function ObjectLibraryPanel({
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
-        <div className={`grid gap-2 ${viewMode === 'thumbnail' ? 'grid-cols-2' : 'grid-cols-1'}`}>
+      <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-1.5">
+        <div className={`grid gap-1.5 ${viewMode === 'thumbnail' ? 'grid-cols-2' : 'grid-cols-1'}`}>
           {filteredObjects.map((definition) => {
             const favorite = favorites.has(definition.id);
             const isSelected = selectedDefinition?.id === definition.id;
@@ -290,7 +290,7 @@ export function ObjectLibraryPanel({
                   setSelectedId(definition.id);
                   onStartPlacement(definition);
                 }}
-                className={`rounded border px-2 py-2 text-left transition-colors ${
+                className={`rounded border px-1.5 py-1.5 text-left transition-colors ${
                   isPending
                     ? 'border-blue-400 bg-blue-50'
                     : isSelected
@@ -299,8 +299,8 @@ export function ObjectLibraryPanel({
                 }`}
               >
                 <div className="flex items-start justify-between gap-1">
-                  <div className="inline-flex h-9 w-9 items-center justify-center rounded border border-amber-100 bg-[#fff7e6]">
-                    <svg width="30" height="30" viewBox="0 0 100 100" className="text-slate-700">
+                  <div className="inline-flex h-8 w-8 items-center justify-center rounded border border-amber-100 bg-[#fff7e6]">
+                    <svg width="24" height="24" viewBox="0 0 100 100" className="text-slate-700">
                       <path d={objectPreviewPath(definition)} fill="none" stroke="currentColor" strokeWidth="5" />
                     </svg>
                   </div>
@@ -316,15 +316,15 @@ export function ObjectLibraryPanel({
                     <Star size={13} className={favorite ? 'fill-amber-400 text-amber-500' : 'text-slate-400'} />
                   </button>
                 </div>
-                <p className="mt-1 truncate text-xs font-medium text-slate-800">{definition.name}</p>
-                <p className="text-[11px] text-slate-500">{formatSize(definition)}</p>
+                <p className="mt-1 truncate text-[11px] font-medium text-slate-800">{definition.name}</p>
+                <p className="text-[10px] text-slate-500">{formatSize(definition)}</p>
               </button>
             );
           })}
         </div>
       </div>
 
-      <div className="border-t border-amber-200/70 px-3 py-2">
+      <div className="border-t border-amber-200/70 px-2.5 py-1.5">
         <div className="rounded border border-amber-200/80 bg-white/80 p-2">
           <div className="flex items-center gap-2 text-xs font-semibold text-slate-700">
             <Box size={13} />

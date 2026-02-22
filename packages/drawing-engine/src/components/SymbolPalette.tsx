@@ -54,7 +54,7 @@ function SymbolItem({
       onDragStart={handleDragStart}
       onClick={() => onSelect?.(symbol)}
       className="
-        flex items-center gap-3 p-2
+        flex items-center gap-2 p-1.5
         bg-white border border-amber-200/70 rounded-lg
         cursor-grab active:cursor-grabbing
         hover:border-amber-300 hover:bg-amber-50
@@ -62,10 +62,10 @@ function SymbolItem({
       "
     >
       {/* Symbol Preview */}
-      <div className="w-10 h-10 flex items-center justify-center bg-[#fff7e6] rounded border border-amber-100">
+      <div className="flex h-8 w-8 items-center justify-center rounded border border-amber-100 bg-[#fff7e6]">
         <svg
-          width="32"
-          height="32"
+          width="26"
+          height="26"
           viewBox="0 0 100 100"
           className="text-slate-700"
         >
@@ -80,11 +80,11 @@ function SymbolItem({
 
       {/* Symbol Info */}
       <div className="flex-1 min-w-0">
-        <p className="text-[13px] font-medium text-slate-800 truncate">
+        <p className="truncate text-xs font-medium text-slate-800">
           {symbol.name}
         </p>
-        <p className="text-[11px] text-slate-500 truncate">
-          {symbol.defaultWidth}m × {symbol.defaultHeight}m
+        <p className="truncate text-[10px] text-slate-500">
+          {symbol.defaultWidth}m x {symbol.defaultHeight}m
         </p>
       </div>
 
@@ -120,8 +120,8 @@ function CategorySection({
         onClick={onToggle}
         className="
           flex items-center justify-between w-full
-          px-3 py-2.5
-          text-left text-sm font-semibold text-slate-700
+          px-3 py-2
+          text-left text-xs font-semibold text-slate-700
           hover:bg-amber-50
           transition-colors
         "
@@ -198,13 +198,13 @@ export function SymbolPalette({
       `}
     >
       {/* Header */}
-      <div className="px-4 py-3 border-b border-amber-200/70">
-        <h2 className="text-sm font-semibold text-slate-800 mb-2">Symbols</h2>
+      <div className="border-b border-amber-200/70 px-3 py-2">
+        <h2 className="mb-2 text-xs font-semibold text-slate-800">Symbols</h2>
         
         {/* Search */}
         <div className="relative">
           <Search
-            size={16}
+            size={14}
             className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400"
           />
           <input
@@ -213,8 +213,8 @@ export function SymbolPalette({
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="
-              w-full pl-8 pr-3 py-2
-              text-sm
+              w-full py-1.5 pl-8 pr-3
+              text-xs
               border border-amber-200/80 rounded-md
               bg-white placeholder:text-slate-400
               focus:outline-none focus:ring-1 focus:ring-amber-400 focus:border-amber-400
@@ -227,9 +227,9 @@ export function SymbolPalette({
       <div className="flex-1 overflow-y-auto overflow-x-hidden scrollbar-thin scrollbar-thumb-amber-300">
         {filteredSymbols ? (
           // Search Results
-          <div className="p-3 space-y-2">
+          <div className="p-2 space-y-1.5">
             {filteredSymbols.length === 0 ? (
-              <p className="text-sm text-slate-500 text-center py-4">
+              <p className="py-4 text-center text-xs text-slate-500">
                 No symbols found
               </p>
             ) : (

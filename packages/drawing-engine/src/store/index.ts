@@ -2105,17 +2105,41 @@ export const useDrawingStore = create<DrawingState>()(
 
       connectWalls: (wallId, otherWallId) => {
         if (wallId === otherWallId) return;
-        set((state) => ({
-          walls: state.walls.map((wall) => {
-            if (wall.id === wallId && !wall.connectedWalls.includes(otherWallId)) {
-              return { ...wall, connectedWalls: [...wall.connectedWalls, otherWallId] };
-            }
-            if (wall.id === otherWallId && !wall.connectedWalls.includes(wallId)) {
-              return { ...wall, connectedWalls: [...wall.connectedWalls, wallId] };
-            }
-            return wall;
-          }),
-        }));
+        set((state) => {
+          const wallIndex = state.walls.findIndex((wall) => wall.id === wallId);
+          const otherWallIndex = state.walls.findIndex((wall) => wall.id === otherWallId);
+          if (wallIndex < 0 || otherWallIndex < 0) {
+            return state;
+          }
+
+          const wall = state.walls[wallIndex];
+          const otherWall = state.walls[otherWallIndex];
+          const wallHasOther = wall.connectedWalls.includes(otherWallId);
+          const otherHasWall = otherWall.connectedWalls.includes(wallId);
+
+          if (wallHasOther && otherHasWall) {
+            return state;
+          }
+
+          const nextWalls = [...state.walls];
+
+          if (!wallHasOther) {
+            nextWalls[wallIndex] = {
+              ...wall,
+              connectedWalls: [...wall.connectedWalls, otherWallId],
+            };
+          }
+
+          if (!otherHasWall) {
+            const latestOther = nextWalls[otherWallIndex];
+            nextWalls[otherWallIndex] = {
+              ...latestOther,
+              connectedWalls: [...latestOther.connectedWalls, wallId],
+            };
+          }
+
+          return { walls: nextWalls };
+        });
       },
 
       disconnectWall: (wallId, otherWallId) => {

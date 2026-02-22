@@ -71,19 +71,19 @@ const DRAWING_TOOLS: {
   shortLabel?: string;
   shortcut?: string;
 }[] = [
-  { id: 'select', icon: <MousePointer2 size={18} />, label: 'Select', shortLabel: 'Select', shortcut: 'V' },
-  { id: 'pan', icon: <Hand size={18} />, label: 'Pan', shortLabel: 'Pan', shortcut: 'H' },
-  { id: 'wall', icon: <Minus size={18} />, label: 'Wall', shortLabel: 'Wall', shortcut: 'W' },
-  { id: 'section-line', icon: <Minus size={18} />, label: 'Section', shortLabel: 'Section', shortcut: 'K' },
-  { id: 'room', icon: <BoxSelect size={18} />, label: 'Room', shortLabel: 'Room', shortcut: 'R' },
-  { id: 'pencil', icon: <Pencil size={18} />, label: 'Pencil', shortLabel: 'Pencil', shortcut: 'P' },
-  { id: 'spline', icon: <Spline size={18} />, label: 'Spline', shortLabel: 'Spline', shortcut: 'S' },
-  { id: 'line', icon: <Minus size={18} />, label: 'Line', shortLabel: 'Line', shortcut: 'L' },
-  { id: 'rectangle', icon: <Square size={18} />, label: 'Rectangle', shortLabel: 'Rect' },
-  { id: 'circle', icon: <Circle size={18} />, label: 'Circle', shortLabel: 'Circle' },
-  { id: 'dimension', icon: <Ruler size={18} />, label: 'Dimension', shortLabel: 'Dim', shortcut: 'D' },
-  { id: 'text', icon: <Type size={18} />, label: 'Text', shortLabel: 'Text', shortcut: 'T' },
-  { id: 'eraser', icon: <Eraser size={18} />, label: 'Eraser', shortLabel: 'Erase', shortcut: 'E' },
+  { id: 'select', icon: <MousePointer2 size={16} />, label: 'Select', shortLabel: 'Select', shortcut: 'V' },
+  { id: 'pan', icon: <Hand size={16} />, label: 'Pan', shortLabel: 'Pan', shortcut: 'H' },
+  { id: 'wall', icon: <Minus size={16} />, label: 'Wall', shortLabel: 'Wall', shortcut: 'W' },
+  { id: 'section-line', icon: <Minus size={16} />, label: 'Section', shortLabel: 'Section', shortcut: 'K' },
+  { id: 'room', icon: <BoxSelect size={16} />, label: 'Room', shortLabel: 'Room', shortcut: 'R' },
+  { id: 'pencil', icon: <Pencil size={16} />, label: 'Pencil', shortLabel: 'Pencil', shortcut: 'P' },
+  { id: 'spline', icon: <Spline size={16} />, label: 'Spline', shortLabel: 'Spline', shortcut: 'S' },
+  { id: 'line', icon: <Minus size={16} />, label: 'Line', shortLabel: 'Line', shortcut: 'L' },
+  { id: 'rectangle', icon: <Square size={16} />, label: 'Rectangle', shortLabel: 'Rect' },
+  { id: 'circle', icon: <Circle size={16} />, label: 'Circle', shortLabel: 'Circle' },
+  { id: 'dimension', icon: <Ruler size={16} />, label: 'Dimension', shortLabel: 'Dim', shortcut: 'D' },
+  { id: 'text', icon: <Type size={16} />, label: 'Text', shortLabel: 'Text', shortcut: 'T' },
+  { id: 'eraser', icon: <Eraser size={16} />, label: 'Eraser', shortLabel: 'Erase', shortcut: 'E' },
 ];
 
 // =============================================================================
@@ -106,8 +106,8 @@ function ToolButton({
   const baseStyles =
     'flex items-center justify-center rounded-md border transition-colors duration-150';
   const sizeStyles = showLabel
-    ? `${fullWidth ? 'w-full min-h-[42px] px-1.5 py-1' : 'w-12 h-10'} flex-col gap-1`
-    : 'w-9 h-9';
+    ? `${fullWidth ? 'w-full min-h-[36px] px-1 py-1' : 'w-11 h-9'} flex-col gap-1`
+    : 'h-8 w-8';
   const variantStyles = {
     default: active
       ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
@@ -135,7 +135,7 @@ function ToolButton({
     >
       <span className={compact ? 'scale-[1.2] leading-none' : 'scale-[1.2] leading-none'}>{icon}</span>
       {showLabel && (
-        <span className="text-[11px] font-medium leading-tight text-center px-0.5">
+        <span className="px-0.5 text-[10px] font-medium leading-tight text-center">
           {compact && shortLabel ? shortLabel : label}
         </span>
       )}
@@ -211,10 +211,10 @@ export function Toolbar({
   const isGrid = layout === 'grid';
   const containerClass =
     isGrid
-      ? 'grid grid-cols-2 gap-1 p-1.5 w-full'
+      ? 'grid w-full grid-cols-2 gap-1 p-1'
       : isHorizontal
-        ? 'flex flex-row items-center gap-1 px-2 py-1'
-        : 'flex flex-col items-center gap-1 py-2 px-1';
+        ? 'flex flex-row items-center gap-1 px-1.5 py-1'
+        : 'flex flex-col items-center gap-1 px-1 py-1.5';
   const isCompactGrid = isGrid && showLabels;
   const containerTone =
     variant === 'toolbox'

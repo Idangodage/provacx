@@ -2031,8 +2031,33 @@ function SelectionAlignSection() {
 }
 
 export function PropertiesPanel({ className = '', onClose }: PropertiesPanelProps) {
-  const { selectedElementIds, clearSelection } = useSmartDrawingStore();
+  const {
+    selectedElementIds,
+    clearSelection,
+    walls,
+    rooms,
+    symbols,
+    dimensions,
+    activeTool,
+  } = useSmartDrawingStore();
   const [propertyUnit, setPropertyUnit] = useState<PropertyUnit>('mm');
+  const selectedLookup = useMemo(() => new Set(selectedElementIds), [selectedElementIds]);
+  const hasSelectedWall = useMemo(
+    () => walls.some((wall) => selectedLookup.has(wall.id)),
+    [walls, selectedLookup]
+  );
+  const hasSelectedRoom = useMemo(
+    () => rooms.some((room) => selectedLookup.has(room.id)),
+    [rooms, selectedLookup]
+  );
+  const hasSelectedObject = useMemo(
+    () => symbols.some((symbol) => selectedLookup.has(symbol.id)),
+    [symbols, selectedLookup]
+  );
+  const hasSelectedDimension = useMemo(
+    () => dimensions.some((dimension) => selectedLookup.has(dimension.id)),
+    [dimensions, selectedLookup]
+  );
 
   const handleClose = () => {
     clearSelection();
@@ -2041,10 +2066,10 @@ export function PropertiesPanel({ className = '', onClose }: PropertiesPanelProp
 
   return (
     <div
-      className={`flex flex-col bg-white/95 backdrop-blur-sm border border-amber-200/50 rounded-xl shadow-xl ${className}`}
+      className={`flex flex-col rounded-lg border border-amber-200/50 bg-white/95 shadow-sm backdrop-blur-sm ${className}`}
     >
-      <div className="flex items-center justify-between px-4 py-3 border-b border-amber-100/70">
-        <h3 className="text-sm font-semibold text-slate-700">Properties</h3>
+      <div className="flex items-center justify-between border-b border-amber-100/70 px-3 py-2">
+        <h3 className="text-xs font-semibold text-slate-700">Properties</h3>
         <button
           onClick={handleClose}
           className="p-1 rounded hover:bg-amber-50 text-slate-400 hover:text-slate-600 transition-colors"
@@ -2053,8 +2078,8 @@ export function PropertiesPanel({ className = '', onClose }: PropertiesPanelProp
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
-        <div className="rounded-lg border border-amber-200/70 bg-white/80 p-3">
+      <div className="flex-1 space-y-2 overflow-y-auto px-3 py-2">
+        <div className="rounded-lg border border-amber-200/70 bg-white/80 p-2">
           <PropertyRow label="Selected">
             <span className="text-sm text-slate-600">{selectedElementIds.length} element(s)</span>
           </PropertyRow>
@@ -2062,41 +2087,51 @@ export function PropertiesPanel({ className = '', onClose }: PropertiesPanelProp
 
         <UnitSelector propertyUnit={propertyUnit} onPropertyUnitChange={setPropertyUnit} />
 
-        <CollapsibleSection title="Wall Properties" defaultOpen>
+        <CollapsibleSection title="Wall Properties" defaultOpen={hasSelectedWall || activeTool === 'wall'}>
           <WallSection propertyUnit={propertyUnit} />
         </CollapsibleSection>
 
-        <CollapsibleSection title="Object Properties" defaultOpen={false}>
+        <CollapsibleSection title="Object Properties" defaultOpen={hasSelectedObject}>
           <ObjectSection propertyUnit={propertyUnit} />
         </CollapsibleSection>
 
-        <CollapsibleSection title="Room Properties" defaultOpen>
+        <CollapsibleSection title="Room Properties" defaultOpen={hasSelectedRoom}>
           <RoomSection propertyUnit={propertyUnit} />
         </CollapsibleSection>
 
-        <CollapsibleSection title="Room List" defaultOpen={false}>
-          <RoomListSection />
-        </CollapsibleSection>
+        {rooms.length > 0 && (
+          <CollapsibleSection title="Room List" defaultOpen={false}>
+            <RoomListSection />
+          </CollapsibleSection>
+        )}
 
-        <CollapsibleSection title="HVAC Design" defaultOpen={false}>
-          <HvacDesignSection />
-        </CollapsibleSection>
+        {(hasSelectedRoom || rooms.length > 0) && (
+          <CollapsibleSection title="HVAC Design" defaultOpen={false}>
+            <HvacDesignSection />
+          </CollapsibleSection>
+        )}
 
-        <CollapsibleSection title="Elevations" defaultOpen={false}>
-          <ElevationSection />
-        </CollapsibleSection>
+        {walls.length > 0 && (
+          <CollapsibleSection title="Elevations" defaultOpen={false}>
+            <ElevationSection />
+          </CollapsibleSection>
+        )}
 
-        <CollapsibleSection title="Wall Tool" defaultOpen={false}>
-          <WallToolSection />
-        </CollapsibleSection>
+        {(activeTool === 'wall' || hasSelectedWall) && (
+          <CollapsibleSection title="Wall Tool" defaultOpen={false}>
+            <WallToolSection />
+          </CollapsibleSection>
+        )}
 
-        <CollapsibleSection title="Dimensions" defaultOpen={false}>
+        <CollapsibleSection title="Dimensions" defaultOpen={hasSelectedDimension}>
           <DimensionSection />
         </CollapsibleSection>
 
-        <CollapsibleSection title="Selection Align" defaultOpen={false}>
-          <SelectionAlignSection />
-        </CollapsibleSection>
+        {selectedElementIds.length > 1 && (
+          <CollapsibleSection title="Selection Align" defaultOpen={false}>
+            <SelectionAlignSection />
+          </CollapsibleSection>
+        )}
       </div>
     </div>
   );

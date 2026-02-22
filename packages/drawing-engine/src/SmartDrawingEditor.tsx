@@ -14,9 +14,6 @@ import {
   Settings,
   Download,
   Upload,
-  FileJson,
-  Image,
-  Printer,
   Save,
   Grid3X3,
   Ruler,
@@ -24,6 +21,11 @@ import {
   Minus,
   BoxSelect,
   Type,
+  ZoomIn,
+  ZoomOut,
+  Home,
+  RotateCcw,
+  RotateCw,
 } from 'lucide-react';
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 
@@ -131,7 +133,7 @@ function RibbonButton({
       onClick={onClick}
       disabled={disabled}
       className={
-        `inline-flex items-center gap-2 px-3 py-1.5 rounded-md border text-sm font-medium transition-colors ` +
+        `inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors ` +
         `${toneClasses[tone]} ${disabled ? 'opacity-60 cursor-not-allowed' : ''}`
       }
     >
@@ -160,13 +162,40 @@ function ToggleChip({
       onClick={onClick}
       disabled={disabled}
       className={
-        `inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-medium transition-colors ` +
+        `inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-medium transition-colors ` +
         `${active ? 'bg-amber-200 text-amber-900 border-amber-300' : 'bg-white text-slate-600 border-amber-200/80 hover:bg-amber-50'} ` +
         `${disabled ? 'opacity-60 cursor-not-allowed' : ''}`
       }
     >
       {icon}
       <span>{label}</span>
+    </button>
+  );
+}
+
+function RibbonIconButton({
+  icon,
+  label,
+  onClick,
+  disabled,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={label}
+      className={`inline-flex h-7 w-7 items-center justify-center rounded-md border border-amber-200/80 bg-white text-slate-700 transition-colors hover:bg-amber-50 ${
+        disabled ? 'opacity-60 cursor-not-allowed' : ''
+      }`}
+    >
+      {icon}
+      <span className="sr-only">{label}</span>
     </button>
   );
 }
@@ -190,7 +219,7 @@ function QuickActionButton({
       onClick={onClick}
       disabled={disabled}
       className={
-        `flex items-center gap-1.5 px-2 py-1.5 min-h-[38px] rounded-md border text-10 font-medium transition-colors ` +
+        `flex items-center gap-1.5 px-2 py-1.5 min-h-[36px] rounded-md border text-[11px] font-medium transition-colors ` +
         `${active ? 'bg-amber-200 text-amber-900 border-amber-300' : 'bg-white text-slate-600 border-amber-200/80 hover:bg-amber-50'} ` +
         `${disabled ? 'opacity-60 cursor-not-allowed' : ''}`
       }
@@ -203,9 +232,19 @@ function QuickActionButton({
 
 function EditorRibbon({
   projectId,
-  onExport,
+  onExportJSON,
+  onExportSVG,
+  onExportPNG,
   onImport,
   onSave,
+  zoomLevel,
+  canUndo,
+  canRedo,
+  onZoomIn,
+  onZoomOut,
+  onResetView,
+  onUndo,
+  onRedo,
   saveState,
   lastSavedAt,
   showGrid,
@@ -222,9 +261,19 @@ function EditorRibbon({
   readOnly,
 }: {
   projectId?: string;
-  onExport: () => void;
+  onExportJSON: () => void;
+  onExportSVG: () => void;
+  onExportPNG: () => void;
   onImport: () => void;
   onSave?: () => void;
+  zoomLevel: number;
+  canUndo: boolean;
+  canRedo: boolean;
+  onZoomIn: () => void;
+  onZoomOut: () => void;
+  onResetView: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
   saveState: 'idle' | 'saving' | 'saved' | 'error';
   lastSavedAt: string | null;
   showGrid: boolean;
@@ -251,21 +300,15 @@ function EditorRibbon({
   const pageHeightMm = Math.round((pageConfig.height / PX_PER_INCH) * MM_PER_INCH);
 
   return (
-    <div className="flex items-center gap-3 px-4 py-2 bg-[#fff3d6] border-b border-amber-200/70">
+    <div className="flex flex-wrap items-center gap-2 border-b border-amber-200/70 bg-[#fff3d6] px-3 py-1.5">
       <div className="flex items-center gap-2">
-        <RibbonButton
-          icon={<Upload size={16} />}
-          label="Import"
-          onClick={onImport}
-        />
-        <RibbonButton
-          icon={<Download size={16} />}
-          label="Export"
-          onClick={onExport}
-        />
+        <RibbonButton icon={<Upload size={14} />} label="Import" onClick={onImport} />
+        <RibbonButton icon={<Download size={14} />} label="JSON" onClick={onExportJSON} />
+        <RibbonIconButton icon={<Download size={14} />} label="Export SVG" onClick={onExportSVG} />
+        <RibbonIconButton icon={<Download size={14} />} label="Export PNG" onClick={onExportPNG} />
         {onSave && (
           <RibbonButton
-            icon={<Save size={16} />}
+            icon={<Save size={14} />}
             label={saveState === 'saving' ? 'Saving' : 'Save'}
             onClick={onSave}
             disabled={readOnly || saveState === 'saving'}
@@ -274,29 +317,25 @@ function EditorRibbon({
         )}
       </div>
 
-      <div className="w-px h-6 bg-amber-200/80" />
+      <div className="h-5 w-px bg-amber-200/80" />
+
+      <div className="flex items-center gap-1">
+        <RibbonIconButton icon={<RotateCcw size={14} />} label="Undo" onClick={onUndo} disabled={!canUndo} />
+        <RibbonIconButton icon={<RotateCw size={14} />} label="Redo" onClick={onRedo} disabled={!canRedo} />
+        <RibbonIconButton icon={<ZoomOut size={14} />} label="Zoom out" onClick={onZoomOut} />
+        <RibbonIconButton icon={<ZoomIn size={14} />} label="Zoom in" onClick={onZoomIn} />
+        <RibbonIconButton icon={<Home size={14} />} label="Reset view" onClick={onResetView} />
+        <span className="px-1 text-[11px] font-semibold text-slate-600">{Math.round(zoomLevel * 100)}%</span>
+      </div>
+
+      <div className="h-5 w-px bg-amber-200/80" />
 
       <div className="flex items-center gap-2">
-        <ToggleChip
-          icon={<Grid3X3 size={14} />}
-          label="Grid"
-          active={showGrid}
-          onClick={onToggleGrid}
-        />
-        <ToggleChip
-          icon={<Move size={14} />}
-          label="Snap"
-          active={snapToGrid}
-          onClick={onToggleSnap}
-        />
-        <ToggleChip
-          icon={<Ruler size={14} />}
-          label="Rulers"
-          active={showRulers}
-          onClick={onToggleRulers}
-        />
-        <div className="flex items-center gap-2 ml-2">
-          <span className="text-[10px] font-medium text-slate-500 uppercase tracking-wide">Page</span>
+        <ToggleChip icon={<Grid3X3 size={14} />} label="Grid" active={showGrid} onClick={onToggleGrid} />
+        <ToggleChip icon={<Move size={14} />} label="Snap" active={snapToGrid} onClick={onToggleSnap} />
+        <ToggleChip icon={<Ruler size={14} />} label="Rulers" active={showRulers} onClick={onToggleRulers} />
+        <div className="ml-2 flex items-center gap-2">
+          <span className="text-[10px] font-medium uppercase tracking-wide text-slate-500">Page</span>
           <select
             value={currentLayoutId}
             onChange={(e) => onPageChange(e.target.value)}
@@ -307,11 +346,11 @@ function EditorRibbon({
                 {layout.label}
               </option>
             ))}
-            <option value="custom">Custom ({pageWidthMm}×{pageHeightMm} mm)</option>
+            <option value="custom">Custom ({pageWidthMm}x{pageHeightMm} mm)</option>
           </select>
         </div>
-        <div className="flex items-center gap-2 ml-2">
-          <span className="text-[10px] font-medium text-slate-500 uppercase tracking-wide">Scale</span>
+        <div className="ml-2 flex items-center gap-2">
+          <span className="text-[10px] font-medium uppercase tracking-wide text-slate-500">Scale</span>
           <select
             value={scalePreset}
             onChange={(e) => onScaleChange(e.target.value)}
@@ -328,20 +367,19 @@ function EditorRibbon({
 
       <div className="flex-1" />
 
-      <div className="hidden md:flex items-center gap-3 text-xs text-slate-500">
+      <div className="hidden items-center gap-3 text-xs text-slate-500 lg:flex">
+        {projectId && (
+          <span>
+            Project: <span className="font-medium text-slate-700">{projectId}</span>
+          </span>
+        )}
         <span>
           Scale: <span className="font-medium text-slate-700">{scalePreset}</span>
         </span>
-        {projectId && (
-          <span>
-            Project ID: <span className="font-medium text-slate-700">{projectId}</span>
-          </span>
-        )}
         {saveState === 'saving' && <span>Saving changes...</span>}
         {saveState === 'saved' && lastSavedAt && <span>Saved {lastSavedAt}</span>}
         {saveState === 'error' && <span className="text-red-600">Save failed</span>}
       </div>
-
     </div>
   );
 }
@@ -366,14 +404,14 @@ function EditorFooter({
   statusMessage: string;
 }) {
   return (
-    <div className="flex items-center justify-between h-8 px-4 bg-[#fffaf0] border-t border-amber-200/70 text-xs text-slate-600">
-      <div className="flex items-center gap-4">
+    <div className="flex h-7 items-center justify-between border-t border-amber-200/70 bg-[#fffaf0] px-3 text-[11px] text-slate-600">
+      <div className="flex items-center gap-3">
         <span>Elements: {elementCount}</span>
         <span>|</span>
-        <span>
-          Total Floor Area: {areaSummary.totalFloorArea.toFixed(1)} m² | Usable: {areaSummary.usableArea.toFixed(1)} m² | Circulation: {areaSummary.circulationArea.toFixed(1)} m²
+        <span className="hidden xl:inline">
+          Total: {areaSummary.totalFloorArea.toFixed(1)} m2 | Usable: {areaSummary.usableArea.toFixed(1)} m2
         </span>
-        <span>|</span>
+        <span className="hidden xl:inline">|</span>
         <CoordinatesDisplay
           x={mousePosition.x}
           y={mousePosition.y}
@@ -383,11 +421,11 @@ function EditorFooter({
         {statusMessage && (
           <>
             <span>|</span>
-            <span className="text-blue-700">{statusMessage}</span>
+            <span className="truncate text-blue-700">{statusMessage}</span>
           </>
         )}
       </div>
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-3">
         <ZoomIndicator className="!px-0 !py-0 !border-0 !shadow-none !bg-transparent text-xs" />
       </div>
     </div>
@@ -431,14 +469,16 @@ export function SmartDrawingEditor({
   const gridSubdivisions = 10;
   const showRulerLabels = true;
   const leftPanelRef = useRef<HTMLDivElement>(null);
-  const minLeftWidth = 96;
-  const [maxLeftWidth, setMaxLeftWidth] = useState(360);
-  const [leftPanelWidth, setLeftPanelWidth] = useState(300);
+  const minLeftWidth = 84;
+  const [maxLeftWidth, setMaxLeftWidth] = useState(320);
+  const [leftPanelWidth, setLeftPanelWidth] = useState(248);
   const [isResizingLeft, setIsResizingLeft] = useState(false);
+  const [leftPanelTab, setLeftPanelTab] = useState<'symbols' | 'objects'>('symbols');
+  const [layoutReady, setLayoutReady] = useState(false);
   const [pendingPlacementObjectId, setPendingPlacementObjectId] = useState<string | null>(null);
   const [customLibraryObjects, setCustomLibraryObjects] = useState<ArchitecturalObjectDefinition[]>([]);
   const [recentObjectUsage, setRecentObjectUsage] = useState<Record<string, number>>({});
-  const compactThreshold = Math.max(minLeftWidth + 32, Math.min(190, maxLeftWidth - 40));
+  const compactThreshold = Math.max(minLeftWidth + 28, Math.min(168, maxLeftWidth - 32));
   const isLeftCompact = leftPanelWidth <= compactThreshold;
 
   const store = useSmartDrawingStore();
@@ -453,6 +493,12 @@ export function SmartDrawingEditor({
     exportData,
     setTool,
     activeTool,
+    zoom,
+    history,
+    historyIndex,
+    undo,
+    redo,
+    resetView,
     showGrid,
     showRulers,
     snapToGrid,
@@ -466,6 +512,8 @@ export function SmartDrawingEditor({
     displayUnit,
     processingStatus,
   } = store;
+  const canUndo = historyIndex > 0;
+  const canRedo = historyIndex < history.length - 1;
 
   const quickActions: { id: DrawingTool; label: string; icon: React.ReactNode }[] = [
     { id: 'wall', label: 'Add Wall', icon: <Minus size={14} /> },
@@ -556,6 +604,57 @@ export function SmartDrawingEditor({
   }, [recentObjectUsage]);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const viewport = window.innerWidth;
+    const fallbackLeftOpen = viewport >= 1080;
+    const fallbackRightOpen = viewport >= 1320;
+
+    try {
+      const raw = window.localStorage.getItem('smart-drawing-layout-v1');
+      if (!raw) {
+        setShowLeftPanel(fallbackLeftOpen);
+        setShowRightPanel(fallbackRightOpen);
+        setLayoutReady(true);
+        return;
+      }
+      const parsed = JSON.parse(raw) as {
+        showLeftPanel?: boolean;
+        showRightPanel?: boolean;
+        leftPanelWidth?: number;
+        leftPanelTab?: 'symbols' | 'objects';
+      };
+
+      setShowLeftPanel(typeof parsed.showLeftPanel === 'boolean' ? parsed.showLeftPanel : fallbackLeftOpen);
+      setShowRightPanel(typeof parsed.showRightPanel === 'boolean' ? parsed.showRightPanel : fallbackRightOpen);
+      if (typeof parsed.leftPanelWidth === 'number' && Number.isFinite(parsed.leftPanelWidth)) {
+        setLeftPanelWidth(parsed.leftPanelWidth);
+      }
+      if (parsed.leftPanelTab === 'symbols' || parsed.leftPanelTab === 'objects') {
+        setLeftPanelTab(parsed.leftPanelTab);
+      }
+    } catch {
+      setShowLeftPanel(fallbackLeftOpen);
+      setShowRightPanel(fallbackRightOpen);
+    } finally {
+      setLayoutReady(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !layoutReady) return;
+    window.localStorage.setItem(
+      'smart-drawing-layout-v1',
+      JSON.stringify({
+        showLeftPanel,
+        showRightPanel,
+        leftPanelWidth,
+        leftPanelTab,
+      })
+    );
+  }, [layoutReady, showLeftPanel, showRightPanel, leftPanelWidth, leftPanelTab]);
+
+  useEffect(() => {
     const handleOpenRoomProperties = () => {
       setShowRightPanel(true);
     };
@@ -585,10 +684,10 @@ export function SmartDrawingEditor({
 
   useEffect(() => {
     const updateBounds = () => {
-      const viewport = typeof window !== 'undefined' ? window.innerWidth : maxLeftWidth;
-      const nextMax = Math.max(minLeftWidth, Math.min(420, Math.floor(viewport * 0.35)));
+      const viewport = typeof window !== 'undefined' ? window.innerWidth : 1280;
+      const nextMax = Math.max(minLeftWidth, Math.min(360, Math.floor(viewport * 0.28)));
       setMaxLeftWidth(nextMax);
-      setLeftPanelWidth((current) => Math.min(current, nextMax));
+      setLeftPanelWidth((current) => Math.min(Math.max(current, minLeftWidth), nextMax));
     };
 
     updateBounds();
@@ -597,7 +696,7 @@ export function SmartDrawingEditor({
     return () => {
       window.removeEventListener('resize', updateBounds);
     };
-  }, [minLeftWidth, maxLeftWidth]);
+  }, [minLeftWidth]);
 
   useEffect(() => {
     if (!isResizingLeft || !showLeftPanel) return;
@@ -781,12 +880,22 @@ export function SmartDrawingEditor({
   }, [loadData]);
 
   return (
-    <div className={`flex flex-col h-full overflow-hidden bg-[#f6f1e7] ${className}`}>
+    <div className={`flex h-full flex-col overflow-hidden bg-[#f6f1e7] ${className}`}>
       <EditorRibbon
         projectId={projectId}
-        onExport={handleExportJSON}
+        onExportJSON={handleExportJSON}
+        onExportSVG={handleExportSVG}
+        onExportPNG={handleExportPNG}
         onImport={handleImport}
         onSave={onSave ? handleSave : undefined}
+        zoomLevel={zoom}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        onZoomIn={() => setZoom(Math.min(zoom * 1.2, 5))}
+        onZoomOut={() => setZoom(Math.max(zoom / 1.2, 0.1))}
+        onResetView={resetView}
+        onUndo={undo}
+        onRedo={redo}
         saveState={saveState}
         lastSavedAt={lastSavedAt}
         showGrid={showGrid}
@@ -823,22 +932,42 @@ export function SmartDrawingEditor({
             style={{ width: leftPanelWidth }}
           >
             {isLeftCompact ? (
-              <div className="flex h-full flex-col items-center justify-between py-4">
-                <div className="flex flex-col items-center gap-4">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-400 text-amber-950 text-sm font-bold">
+              <div className="flex h-full flex-col items-center justify-between py-3">
+                <div className="flex flex-col items-center gap-3">
+                  <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-amber-400 text-[10px] font-bold text-amber-950">
                     PX
                   </div>
-                  <div className="flex flex-col items-center gap-3 text-slate-600">
-                    <button type="button" className="flex h-11 w-11 items-center justify-center rounded-xl border border-amber-200/80 bg-white/80">
+                  <div className="flex flex-col items-center gap-2 text-slate-600">
+                    <button
+                      type="button"
+                      onClick={() => setShowGrid(!showGrid)}
+                      className={`flex h-10 w-10 items-center justify-center rounded-xl border border-amber-200/80 bg-white/80 ${showGrid ? 'text-amber-700' : ''}`}
+                      title="Toggle grid"
+                    >
                       <Grid3X3 size={18} />
                     </button>
-                    <button type="button" className="flex h-11 w-11 items-center justify-center rounded-xl border border-amber-200/80 bg-white/80">
+                    <button
+                      type="button"
+                      onClick={() => setShowRulers(!showRulers)}
+                      className={`flex h-10 w-10 items-center justify-center rounded-xl border border-amber-200/80 bg-white/80 ${showRulers ? 'text-amber-700' : ''}`}
+                      title="Toggle rulers"
+                    >
                       <Ruler size={18} />
                     </button>
-                    <button type="button" className="flex h-11 w-11 items-center justify-center rounded-xl border border-amber-200/80 bg-white/80">
+                    <button
+                      type="button"
+                      onClick={() => setLeftPanelTab((prev) => (prev === 'symbols' ? 'objects' : 'symbols'))}
+                      className="flex h-10 w-10 items-center justify-center rounded-xl border border-amber-200/80 bg-white/80"
+                      title="Toggle library tab"
+                    >
                       <BoxSelect size={18} />
                     </button>
-                    <button type="button" className="flex h-11 w-11 items-center justify-center rounded-xl border border-amber-200/80 bg-white/80">
+                    <button
+                      type="button"
+                      onClick={() => setShowRightPanel(true)}
+                      className="flex h-10 w-10 items-center justify-center rounded-xl border border-amber-200/80 bg-white/80"
+                      title="Open properties"
+                    >
                       <Settings size={18} />
                     </button>
                   </div>
@@ -846,95 +975,125 @@ export function SmartDrawingEditor({
                 <button
                   type="button"
                   onClick={() => setShowLeftPanel(false)}
-                  className="flex h-9 w-9 items-center justify-center rounded-lg border border-amber-200/80 bg-white/80 text-slate-600 hover:bg-amber-50"
-                  title="Hide ribbon"
+                  className="flex h-8 w-8 items-center justify-center rounded-lg border border-amber-200/80 bg-white/80 text-slate-600 hover:bg-amber-50"
+                  title="Hide toolbox"
                 >
                   <PanelLeftClose size={16} />
                 </button>
               </div>
             ) : (
               <div className="flex h-full flex-col overflow-hidden">
-                <div className="px-4 py-3 border-b border-amber-200/70 shrink-0">
+                <div className="shrink-0 border-b border-amber-200/70 px-3 py-2">
                   <div className="flex items-center justify-between">
                     <div>
                       <p className="text-[11px] uppercase tracking-wide text-slate-500">Toolbox</p>
-                      <h2 className="text-sm font-semibold text-slate-800">Drawing Tools</h2>
+                      <h2 className="text-xs font-semibold text-slate-800">Drawing Tools</h2>
                     </div>
-                    <div className="text-xs text-slate-500">{elementCount} elements</div>
+                    <div className="text-[11px] text-slate-500">{elementCount} elements</div>
                   </div>
                 </div>
 
                 <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain scrollbar-thin scrollbar-thumb-amber-300">
-                  <div className="p-3 space-y-3">
-                  <div className="rounded-xl border border-amber-200/80 bg-white/80 p-3">
-                    <p className="text-xs font-semibold text-slate-600 uppercase tracking-wide">Core Tools</p>
-                    <div className="mt-3">
-                      <Toolbar
-                        orientation="vertical"
-                        layout="grid"
-                        variant="toolbox"
-                        showLabels
-                        showZoomControls={false}
-                        showUndoRedo={false}
-                        showLayerControls={false}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="rounded-xl border border-amber-200/80 bg-white/80 p-3">
-                    <p className="text-xs font-semibold text-slate-600 uppercase tracking-wide">Quick Actions</p>
-                    <div className="mt-2 grid grid-cols-2 gap-2">
-                      {quickActions.map((action) => (
-                        <QuickActionButton
-                          key={action.id}
-                          icon={action.icon}
-                          label={action.label}
-                          active={activeTool === action.id}
-                          onClick={() => {
-                            setTool(action.id);
-                            if (action.id === 'room' && typeof window !== 'undefined') {
-                              window.dispatchEvent(
-                                new CustomEvent('smart-drawing:room-tool-activate')
-                              );
-                            }
-                          }}
-                          disabled={readOnly}
+                  <div className="space-y-2.5 p-2.5">
+                    <div className="rounded-xl border border-amber-200/80 bg-white/80 p-2.5">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Core Tools</p>
+                      <div className="mt-2">
+                        <Toolbar
+                          orientation="vertical"
+                          layout="grid"
+                          variant="toolbox"
+                          showLabels
+                          showZoomControls={false}
+                          showUndoRedo={false}
+                          showLayerControls={false}
                         />
-                      ))}
+                      </div>
                     </div>
-                  </div>
 
-                  <div className="min-h-0">
-                    <SymbolPalette
-                      variant="embedded"
-                      onSymbolSelect={handleSymbolSelect}
-                      className="h-full"
-                    />
-                  </div>
+                    <div className="rounded-xl border border-amber-200/80 bg-white/80 p-2.5">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Quick Actions</p>
+                      <div className="mt-2 grid grid-cols-2 gap-1.5">
+                        {quickActions.map((action) => (
+                          <QuickActionButton
+                            key={action.id}
+                            icon={action.icon}
+                            label={action.label}
+                            active={activeTool === action.id}
+                            onClick={() => {
+                              setTool(action.id);
+                              if (action.id === 'room' && typeof window !== 'undefined') {
+                                window.dispatchEvent(
+                                  new CustomEvent('smart-drawing:room-tool-activate')
+                                );
+                              }
+                            }}
+                            disabled={readOnly}
+                          />
+                        ))}
+                      </div>
+                    </div>
 
-                  <div className="h-[420px] rounded-xl border border-amber-200/80 bg-white/80 overflow-hidden">
-                    <ObjectLibraryPanel
-                      objects={architecturalObjects}
-                      recentUsage={recentObjectUsage}
-                      pendingObjectId={pendingPlacementObjectId}
-                      onStartPlacement={handleStartObjectPlacement}
-                      onCancelPlacement={handleCancelObjectPlacement}
-                      onAddCustomObject={handleAddCustomObject}
-                      onImportCustomObjects={handleImportCustomObjects}
-                    />
-                  </div>
+                    <div className="rounded-xl border border-amber-200/80 bg-white/80 p-2.5">
+                      <div className="mb-2 flex items-center justify-between">
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Libraries</p>
+                        <div className="inline-flex rounded-md border border-amber-200/80 bg-white p-0.5">
+                          <button
+                            type="button"
+                            onClick={() => setLeftPanelTab('symbols')}
+                            className={`rounded px-2 py-1 text-[11px] ${
+                              leftPanelTab === 'symbols'
+                                ? 'bg-amber-200 text-amber-900'
+                                : 'text-slate-600 hover:bg-amber-50'
+                            }`}
+                          >
+                            Symbols
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setLeftPanelTab('objects')}
+                            className={`rounded px-2 py-1 text-[11px] ${
+                              leftPanelTab === 'objects'
+                                ? 'bg-amber-200 text-amber-900'
+                                : 'text-slate-600 hover:bg-amber-50'
+                            }`}
+                          >
+                            Objects
+                          </button>
+                        </div>
+                      </div>
+                      <div className="h-[420px] overflow-hidden rounded-lg border border-amber-200/80 bg-white">
+                        {leftPanelTab === 'symbols' ? (
+                          <SymbolPalette
+                            variant="embedded"
+                            onSymbolSelect={handleSymbolSelect}
+                            className="h-full"
+                          />
+                        ) : (
+                          <ObjectLibraryPanel
+                            className="h-full"
+                            objects={architecturalObjects}
+                            recentUsage={recentObjectUsage}
+                            pendingObjectId={pendingPlacementObjectId}
+                            onStartPlacement={handleStartObjectPlacement}
+                            onCancelPlacement={handleCancelObjectPlacement}
+                            onAddCustomObject={handleAddCustomObject}
+                            onImportCustomObjects={handleImportCustomObjects}
+                          />
+                        )}
+                      </div>
+                    </div>
                   </div>
                 </div>
 
-                <div className="p-3 shrink-0 border-t border-amber-200/70">
+                <div className="shrink-0 border-t border-amber-200/70 p-2.5">
                   <button
                     type="button"
                     onClick={() => setShowLeftPanel(false)}
-                    className="flex w-full items-center justify-center gap-2 rounded-lg border border-amber-200/80 bg-white/80 py-2 text-sm font-medium text-slate-600 hover:bg-amber-50"
-                    title="Hide ribbon"
+                    className="flex w-full items-center justify-center gap-2 rounded-lg border border-amber-200/80 bg-white/80 py-1.5 text-xs font-medium text-slate-600 hover:bg-amber-50"
+                    title="Hide toolbox"
                   >
                     <PanelLeftClose size={16} />
-                    Hide ribbon
+                    Hide toolbox
                   </button>
                 </div>
               </div>
@@ -954,49 +1113,15 @@ export function SmartDrawingEditor({
         {!showLeftPanel && (
           <button
             onClick={() => setShowLeftPanel(true)}
-            className="flex items-center justify-center w-6 bg-[#f2e3c3] hover:bg-amber-200 border-r border-amber-200/70 transition-colors"
-            title="Show ribbon"
+            className="flex w-6 items-center justify-center border-r border-amber-200/70 bg-[#f2e3c3] transition-colors hover:bg-amber-200"
+            title="Show toolbox"
           >
             <PanelLeftClose size={16} className="text-slate-700 rotate-180" />
           </button>
         )}
 
-        <div className="flex-1 flex flex-col overflow-hidden">
-          <div className="flex items-center gap-2 px-3 py-2 bg-[#fff7e6] border-b border-amber-200/70">
-            <Toolbar
-              orientation="horizontal"
-              variant="ribbon"
-              showDrawingTools={false}
-              showLayerControls={false}
-            />
-
-            <div className="flex-1" />
-
-            <div className="flex items-center gap-1">
-              <button
-                onClick={handleExportJSON}
-                className="p-2 text-slate-600 hover:bg-amber-50 rounded transition-colors"
-                title="Export as JSON"
-              >
-                <FileJson size={18} />
-              </button>
-              <button
-                onClick={handleExportSVG}
-                className="p-2 text-slate-600 hover:bg-amber-50 rounded transition-colors"
-                title="Export as SVG"
-              >
-                <Image size={18} />
-              </button>
-              <button
-                onClick={handleExportPNG}
-                className="p-2 text-slate-600 hover:bg-amber-50 rounded transition-colors"
-                title="Export as PNG"
-              >
-                <Printer size={18} />
-              </button>
-            </div>
-          </div>
-          <AttributeQuickToolbar />
+        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          <AttributeQuickToolbar className="!px-2 !py-1.5" />
 
           <DrawingCanvas
             className="flex-1"
@@ -1024,7 +1149,7 @@ export function SmartDrawingEditor({
 
         <button
           onClick={() => setShowRightPanel(!showRightPanel)}
-          className="flex items-center justify-center w-7 bg-[#f2e3c3] hover:bg-amber-200 border-l border-amber-200/70 transition-colors"
+          className="flex w-6 items-center justify-center border-l border-amber-200/70 bg-[#f2e3c3] transition-colors hover:bg-amber-200"
           title={showRightPanel ? 'Hide properties' : 'Show properties'}
         >
           <PanelRightClose
@@ -1034,7 +1159,7 @@ export function SmartDrawingEditor({
         </button>
 
         {showRightPanel && (
-          <aside className="flex flex-col w-80 bg-[#fbf7ee] border-l border-amber-200/70 overflow-hidden">
+          <aside className="flex w-72 flex-col overflow-hidden border-l border-amber-200/70 bg-[#fbf7ee]">
             <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain scrollbar-thin scrollbar-thumb-amber-300">
               <PropertiesPanel className="!w-full !border-l-0" />
             </div>
