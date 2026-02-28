@@ -12,13 +12,16 @@ import * as fabric from 'fabric';
 import { useEffect, useRef, useCallback, useState } from 'react';
 
 import type {
+  ElevationFurnitureProjection,
   ElevationHvacProjection,
   ElevationSettings,
   ElevationView,
+  ElevationViewKind,
   ElevationWallProjection,
   SectionLine,
 } from '../../../types';
 import { MM_TO_PX } from '../scale';
+import { renderFurnitureFront, renderFurnitureEnd, hasRenderer } from '../object/FurnitureSymbolRenderer';
 
 // =============================================================================
 // Types
@@ -149,7 +152,7 @@ export function ElevationViewCanvas({
       return;
     }
 
-    const { walls, hvacElements: hvacProjections, minX, maxX, maxHeightMm } = elevationView;
+    const { walls, hvacElements: hvacProjections, furnitureElements: furnitureProjections, minX, maxX, maxHeightMm } = elevationView;
 
     // Compute scale to fit the elevation in the available area
     const availW = containerSize.width - MARGIN * 2;
@@ -230,6 +233,15 @@ export function ElevationViewCanvas({
     if (hvacProjections) {
       for (const hvacProj of hvacProjections) {
         renderHvacProjection(canvas, hvacProj, wx, wy);
+      }
+    }
+
+    // ── Furniture elements
+    if (furnitureProjections) {
+      // Sort by depth (back to front) for painter's algorithm
+      const sortedFurniture = [...furnitureProjections].sort((a, b) => b.depth - a.depth);
+      for (const furnProj of sortedFurniture) {
+        renderFurnitureProjection(canvas, furnProj, wx, wy, elevationView.kind);
       }
     }
 
@@ -641,6 +653,166 @@ function renderWidthDimension(
     evented: false,
   });
   canvas.add(dimText);
+}
+
+// Furniture colors by visibility
+const FURN_FILL = 'rgba(90,56,32,0.12)';
+const FURN_STROKE = 'rgba(90,56,32,0.6)';
+const FURN_GHOST_FILL = 'rgba(90,56,32,0.04)';
+const FURN_GHOST_STROKE = 'rgba(90,56,32,0.2)';
+const FURN_CUT_FILL = 'rgba(232,144,10,0.15)';
+const FURN_CUT_STROKE = '#e8900a';
+
+function renderFurnitureProjection(
+  canvas: fabric.Canvas,
+  furn: ElevationFurnitureProjection,
+  wx: (x: number) => number,
+  wy: (y: number) => number,
+  viewKind: ElevationViewKind
+): void {
+  const x1 = wx(furn.xStart);
+  const x2 = wx(furn.xEnd);
+  const y1 = wy(furn.yTop);
+  const y2 = wy(furn.yBottom);
+  const left = Math.min(x1, x2);
+  const top = Math.min(y1, y2);
+  const width = Math.abs(x2 - x1);
+  const height = Math.abs(y2 - y1);
+
+  if (width < 2 || height < 2) return;
+
+  // Try Canvas 2D rich rendering if a renderer exists
+  if (hasRenderer(furn.renderType) && width > 10 && height > 10) {
+    const canvasEl = document.createElement('canvas');
+    const dpr = 2;
+    canvasEl.width = Math.ceil(width) * dpr;
+    canvasEl.height = Math.ceil(height) * dpr;
+    const ctx2d = canvasEl.getContext('2d');
+    if (ctx2d) {
+      ctx2d.scale(dpr, dpr);
+      const cxLocal = width / 2;
+      const cyLocal = height / 2;
+
+      // Apply ghost/cut opacity
+      if (furn.visibility === 'ghost') {
+        ctx2d.globalAlpha = 0.3;
+      } else if (furn.visibility === 'cut') {
+        ctx2d.globalAlpha = 0.8;
+      }
+
+      // Use front or end renderer based on view kind
+      const isEndView = viewKind === 'east' || viewKind === 'west';
+      if (isEndView) {
+        renderFurnitureEnd(ctx2d, furn.renderType, cxLocal, cyLocal, width, height);
+      } else {
+        renderFurnitureFront(ctx2d, furn.renderType, cxLocal, cyLocal, width, height);
+      }
+
+      const img = new fabric.FabricImage(canvasEl, {
+        left,
+        top,
+        width: canvasEl.width,
+        height: canvasEl.height,
+        scaleX: 1 / dpr,
+        scaleY: 1 / dpr,
+        selectable: false,
+        evented: false,
+      });
+      canvas.add(img);
+
+      // Add visibility badge if not fully visible
+      if (furn.visibility !== 'visible') {
+        const badge = new fabric.Text(
+          furn.visibility === 'cut' ? 'CUT' : 'BEHIND',
+          {
+            left: left + width / 2,
+            top: top - 3,
+            fontSize: 7,
+            fill: furn.visibility === 'cut' ? FURN_CUT_STROKE : FURN_GHOST_STROKE,
+            fontFamily: 'monospace',
+            fontWeight: 'bold',
+            originX: 'center',
+            originY: 'bottom',
+            selectable: false,
+            evented: false,
+          }
+        );
+        canvas.add(badge);
+      }
+      return;
+    }
+  }
+
+  // Fallback: simple rectangle with visibility styling
+  let fill: string;
+  let stroke: string;
+  let dashArray: number[] | undefined;
+
+  switch (furn.visibility) {
+    case 'visible':
+      fill = FURN_FILL;
+      stroke = FURN_STROKE;
+      break;
+    case 'cut':
+      fill = FURN_CUT_FILL;
+      stroke = FURN_CUT_STROKE;
+      break;
+    case 'ghost':
+      fill = FURN_GHOST_FILL;
+      stroke = FURN_GHOST_STROKE;
+      dashArray = [4, 3];
+      break;
+  }
+
+  const rect = new fabric.Rect({
+    left,
+    top,
+    width,
+    height,
+    fill,
+    stroke,
+    strokeWidth: 1.2,
+    strokeDashArray: dashArray,
+    selectable: false,
+    evented: false,
+  });
+  canvas.add(rect);
+
+  // Label
+  if (width > 25) {
+    const label = new fabric.Text(furn.name, {
+      left: left + width / 2,
+      top: top + height / 2,
+      fontSize: Math.min(8, width * 0.07),
+      fill: furn.visibility === 'cut' ? FURN_CUT_STROKE : FURN_STROKE,
+      fontFamily: 'monospace',
+      fontWeight: '500',
+      originX: 'center',
+      originY: 'center',
+      selectable: false,
+      evented: false,
+    });
+    canvas.add(label);
+  }
+
+  if (furn.visibility !== 'visible') {
+    const badge = new fabric.Text(
+      furn.visibility === 'cut' ? 'CUT' : 'BEHIND',
+      {
+        left: left + width / 2,
+        top: top - 3,
+        fontSize: 7,
+        fill: furn.visibility === 'cut' ? FURN_CUT_STROKE : FURN_GHOST_STROKE,
+        fontFamily: 'monospace',
+        fontWeight: 'bold',
+        originX: 'center',
+        originY: 'bottom',
+        selectable: false,
+        evented: false,
+      }
+    );
+    canvas.add(badge);
+  }
 }
 
 export default ElevationViewCanvas;

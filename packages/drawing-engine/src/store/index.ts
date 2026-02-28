@@ -27,6 +27,8 @@ import {
   generateCustomElevationView,
   regenerateElevationViews,
 } from '../components/canvas/elevation';
+import type { FurnitureProjectionInput } from '../components/canvas/elevation';
+import { DEFAULT_ARCHITECTURAL_OBJECT_LIBRARY } from '../data';
 import type {
   Point2D,
   DisplayUnit,
@@ -62,6 +64,8 @@ import type {
   SectionLineKind,
   CreateWallParams,
   RoomConfig,
+  HvacElement,
+  EditorViewMode,
 } from '../types';
 import { DEFAULT_DIMENSION_SETTINGS } from '../types';
 import {
@@ -111,6 +115,9 @@ import {
 } from './roomDetection';
 
 const AUTO_TRIM_TOLERANCE_MM = 120;
+const STRAIGHT_WALL_MERGE_NODE_TOLERANCE_MM = 4;
+const STRAIGHT_WALL_MERGE_ANGLE_TOLERANCE_DEG = 6;
+const STRAIGHT_WALL_MERGE_THICKNESS_TOLERANCE_MM = 1;
 const ROOM_DETECTION_DEBOUNCE_MS = 120;
 const ELEVATION_REGEN_DEBOUNCE_MS = 120;
 
@@ -122,6 +129,21 @@ const INITIAL_ELEVATION_VIEWS = createStandardElevationViews(
   [],
   DEFAULT_ELEVATION_SETTINGS
 );
+
+// Build a lookup map for architectural object definitions by id
+const objectDefMap = new Map(DEFAULT_ARCHITECTURAL_OBJECT_LIBRARY.map((d) => [d.id, d]));
+
+/** Build furniture projection inputs from placed symbols that have a renderType */
+function buildFurnitureInputs(symbols: SymbolInstance2D[]): FurnitureProjectionInput[] {
+  const result: FurnitureProjectionInput[] = [];
+  for (const instance of symbols) {
+    const definition = objectDefMap.get(instance.symbolId);
+    if (definition?.renderType) {
+      result.push({ instance, definition });
+    }
+  }
+  return result;
+}
 
 function clampValue(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -281,6 +303,147 @@ function autoTrimWallEndpoints(
 
 function pointsNear(a: Point2D, b: Point2D, tolerance: number = 2): boolean {
   return Math.abs(a.x - b.x) <= tolerance && Math.abs(a.y - b.y) <= tolerance;
+}
+
+function pointForOppositeEndpoint(wall: Wall, end: CornerEnd): Point2D {
+  return end === 'start' ? wall.endPoint : wall.startPoint;
+}
+
+function bevelForEndpoint(wall: Wall, end: CornerEnd): BevelControl {
+  return normalizeBevelControl(end === 'start' ? wall.startBevel : wall.endBevel);
+}
+
+function dedupeWallIds(ids: string[]): string[] {
+  return [...new Set(ids)];
+}
+
+function directionAwayFromEndpoint(wall: Wall, end: CornerEnd): Point2D {
+  const from = end === 'start' ? wall.startPoint : wall.endPoint;
+  const to = end === 'start' ? wall.endPoint : wall.startPoint;
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const length = Math.hypot(dx, dy);
+  if (length < 0.000001) {
+    return { x: 0, y: 0 };
+  }
+  return {
+    x: dx / length,
+    y: dy / length,
+  };
+}
+
+function canMergeStraightWalls(retained: Wall, candidate: Wall): boolean {
+  if (retained.material !== candidate.material) return false;
+  if (retained.layer !== candidate.layer) return false;
+  if (retained.openings.length > 0 || candidate.openings.length > 0) return false;
+  return Math.abs(retained.thickness - candidate.thickness) <= STRAIGHT_WALL_MERGE_THICKNESS_TOLERANCE_MM;
+}
+
+function isStraightContinuation(
+  retained: Wall,
+  retainedEnd: CornerEnd,
+  candidate: Wall,
+  candidateEnd: CornerEnd
+): boolean {
+  const dirA = directionAwayFromEndpoint(retained, retainedEnd);
+  const dirB = directionAwayFromEndpoint(candidate, candidateEnd);
+  const toleranceRad = (STRAIGHT_WALL_MERGE_ANGLE_TOLERANCE_DEG * Math.PI) / 180;
+  const dot = dirA.x * dirB.x + dirA.y * dirB.y;
+  const cross = Math.abs(dirA.x * dirB.y - dirA.y * dirB.x);
+  return dot <= -Math.cos(toleranceRad) && cross <= Math.sin(toleranceRad) + 0.0001;
+}
+
+function mergeWallPair(
+  retained: Wall,
+  retainedEnd: CornerEnd,
+  candidate: Wall,
+  candidateEnd: CornerEnd
+): Wall {
+  const candidateOuterEnd: CornerEnd = candidateEnd === 'start' ? 'end' : 'start';
+  const candidateOuterPoint = pointForOppositeEndpoint(candidate, candidateEnd);
+  const merged = normalizeWallBevel({
+    ...retained,
+    startPoint: retainedEnd === 'start' ? { ...candidateOuterPoint } : { ...retained.startPoint },
+    endPoint: retainedEnd === 'end' ? { ...candidateOuterPoint } : { ...retained.endPoint },
+    startBevel: retainedEnd === 'start'
+      ? bevelForEndpoint(candidate, candidateOuterEnd)
+      : bevelForEndpoint(retained, 'start'),
+    endBevel: retainedEnd === 'end'
+      ? bevelForEndpoint(candidate, candidateOuterEnd)
+      : bevelForEndpoint(retained, 'end'),
+    connectedWalls: dedupeWallIds(
+      [...retained.connectedWalls, ...candidate.connectedWalls]
+        .filter((wallId) => wallId !== retained.id && wallId !== candidate.id)
+    ),
+  });
+
+  return bindWallAttributes(rebuildWallGeometry(merged), retained.properties3D);
+}
+
+function cleanupStraightWallRuns(walls: Wall[], retainedId: string): Wall[] {
+  let nextWalls = walls.map((wall) => normalizeWallBevel(wall));
+  let mergedWall = true;
+
+  while (mergedWall) {
+    mergedWall = false;
+    const retained = nextWalls.find((wall) => wall.id === retainedId);
+    if (!retained) break;
+
+    for (const candidate of nextWalls) {
+      if (candidate.id === retainedId) continue;
+      if (!canMergeStraightWalls(retained, candidate)) continue;
+
+      const sharedPoint =
+        pointsNear(retained.startPoint, candidate.startPoint, STRAIGHT_WALL_MERGE_NODE_TOLERANCE_MM)
+          ? { point: retained.startPoint, retainedEnd: 'start' as CornerEnd, candidateEnd: 'start' as CornerEnd }
+          : pointsNear(retained.startPoint, candidate.endPoint, STRAIGHT_WALL_MERGE_NODE_TOLERANCE_MM)
+            ? { point: retained.startPoint, retainedEnd: 'start' as CornerEnd, candidateEnd: 'end' as CornerEnd }
+            : pointsNear(retained.endPoint, candidate.startPoint, STRAIGHT_WALL_MERGE_NODE_TOLERANCE_MM)
+              ? { point: retained.endPoint, retainedEnd: 'end' as CornerEnd, candidateEnd: 'start' as CornerEnd }
+              : pointsNear(retained.endPoint, candidate.endPoint, STRAIGHT_WALL_MERGE_NODE_TOLERANCE_MM)
+                ? { point: retained.endPoint, retainedEnd: 'end' as CornerEnd, candidateEnd: 'end' as CornerEnd }
+                : null;
+
+      if (!sharedPoint) continue;
+      if (findWallsTouchingPoint(sharedPoint.point, nextWalls, STRAIGHT_WALL_MERGE_NODE_TOLERANCE_MM).length !== 2) {
+        continue;
+      }
+      if (!isStraightContinuation(retained, sharedPoint.retainedEnd, candidate, sharedPoint.candidateEnd)) {
+        continue;
+      }
+
+      const mergedCandidatePoint = pointForOppositeEndpoint(candidate, sharedPoint.candidateEnd);
+      const mergedStartPoint = sharedPoint.retainedEnd === 'start' ? mergedCandidatePoint : retained.startPoint;
+      const mergedEndPoint = sharedPoint.retainedEnd === 'end' ? mergedCandidatePoint : retained.endPoint;
+      if (wallLengthMm(mergedStartPoint, mergedEndPoint) < MIN_WALL_LENGTH) {
+        continue;
+      }
+
+      const merged = mergeWallPair(retained, sharedPoint.retainedEnd, candidate, sharedPoint.candidateEnd);
+      nextWalls = nextWalls
+        .filter((wall) => wall.id !== candidate.id)
+        .map((wall) => {
+          if (wall.id === retainedId) {
+            return merged;
+          }
+          if (!wall.connectedWalls.includes(candidate.id)) {
+            return wall;
+          }
+          return {
+            ...wall,
+            connectedWalls: dedupeWallIds(
+              wall.connectedWalls
+                .map((wallId) => (wallId === candidate.id ? retainedId : wallId))
+                .filter((wallId) => wallId !== wall.id)
+            ),
+          };
+        });
+      mergedWall = true;
+      break;
+    }
+  }
+
+  return nextWalls;
 }
 
 function pointLiesOnWall(point: Point2D, wall: Wall, tolerance: number = 2): boolean {
@@ -718,6 +881,8 @@ export interface DrawingState {
   elevationViews: ElevationView[];
   activeElevationViewId: string | null;
   elevationSettings: ElevationSettings;
+  hvacElements: HvacElement[];
+  editorViewMode: EditorViewMode;
 
   // Import State
   importedDrawing: ImportedDrawing | null;
@@ -875,6 +1040,7 @@ export interface DrawingState {
   setActiveElevationView: (id: string | null) => void;
   generateElevationForSection: (sectionLineId: string) => void;
   regenerateElevations: (options?: { debounce?: boolean }) => void;
+  setEditorViewMode: (mode: EditorViewMode) => void;
   connectWalls: (wallId: string, otherWallId: string) => void;
   disconnectWall: (wallId: string, otherWallId: string) => void;
   setWallSettings: (settings: Partial<WallSettings>) => void;
@@ -1000,6 +1166,8 @@ export const useDrawingStore = create<DrawingState>()(
       })),
       activeElevationViewId: INITIAL_ELEVATION_VIEWS[0]?.id ?? null,
       elevationSettings: { ...DEFAULT_ELEVATION_SETTINGS },
+      hvacElements: [],
+      editorViewMode: 'plan' as EditorViewMode,
       importedDrawing: null,
       importProgress: 0,
       isProcessing: false,
@@ -1266,14 +1434,19 @@ export const useDrawingStore = create<DrawingState>()(
         runDetection();
       },
 
+      setEditorViewMode: (mode) => set({ editorViewMode: mode }),
+
       regenerateElevations: (options) => {
         const runRegeneration = () => {
           set((state) => {
+            const furnitureInputs = buildFurnitureInputs(state.symbols);
             const nextViews = regenerateElevationViews(
               state.walls,
               state.sectionLines,
               state.elevationViews,
-              state.elevationSettings
+              state.elevationSettings,
+              state.hvacElements,
+              furnitureInputs
             );
             const nextActiveViewId =
               state.activeElevationViewId &&
@@ -1431,16 +1604,21 @@ export const useDrawingStore = create<DrawingState>()(
           const existingCustom = state.elevationViews.find(
             (view) => view.kind === 'custom' && view.sectionLineId === sectionLineId
           ) ?? null;
+          const furnitureInputs = buildFurnitureInputs(state.symbols);
           const customView = generateCustomElevationView(
             sectionLine,
             state.walls,
             existingCustom,
-            state.elevationSettings
+            state.elevationSettings,
+            state.hvacElements,
+            furnitureInputs
           );
           const standardViews = createStandardElevationViews(
             state.walls,
             state.elevationViews,
-            state.elevationSettings
+            state.elevationSettings,
+            state.hvacElements,
+            furnitureInputs
           );
           const customViews = state.elevationViews.filter(
             (view) =>
@@ -1576,8 +1754,8 @@ export const useDrawingStore = create<DrawingState>()(
           thermalResistance: getArchitecturalMaterial(materialId)?.thermalResistance ?? DEFAULT_WALL_3D.thermalResistance,
         });
 
-        set((state) => ({
-          walls: [
+        set((state) => {
+          const nextWalls = [
             ...state.walls.map((existingWall) => {
               if (
                 connectedWallIds.includes(existingWall.id) &&
@@ -1591,8 +1769,12 @@ export const useDrawingStore = create<DrawingState>()(
               return existingWall;
             }),
             boundWall,
-          ],
-        }));
+          ];
+
+          return {
+            walls: cleanupStraightWallRuns(nextWalls, id),
+          };
+        });
         attributeChangeObserver.notify({
           entity: 'wall',
           entityId: boundWall.id,
@@ -1659,7 +1841,15 @@ export const useDrawingStore = create<DrawingState>()(
             nextValue = reboundWall.properties3D;
             return reboundWall;
           });
-          return { walls: nextWalls };
+          const cleanedWalls = geometryChanged
+            ? cleanupStraightWallRuns(nextWalls, id)
+            : nextWalls;
+          const cleanedTarget = cleanedWalls.find((wall) => wall.id === id);
+          if (cleanedTarget) {
+            nextValue = cleanedTarget.properties3D;
+          }
+
+          return { walls: cleanedWalls };
         });
         if (nextValue) {
           attributeChangeObserver.notify({

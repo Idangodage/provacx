@@ -18,6 +18,7 @@ export interface UseCanvasKeyboardOptions {
     deleteSelected: () => void;
     setIsSpacePressed: (pressed: boolean) => void;
     setTool?: (tool: DrawingTool) => void;
+    onEscape?: () => boolean;
     onCopy?: () => void;
     onPaste?: () => void;
 }
@@ -27,6 +28,7 @@ export function useCanvasKeyboard({
     deleteSelected,
     setIsSpacePressed,
     setTool,
+    onEscape,
     onCopy,
     onPaste,
 }: UseCanvasKeyboardOptions) {
@@ -111,6 +113,10 @@ export function useCanvasKeyboard({
 
             const key = event.key.toLowerCase();
             if (key === 'escape') {
+                if (onEscape?.()) {
+                    event.preventDefault();
+                    return;
+                }
                 event.preventDefault();
                 setTool('select');
                 return;
@@ -165,5 +171,5 @@ export function useCanvasKeyboard({
         return () => {
             window.removeEventListener('keydown', handleToolShortcut);
         };
-    }, [setTool]);
+    }, [onEscape, setTool]);
 }

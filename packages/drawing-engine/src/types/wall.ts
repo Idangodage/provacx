@@ -88,6 +88,19 @@ export interface ElevationHvacProjection {
   label: string;
 }
 
+export interface ElevationFurnitureProjection {
+  id: string;
+  instanceId: string;
+  renderType: string;
+  name: string;
+  xStart: number;
+  xEnd: number;
+  yBottom: number;
+  yTop: number;
+  depth: number;
+  visibility: 'visible' | 'cut' | 'ghost';
+}
+
 export interface ElevationWallProjection {
   id: string;
   wallId: string;
@@ -125,6 +138,7 @@ export interface ElevationView {
   viewDirection: CompassDirection | 'custom';
   walls: ElevationWallProjection[];
   hvacElements: ElevationHvacProjection[];
+  furnitureElements: ElevationFurnitureProjection[];
   minX: number;
   maxX: number;
   maxHeightMm: number;

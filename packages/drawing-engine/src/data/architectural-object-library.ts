@@ -34,6 +34,8 @@ export interface ArchitecturalObjectDefinition {
   frameMaterial?: 'wood' | 'aluminum' | 'uPVC' | 'steel';
   uValue?: number;
   symbolPath?: string;
+  /** Links to a Canvas 2D multi-view renderer in FurnitureSymbolRenderer */
+  renderType?: string;
   tags: string[];
   metadata?: Record<string, unknown>;
   defaultRotationDeg?: number;
@@ -142,7 +144,8 @@ function furniture(
   zone: FurnitureZone,
   widthMm: number,
   depthMm: number,
-  heightMm: number = 750
+  heightMm: number = 750,
+  renderType?: string
 ): ArchitecturalObjectDefinition {
   return objectBase(
     id,
@@ -152,7 +155,8 @@ function furniture(
     widthMm,
     depthMm,
     heightMm,
-    ['furniture', zone]
+    ['furniture', zone],
+    renderType ? { renderType } : undefined
   );
 }
 
@@ -162,7 +166,8 @@ function fixture(
   type: FixtureType,
   widthMm: number,
   depthMm: number,
-  heightMm: number = 850
+  heightMm: number = 850,
+  renderType?: string
 ): ArchitecturalObjectDefinition {
   return objectBase(
     id,
@@ -172,7 +177,8 @@ function fixture(
     widthMm,
     depthMm,
     heightMm,
-    ['fixture', type]
+    ['fixture', type],
+    renderType ? { renderType } : undefined
   );
 }
 
@@ -233,36 +239,38 @@ export const DEFAULT_ARCHITECTURAL_OBJECT_LIBRARY: ArchitecturalObjectDefinition
   windowObject('window-awning-900', 'Awning 900', 'awning', 900),
 
   // Furniture - Bedroom
-  furniture('furn-bed-single', 'Single Bed', 'bedroom', 900, 1900, 500),
-  furniture('furn-bed-double', 'Double Bed', 'bedroom', 1350, 1900, 500),
-  furniture('furn-bed-queen', 'Queen Bed', 'bedroom', 1500, 2000, 500),
-  furniture('furn-bed-king', 'King Bed', 'bedroom', 1800, 2000, 500),
-  furniture('furn-nightstand', 'Nightstand', 'bedroom', 500, 500, 600),
-  furniture('furn-dresser', 'Dresser', 'bedroom', 900, 500, 900),
-  furniture('furn-wardrobe', 'Wardrobe', 'bedroom', 1000, 600, 2100),
+  furniture('furn-bed-single', 'Single Bed', 'bedroom', 900, 1900, 500, 'bed-single'),
+  furniture('furn-bed-double', 'Double Bed', 'bedroom', 1350, 1900, 500, 'bed-double'),
+  furniture('furn-bed-queen', 'Queen Bed', 'bedroom', 1500, 2000, 500, 'bed-queen'),
+  furniture('furn-bed-king', 'King Bed', 'bedroom', 1800, 2000, 500, 'bed-king'),
+  furniture('furn-nightstand', 'Nightstand', 'bedroom', 500, 500, 600, 'nightstand'),
+  furniture('furn-dresser', 'Dresser', 'bedroom', 900, 500, 900, 'dresser'),
+  furniture('furn-wardrobe', 'Wardrobe', 'bedroom', 1000, 600, 2100, 'wardrobe'),
 
   // Furniture - Living
-  furniture('furn-sofa-2', '2-Seater Sofa', 'living-room', 1500, 900, 900),
-  furniture('furn-sofa-3', '3-Seater Sofa', 'living-room', 2000, 900, 900),
-  furniture('furn-armchair', 'Armchair', 'living-room', 800, 800, 900),
-  furniture('furn-coffee-table', 'Coffee Table', 'living-room', 1200, 600, 450),
-  furniture('furn-tv-stand', 'TV Stand', 'living-room', 1500, 450, 550),
-  furniture('furn-bookshelf', 'Bookshelf', 'living-room', 800, 300, 2100),
+  furniture('furn-sofa-2', '2-Seater Sofa', 'living-room', 1500, 900, 900, 'sofa-2'),
+  furniture('furn-sofa-3', '3-Seater Sofa', 'living-room', 2200, 900, 900, 'sofa-3'),
+  furniture('furn-armchair', 'Armchair', 'living-room', 850, 850, 880, 'armchair'),
+  furniture('furn-office-chair', 'Office Swivel Chair', 'living-room', 680, 680, 1150, 'office-chair'),
+  furniture('furn-coffee-table', 'Coffee Table', 'living-room', 1100, 550, 420, 'coffee-table'),
+  furniture('furn-tv-stand', 'TV Stand', 'living-room', 1500, 450, 550, 'tv-stand'),
+  furniture('furn-bookshelf', 'Bookshelf', 'living-room', 800, 300, 2100, 'bookshelf'),
 
   // Furniture - Dining
-  furniture('furn-table-4', 'Dining Table 4-Seat', 'dining', 1200, 800, 750),
-  furniture('furn-table-6', 'Dining Table 6-Seat', 'dining', 1600, 900, 750),
-  furniture('furn-table-8', 'Dining Table 8-Seat', 'dining', 2000, 1000, 750),
-  furniture('furn-chair', 'Chair', 'dining', 450, 450, 900),
-  furniture('furn-buffet', 'Buffet', 'dining', 1500, 500, 900),
+  furniture('furn-table-4', 'Dining Table 4-Seat', 'dining', 1200, 800, 750, 'dining-table'),
+  furniture('furn-table-6', 'Dining Table 6-Seat', 'dining', 1500, 800, 750, 'dining-table'),
+  furniture('furn-table-8', 'Dining Table 8-Seat', 'dining', 2000, 1000, 750, 'dining-table'),
+  furniture('furn-round-table', 'Round Table Ø900', 'dining', 900, 900, 750, 'round-table'),
+  furniture('furn-chair', 'Dining Chair', 'dining', 450, 450, 830, 'dining-chair'),
+  furniture('furn-buffet', 'Buffet', 'dining', 1500, 500, 900, 'buffet'),
 
   // Fixtures / Kitchen-Bath
-  fixture('fix-sink', 'Sink', 'plumbing', 600, 500, 900),
-  fixture('fix-stove', 'Stove', 'appliance', 600, 600, 900),
-  fixture('fix-fridge', 'Refrigerator', 'appliance', 700, 700, 1800),
-  fixture('fix-toilet', 'Toilet', 'plumbing', 450, 750, 800),
-  fixture('fix-bathtub', 'Bathtub', 'plumbing', 1700, 800, 600),
-  fixture('fix-shower', 'Shower', 'plumbing', 900, 900, 2100),
+  fixture('fix-sink', 'Sink', 'plumbing', 600, 500, 900, 'sink'),
+  fixture('fix-stove', 'Stove', 'appliance', 600, 600, 900, 'stove'),
+  fixture('fix-fridge', 'Refrigerator', 'appliance', 700, 700, 1800, 'fridge'),
+  fixture('fix-toilet', 'Toilet', 'plumbing', 450, 750, 800, 'toilet'),
+  fixture('fix-bathtub', 'Bathtub', 'plumbing', 1700, 800, 600, 'bathtub'),
+  fixture('fix-shower', 'Shower', 'plumbing', 900, 900, 2100, 'shower'),
 
   // Symbols
   drawingSymbol(

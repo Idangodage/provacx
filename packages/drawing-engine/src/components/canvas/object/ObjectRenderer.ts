@@ -9,6 +9,7 @@ import * as fabric from 'fabric';
 import type { ArchitecturalObjectDefinition } from '../../../data';
 import type { SymbolInstance2D } from '../../../types';
 import { MM_TO_PX } from '../scale';
+import { hasRenderer, renderFurniturePlan } from './FurnitureSymbolRenderer';
 
 type NamedObject = fabric.Object & {
   id?: string;
@@ -177,6 +178,32 @@ function graphicsForDefinition(
   }
   if (definition.category === 'windows') {
     return windowGraphics(widthPx, stroke);
+  }
+  if (hasRenderer(definition.renderType)) {
+    const renderType = definition.renderType!;
+    const canvasEl = document.createElement('canvas');
+    const w = Math.max(8, Math.ceil(widthPx));
+    const h = Math.max(8, Math.ceil(depthPx));
+    canvasEl.width = w * 2;
+    canvasEl.height = h * 2;
+    const ctx2d = canvasEl.getContext('2d');
+    if (ctx2d) {
+      ctx2d.scale(2, 2);
+      renderFurniturePlan(ctx2d, renderType, w / 2, h / 2, w, h);
+    }
+    const img = new fabric.FabricImage(canvasEl, {
+      left: 0,
+      top: 0,
+      width: w * 2,
+      height: h * 2,
+      scaleX: 0.5,
+      scaleY: 0.5,
+      originX: 'center',
+      originY: 'center',
+      selectable: false,
+      evented: false,
+    });
+    return [img];
   }
   if (definition.symbolPath) {
     const path = new fabric.Path(definition.symbolPath, {

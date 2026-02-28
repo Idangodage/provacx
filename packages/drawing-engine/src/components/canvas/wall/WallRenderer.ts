@@ -965,11 +965,12 @@ export class WallRenderer {
             continue;
           }
 
-          const isTJunction = match.matchType === 'segment';
-          const joinType = isTJunction ? 'butt' : determineJoinType(angle);
-          const { interiorVertex, exteriorVertex } = isTJunction
-            ? this.computeButtJoinVertices(wall, otherWall, match.endpoint)
-            : computeMiterJoin(wall, otherWall, match.point);
+          const { joinType, interiorVertex, exteriorVertex } = this.resolveJoinGeometry(
+            wall,
+            otherWall,
+            match,
+            angle
+          );
           const bevelDirection = this.computeBevelDirection(wall, otherWall, match.endpoint, match.point);
           const maxBevelOffset = this.computeMaxBevelOffset(wall, otherWall);
 
@@ -1070,6 +1071,41 @@ export class WallRenderer {
     return matches;
   }
 
+  private resolveJoinGeometry(
+    wall: Wall,
+    otherWall: Wall,
+    match: WallJoinMatch,
+    angle: number
+  ): { joinType: 'miter' | 'butt'; interiorVertex: Point2D; exteriorVertex: Point2D } {
+    if (match.matchType === 'segment') {
+      return {
+        joinType: 'butt',
+        ...this.computeButtJoinVertices(wall, otherWall, match.endpoint),
+      };
+    }
+
+    const preferredJoinType = determineJoinType(angle);
+    if (preferredJoinType === 'butt') {
+      return {
+        joinType: 'butt',
+        ...this.computeButtJoinVertices(wall, otherWall, match.endpoint),
+      };
+    }
+
+    const miter = computeMiterJoin(wall, otherWall, match.point);
+    if (this.shouldFallbackToButtJoin(wall, otherWall, match.point, miter)) {
+      return {
+        joinType: 'butt',
+        ...this.computeButtJoinVertices(wall, otherWall, match.endpoint),
+      };
+    }
+
+    return {
+      joinType: 'miter',
+      ...miter,
+    };
+  }
+
   private computeButtJoinVertices(
     wall: Wall,
     hostWall: Wall,
@@ -1126,6 +1162,26 @@ export class WallRenderer {
       ) ?? exteriorFallback;
 
     return { interiorVertex, exteriorVertex };
+  }
+
+  private shouldFallbackToButtJoin(
+    wall: Wall,
+    otherWall: Wall,
+    joinPoint: Point2D,
+    vertices: { interiorVertex: Point2D; exteriorVertex: Point2D }
+  ): boolean {
+    const longestMiterReach = Math.max(
+      this.pointDistance(joinPoint, vertices.interiorVertex),
+      this.pointDistance(joinPoint, vertices.exteriorVertex)
+    );
+    const shortestWallLength = Math.min(
+      this.pointDistance(wall.startPoint, wall.endPoint),
+      this.pointDistance(otherWall.startPoint, otherWall.endPoint)
+    );
+    const maxThickness = Math.max(wall.thickness, otherWall.thickness);
+    const maxAllowedReach = Math.min(maxThickness * 2.5, shortestWallLength * 0.7);
+
+    return !Number.isFinite(longestMiterReach) || longestMiterReach > maxAllowedReach;
   }
 
   private directionAwayFromEndpoint(wall: Wall, endpoint: 'start' | 'end'): Point2D {

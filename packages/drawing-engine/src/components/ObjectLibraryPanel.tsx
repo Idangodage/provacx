@@ -15,7 +15,7 @@ import {
   Star,
   Upload,
 } from 'lucide-react';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   ARCHITECTURAL_OBJECT_CATEGORIES,
@@ -25,6 +25,14 @@ import {
   sortArchitecturalObjects,
   type ObjectSortMode,
 } from '../data';
+import {
+  hasRenderer,
+  renderFurniturePlan,
+  renderFurnitureFront,
+  renderFurnitureEnd,
+  renderFurnitureIso,
+} from './canvas/object/FurnitureSymbolRenderer';
+import { Furniture3DRenderer } from './canvas/object/three3d';
 
 export interface ObjectLibraryPanelProps {
   className?: string;
@@ -50,6 +58,101 @@ function objectPreviewPath(definition: ArchitecturalObjectDefinition): string {
     return 'M 10 45 L 90 45 M 10 55 L 90 55 M 50 45 L 50 55';
   }
   return 'M 15 20 L 85 20 L 85 80 L 15 80 Z';
+}
+
+function FurnitureCanvasPreview({
+  renderType,
+  width,
+  height,
+  mode = 'plan',
+}: {
+  renderType: string;
+  width: number;
+  height: number;
+  mode?: PreviewViewMode;
+}): React.ReactElement {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    const pad = 4;
+    const drawW = width - pad * 2;
+    const drawH = height - pad * 2;
+    const cx = width / 2;
+    const cy = height / 2;
+    if (mode === 'plan') {
+      renderFurniturePlan(ctx, renderType, cx, cy, drawW, drawH);
+    } else if (mode === 'front') {
+      renderFurnitureFront(ctx, renderType, cx, cy, drawW, drawH);
+    } else if (mode === 'end') {
+      renderFurnitureEnd(ctx, renderType, cx, cy, drawW, drawH);
+    } else {
+      renderFurnitureIso(ctx, renderType, cx, cy, drawW, drawH, drawH);
+    }
+    ctx.restore();
+  }, [renderType, width, height, mode]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      style={{ width, height }}
+      className="rounded"
+    />
+  );
+}
+
+type PreviewViewMode = 'plan' | 'front' | 'end' | 'iso' | '3d';
+
+function Furniture3DPreview({
+  renderType,
+  width,
+  height,
+}: {
+  renderType: string;
+  width: number;
+  height: number;
+}): React.ReactElement {
+  const [src, setSrc] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      const renderer = Furniture3DRenderer.getInstance();
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const dataURL = renderer.renderToDataURL(renderType, Math.round(width * dpr), Math.round(height * dpr));
+      setSrc(dataURL);
+    } catch {
+      setSrc(null);
+    }
+  }, [renderType, width, height]);
+
+  if (!src) {
+    return (
+      <div
+        className="flex items-center justify-center rounded bg-slate-100 text-[10px] text-slate-400"
+        style={{ width, height }}
+      >
+        3D
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={src}
+      alt="3D preview"
+      style={{ width, height }}
+      className="rounded object-contain"
+    />
+  );
 }
 
 function downloadTextFile(fileName: string, content: string): void {
@@ -112,6 +215,8 @@ export function ObjectLibraryPanel({
     if (filteredObjects.length > 0) return filteredObjects[0];
     return null;
   }, [objects, selectedId, filteredObjects]);
+
+  const [previewView, setPreviewView] = useState<PreviewViewMode>('plan');
 
   const toggleFavorite = (definitionId: string): void => {
     setFavorites((prev) => {
@@ -277,11 +382,12 @@ export function ObjectLibraryPanel({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-1.5">
-        <div className={`grid gap-1.5 ${viewMode === 'thumbnail' ? 'grid-cols-2' : 'grid-cols-1'}`}>
+        <div className={`grid gap-2 ${viewMode === 'thumbnail' ? 'grid-cols-2' : 'grid-cols-1'}`}>
           {filteredObjects.map((definition) => {
             const favorite = favorites.has(definition.id);
             const isSelected = selectedDefinition?.id === definition.id;
             const isPending = pendingObjectId === definition.id;
+            const hasFurnitureRenderer = hasRenderer(definition.renderType);
             return (
               <button
                 key={definition.id}
@@ -290,7 +396,7 @@ export function ObjectLibraryPanel({
                   setSelectedId(definition.id);
                   onStartPlacement(definition);
                 }}
-                className={`rounded border px-1.5 py-1.5 text-left transition-colors ${
+                className={`rounded-lg border px-2 py-2 text-left transition-colors ${
                   isPending
                     ? 'border-blue-400 bg-blue-50'
                     : isSelected
@@ -298,50 +404,111 @@ export function ObjectLibraryPanel({
                       : 'border-amber-200/80 bg-white hover:bg-amber-50'
                 }`}
               >
-                <div className="flex items-start justify-between gap-1">
-                  <div className="inline-flex h-8 w-8 items-center justify-center rounded border border-amber-100 bg-[#fff7e6]">
-                    <svg width="24" height="24" viewBox="0 0 100 100" className="text-slate-700">
-                      <path d={objectPreviewPath(definition)} fill="none" stroke="currentColor" strokeWidth="5" />
-                    </svg>
+                {hasFurnitureRenderer ? (
+                  <div className="relative">
+                    <div className="flex items-center justify-center rounded border border-amber-100 bg-[#fff7e6] overflow-hidden" style={{ height: 80 }}>
+                      <FurnitureCanvasPreview
+                        renderType={definition.renderType!}
+                        width={100}
+                        height={76}
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggleFavorite(definition.id);
+                      }}
+                      className="absolute right-1 top-1 rounded bg-white/80 p-0.5 hover:bg-amber-50"
+                      title={favorite ? 'Remove favorite' : 'Add favorite'}
+                    >
+                      <Star size={12} className={favorite ? 'fill-amber-400 text-amber-500' : 'text-slate-400'} />
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      toggleFavorite(definition.id);
-                    }}
-                    className="rounded p-0.5 hover:bg-amber-50"
-                    title={favorite ? 'Remove favorite' : 'Add favorite'}
-                  >
-                    <Star size={13} className={favorite ? 'fill-amber-400 text-amber-500' : 'text-slate-400'} />
-                  </button>
-                </div>
+                ) : (
+                  <div className="flex items-start justify-between gap-1">
+                    <div className="inline-flex h-10 w-10 items-center justify-center rounded border border-amber-100 bg-[#fff7e6] overflow-hidden">
+                      <svg width="24" height="24" viewBox="0 0 100 100" className="text-slate-700">
+                        <path d={objectPreviewPath(definition)} fill="none" stroke="currentColor" strokeWidth="5" />
+                      </svg>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggleFavorite(definition.id);
+                      }}
+                      className="rounded p-0.5 hover:bg-amber-50"
+                      title={favorite ? 'Remove favorite' : 'Add favorite'}
+                    >
+                      <Star size={13} className={favorite ? 'fill-amber-400 text-amber-500' : 'text-slate-400'} />
+                    </button>
+                  </div>
+                )}
                 <p className="mt-1 truncate text-[11px] font-medium text-slate-800">{definition.name}</p>
                 <p className="text-[10px] text-slate-500">{formatSize(definition)}</p>
               </button>
             );
           })}
         </div>
-      </div>
 
-      <div className="border-t border-amber-200/70 px-2.5 py-1.5">
-        <div className="rounded border border-amber-200/80 bg-white/80 p-2">
-          <div className="flex items-center gap-2 text-xs font-semibold text-slate-700">
-            <Box size={13} />
-            Preview
+        <div className="mt-3 rounded border border-amber-200/80 bg-white/80 p-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-xs font-semibold text-slate-700">
+              <Box size={13} />
+              Preview
+            </div>
+            {selectedDefinition && hasRenderer(selectedDefinition.renderType) && (
+              <div className="inline-flex rounded border border-amber-200/80 bg-white">
+                {(['plan', 'front', 'end', 'iso', '3d'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setPreviewView(mode)}
+                    className={`px-1.5 py-0.5 text-[10px] capitalize ${
+                      previewView === mode
+                        ? 'bg-amber-200 text-amber-900'
+                        : 'text-slate-500 hover:bg-amber-50'
+                    }`}
+                  >
+                    {mode}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
           {selectedDefinition ? (
-            <div className="mt-2 space-y-1 text-[11px] text-slate-600">
-              <div className="font-medium text-slate-800">{selectedDefinition.name}</div>
-              <div>Type: {selectedDefinition.type}</div>
-              <div>Size: {formatSize(selectedDefinition)}</div>
-              <div>Height: {Math.round(selectedDefinition.heightMm)} mm</div>
-              {selectedDefinition.openingWidthMm ? <div>Opening: {Math.round(selectedDefinition.openingWidthMm)} mm</div> : null}
-              {selectedDefinition.sillHeightMm ? <div>Sill: {Math.round(selectedDefinition.sillHeightMm)} mm</div> : null}
-              {selectedDefinition.uValue ? <div>U-Value: {selectedDefinition.uValue.toFixed(2)}</div> : null}
+            <div className="mt-2">
+              {hasRenderer(selectedDefinition.renderType) && (
+                <div className="mb-2 flex justify-center rounded border border-amber-100 bg-[#fff7e6] p-2">
+                  {previewView === '3d' ? (
+                    <Furniture3DPreview
+                      renderType={selectedDefinition.renderType!}
+                      width={160}
+                      height={110}
+                    />
+                  ) : (
+                    <FurnitureCanvasPreview
+                      renderType={selectedDefinition.renderType!}
+                      width={160}
+                      height={110}
+                      mode={previewView}
+                    />
+                  )}
+                </div>
+              )}
+              <div className="space-y-0.5 text-[11px] text-slate-600">
+                <div className="font-medium text-slate-800">{selectedDefinition.name}</div>
+                <div>Type: {selectedDefinition.type}</div>
+                <div>Size: {formatSize(selectedDefinition)}</div>
+                <div>Height: {Math.round(selectedDefinition.heightMm)} mm</div>
+                {selectedDefinition.openingWidthMm ? <div>Opening: {Math.round(selectedDefinition.openingWidthMm)} mm</div> : null}
+                {selectedDefinition.sillHeightMm ? <div>Sill: {Math.round(selectedDefinition.sillHeightMm)} mm</div> : null}
+                {selectedDefinition.uValue ? <div>U-Value: {selectedDefinition.uValue.toFixed(2)}</div> : null}
+              </div>
             </div>
           ) : (
-            <p className="mt-2 text-[11px] text-slate-500">Select an object to preview details.</p>
+            <p className="mt-2 text-[11px] text-slate-500">Select an object to preview.</p>
           )}
         </div>
 
@@ -382,5 +549,6 @@ export function ObjectLibraryPanel({
     </div>
   );
 }
+
 
 export default ObjectLibraryPanel;

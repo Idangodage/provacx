@@ -1244,6 +1244,13 @@ export function DrawingCanvas({
         setProcessingStatus,
     ]);
 
+    const handleEscapeShortcut = useCallback(() => {
+        if (pendingPlacementDefinition) return true;
+        if (tool === 'wall' && isWallDrawing) return true;
+        if (tool === 'section-line' && sectionLineDrawingState.isDrawing) return true;
+        return false;
+    }, [pendingPlacementDefinition, tool, isWallDrawing, sectionLineDrawingState.isDrawing]);
+
     // Keyboard handling
     useCanvasKeyboard({
         tool,
@@ -1251,6 +1258,7 @@ export function DrawingCanvas({
         deleteSelected,
         setIsSpacePressed,
         setTool,
+        onEscape: handleEscapeShortcut,
         onCopy: copySelectedWalls,
         onPaste: pasteWalls,
     });

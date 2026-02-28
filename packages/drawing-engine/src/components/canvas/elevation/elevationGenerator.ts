@@ -6,6 +6,7 @@
 
 import type {
   CompassDirection,
+  ElevationFurnitureProjection,
   ElevationHvacProjection,
   ElevationSettings,
   ElevationView,
@@ -15,10 +16,18 @@ import type {
   Opening,
   Point2D,
   SectionLine,
+  SymbolInstance2D,
   Wall,
 } from '../../../types';
+import type { ArchitecturalObjectDefinition } from '../../../data';
 import { DEFAULT_ELEVATION_SETTINGS } from '../../../types/wall';
 import { generateId } from '../../../utils/geometry';
+
+/** Lightweight info needed to project a placed furniture object */
+export interface FurnitureProjectionInput {
+  instance: SymbolInstance2D;
+  definition: ArchitecturalObjectDefinition;
+}
 
 const STANDARD_VIEW_ORDER: ElevationViewKind[] = ['north', 'south', 'east', 'west'];
 
@@ -230,6 +239,84 @@ function projectHvacElement(
   };
 }
 
+/**
+ * Projects a placed furniture/fixture into an elevation view.
+ * Uses the object's plan position + dimensions and the definition's heightMm.
+ */
+function projectFurnitureElement(
+  input: FurnitureProjectionInput,
+  basis: Basis,
+  sectionDepthMm: number
+): ElevationFurnitureProjection | null {
+  const { instance, definition } = input;
+  if (!definition.renderType) return null;
+
+  // Furniture bounding box corners in plan (position is center in mm)
+  const halfW = definition.widthMm / 2;
+  const halfD = definition.depthMm / 2;
+  const cx = instance.position.x;
+  const cy = instance.position.y;
+  const rotRad = (instance.rotation * Math.PI) / 180;
+  const cosR = Math.cos(rotRad);
+  const sinR = Math.sin(rotRad);
+
+  // 4 corners rotated around center
+  const offsets = [
+    { x: -halfW, y: -halfD },
+    { x: halfW, y: -halfD },
+    { x: halfW, y: halfD },
+    { x: -halfW, y: halfD },
+  ];
+  const corners = offsets.map((o) => ({
+    x: cx + o.x * cosR - o.y * sinR,
+    y: cy + o.x * sinR + o.y * cosR,
+  }));
+
+  const projections = corners.map((corner) => {
+    const relative = subtract(corner, basis.origin);
+    return {
+      x: dot(relative, basis.axisX),
+      depth: dot(relative, basis.axisDepth),
+    };
+  });
+
+  const xValues = projections.map((p) => p.x);
+  const depthValues = projections.map((p) => p.depth);
+  const xStart = Math.min(...xValues);
+  const xEnd = Math.max(...xValues);
+  const minDepth = Math.min(...depthValues);
+  const maxDepth = Math.max(...depthValues);
+  const avgDepth = (minDepth + maxDepth) / 2;
+
+  // Visibility based on depth
+  let visibility: ElevationFurnitureProjection['visibility'];
+  if (maxDepth < 0) return null; // behind viewer
+  if (minDepth >= 0 && maxDepth <= sectionDepthMm) {
+    visibility = 'visible';
+  } else if (minDepth < 0 || maxDepth > sectionDepthMm) {
+    visibility = 'cut';
+  } else {
+    visibility = 'ghost';
+  }
+
+  // Floor-standing items start at y=0; height from definition
+  const yBottom = 0;
+  const yTop = definition.heightMm;
+
+  return {
+    id: `furn-elev-${instance.id}`,
+    instanceId: instance.id,
+    renderType: definition.renderType,
+    name: definition.name,
+    xStart,
+    xEnd,
+    yBottom,
+    yTop,
+    depth: Math.max(0, avgDepth),
+    visibility,
+  };
+}
+
 function computeViewBounds(projectedWalls: ElevationWallProjection[]): {
   minX: number;
   maxX: number;
@@ -256,7 +343,8 @@ function buildViewHash(
   hvacElements: HvacElement[],
   sectionLine: SectionLine | null,
   settings: ElevationSettings,
-  kind: ElevationViewKind
+  kind: ElevationViewKind,
+  furnitureInputs: FurnitureProjectionInput[] = []
 ): string {
   const wallHash = walls
     .map((wall) => {
@@ -296,7 +384,12 @@ function buildViewHash(
     ].join(':')
     : 'none';
 
-  return `${kind}:${sectionHash}:${settings.showDepthCueing ? 1 : 0}:${settings.renderMode}:${wallHash}:${hvacHash}`;
+  const furnHash = furnitureInputs
+    .map((fi) => `${fi.instance.id}:${fi.instance.position.x.toFixed(0)}:${fi.instance.position.y.toFixed(0)}:${fi.instance.rotation}:${fi.definition.renderType ?? ''}`)
+    .sort()
+    .join('|');
+
+  return `${kind}:${sectionHash}:${settings.showDepthCueing ? 1 : 0}:${settings.renderMode}:${wallHash}:${hvacHash}:${furnHash}`;
 }
 
 function createBasisForStandard(kind: ElevationViewKind): { basis: Basis; viewDirection: CompassDirection } {
@@ -344,11 +437,12 @@ export function createStandardElevationViews(
   walls: Wall[],
   existingViews: ElevationView[],
   settings: ElevationSettings = DEFAULT_ELEVATION_SETTINGS,
-  hvacElements: HvacElement[] = []
+  hvacElements: HvacElement[] = [],
+  furnitureInputs: FurnitureProjectionInput[] = []
 ): ElevationView[] {
   return STANDARD_VIEW_ORDER.map((kind) => {
     const existing = existingViews.find((view) => view.kind === kind);
-    const sourceHash = buildViewHash(walls, hvacElements, null, settings, kind);
+    const sourceHash = buildViewHash(walls, hvacElements, null, settings, kind, furnitureInputs);
     if (existing && existing.sourceHash === sourceHash) {
       return existing;
     }
@@ -373,6 +467,11 @@ export function createStandardElevationViews(
       .map((el) => projectHvacElement(el, basis, settings, Infinity))
       .filter((el): el is ElevationHvacProjection => Boolean(el));
 
+    // Project furniture elements
+    const projectedFurniture = furnitureInputs
+      .map((fi) => projectFurnitureElement(fi, basis, Infinity))
+      .filter((el): el is ElevationFurnitureProjection => Boolean(el));
+
     const bounds = computeViewBounds(projected);
     return {
       id: existing?.id ?? `elevation-${kind}`,
@@ -382,6 +481,7 @@ export function createStandardElevationViews(
       viewDirection,
       walls: projected,
       hvacElements: projectedHvac,
+      furnitureElements: projectedFurniture,
       minX: bounds.minX,
       maxX: bounds.maxX,
       maxHeightMm: bounds.maxHeightMm,
@@ -398,7 +498,8 @@ export function generateCustomElevationView(
   walls: Wall[],
   existing: ElevationView | null,
   settings: ElevationSettings = DEFAULT_ELEVATION_SETTINGS,
-  hvacElements: HvacElement[] = []
+  hvacElements: HvacElement[] = [],
+  furnitureInputs: FurnitureProjectionInput[] = []
 ): ElevationView {
   const lineVector = normalize(subtract(sectionLine.endPoint, sectionLine.startPoint));
   const basis: Basis = {
@@ -409,7 +510,7 @@ export function generateCustomElevationView(
       y: perpendicular(lineVector).y * sectionLine.direction,
     },
   };
-  const sourceHash = buildViewHash(walls, hvacElements, sectionLine, settings, 'custom');
+  const sourceHash = buildViewHash(walls, hvacElements, sectionLine, settings, 'custom', furnitureInputs);
   if (existing && existing.sourceHash === sourceHash) {
     return existing;
   }
@@ -440,6 +541,11 @@ export function generateCustomElevationView(
     .map((el) => projectHvacElement(el, basis, settings, sectionLine.depthMm))
     .filter((el): el is ElevationHvacProjection => Boolean(el));
 
+  // Project furniture elements
+  const projectedFurniture = furnitureInputs
+    .map((fi) => projectFurnitureElement(fi, basis, sectionLine.depthMm))
+    .filter((el): el is ElevationFurnitureProjection => Boolean(el));
+
   const bounds = computeViewBounds(projected);
   return {
     id: existing?.id ?? generateId(),
@@ -449,6 +555,7 @@ export function generateCustomElevationView(
     viewDirection: 'custom',
     walls: projected,
     hvacElements: projectedHvac,
+    furnitureElements: projectedFurniture,
     minX: bounds.minX,
     maxX: bounds.maxX,
     maxHeightMm: bounds.maxHeightMm,
@@ -464,9 +571,10 @@ export function regenerateElevationViews(
   sectionLines: SectionLine[],
   existingViews: ElevationView[],
   settings: ElevationSettings = DEFAULT_ELEVATION_SETTINGS,
-  hvacElements: HvacElement[] = []
+  hvacElements: HvacElement[] = [],
+  furnitureInputs: FurnitureProjectionInput[] = []
 ): ElevationView[] {
-  const standardViews = createStandardElevationViews(walls, existingViews, settings, hvacElements);
+  const standardViews = createStandardElevationViews(walls, existingViews, settings, hvacElements, furnitureInputs);
   const sectionsById = new Map(sectionLines.map((sectionLine) => [sectionLine.id, sectionLine]));
   const existingCustom = existingViews.filter((view) => view.kind === 'custom');
 
@@ -475,7 +583,7 @@ export function regenerateElevationViews(
       if (!view.sectionLineId) return null;
       const line = sectionsById.get(view.sectionLineId);
       if (!line) return null;
-      return generateCustomElevationView(line, walls, view, settings, hvacElements);
+      return generateCustomElevationView(line, walls, view, settings, hvacElements, furnitureInputs);
     })
     .filter((view): view is ElevationView => Boolean(view));
 
