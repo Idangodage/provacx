@@ -19,8 +19,6 @@ import { MM_TO_PX } from '../scale';
 import {
   computeWallPolygon,
   computeMiterJoin,
-  angleBetweenWalls,
-  determineJoinType,
   lineIntersection,
 } from './WallGeometry';
 
@@ -56,7 +54,10 @@ interface WallJoinMatch {
   point: Point2D;
   endpoint: 'start' | 'end';
   matchType: 'endpoint' | 'segment';
+  otherEndpoint?: 'start' | 'end';
 }
+
+const CORNER_MITER_LIMIT = 3;
 
 // =============================================================================
 // WallRenderer Class
@@ -153,6 +154,51 @@ export class WallRenderer {
     typed.id = wallId;
   }
 
+  private isConnectedToWall(wall: Wall, otherWall: Wall): boolean {
+    return wall.connectedWalls.includes(otherWall.id) || otherWall.connectedWalls.includes(wall.id);
+  }
+
+  private endpointPoint(wall: Wall, endpoint: 'start' | 'end'): Point2D {
+    return endpoint === 'start' ? wall.startPoint : wall.endPoint;
+  }
+
+  private midpoint(a: Point2D, b: Point2D): Point2D {
+    return {
+      x: (a.x + b.x) / 2,
+      y: (a.y + b.y) / 2,
+    };
+  }
+
+  private wallEndpointAttachmentKind(
+    wall: Wall,
+    endpoint: 'start' | 'end',
+    baseToleranceMm: number
+  ): 'endpoint' | 'segment' | null {
+    const point = this.endpointPoint(wall, endpoint);
+
+    for (const otherWall of this.wallData.values()) {
+      if (otherWall.id === wall.id) continue;
+
+      const tolerance = this.isConnectedToWall(wall, otherWall)
+        ? baseToleranceMm * 3
+        : baseToleranceMm;
+
+      if (
+        this.pointsNear(point, otherWall.startPoint, tolerance) ||
+        this.pointsNear(point, otherWall.endPoint, tolerance)
+      ) {
+        return 'endpoint';
+      }
+
+      const projection = this.projectPointToSegment(point, otherWall.startPoint, otherWall.endPoint);
+      if (projection.distance <= tolerance) {
+        return 'segment';
+      }
+    }
+
+    return null;
+  }
+
   /**
    * Set page height for compatibility with existing hook contracts.
    */
@@ -237,12 +283,20 @@ export class WallRenderer {
     const exteriorEnd = canvasVertices[2];
     const exteriorStart = canvasVertices[3];
     const joinEndpointTolerance = this.toSceneTolerance(10, 2, 180);
-    const hasStartJoin = (joins ?? []).some(
-      (join) => this.pointDistance(join.joinPoint, wall.startPoint) <= joinEndpointTolerance
+    const hasStartJoin = (joins ?? []).some((join) => join.endpoint === 'start');
+    const hasEndJoin = (joins ?? []).some((join) => join.endpoint === 'end');
+    const startAttachmentKind = this.wallEndpointAttachmentKind(
+      wall,
+      'start',
+      joinEndpointTolerance
     );
-    const hasEndJoin = (joins ?? []).some(
-      (join) => this.pointDistance(join.joinPoint, wall.endPoint) <= joinEndpointTolerance
+    const endAttachmentKind = this.wallEndpointAttachmentKind(
+      wall,
+      'end',
+      joinEndpointTolerance
     );
+    const hasStartAttachment = hasStartJoin || startAttachmentKind === 'segment';
+    const hasEndAttachment = hasEndJoin || endAttachmentKind === 'segment';
 
     const interiorBoundary = new fabric.Line(
       [interiorStart.x, interiorStart.y, interiorEnd.x, interiorEnd.y],
@@ -275,7 +329,7 @@ export class WallRenderer {
         strokeWidth: 2,
         selectable: false,
         evented: false,
-        visible: !hasStartJoin,
+        visible: !hasStartAttachment,
       }
     );
     (startCap as NamedObject).name = 'startCap';
@@ -288,7 +342,7 @@ export class WallRenderer {
         strokeWidth: 2,
         selectable: false,
         evented: false,
-        visible: !hasEndJoin,
+        visible: !hasEndAttachment,
       }
     );
     (endCap as NamedObject).name = 'endCap';
@@ -313,9 +367,10 @@ export class WallRenderer {
     this.annotateWallTarget(centerLine, wall.id);
 
     const selectionOutline = new fabric.Polygon(canvasVertices, {
-      fill: 'rgba(37,99,235,0.14)',
+      fill: 'transparent',
       stroke: '#1D4ED8',
-      strokeWidth: this.toSceneSize(4),
+      strokeWidth: this.toSceneSize(2.5),
+      strokeLineJoin: 'round',
       selectable: false,
       evented: false,
       visible: false,
@@ -324,9 +379,10 @@ export class WallRenderer {
     this.annotateWallTarget(selectionOutline, wall.id);
 
     const hoverOutline = new fabric.Polygon(canvasVertices, {
-      fill: 'rgba(16,185,129,0.1)',
+      fill: 'transparent',
       stroke: '#059669',
-      strokeWidth: this.toSceneSize(3),
+      strokeWidth: this.toSceneSize(2),
+      strokeLineJoin: 'round',
       selectable: false,
       evented: false,
       visible: this.hoveredWallId === wall.id && !this.selectedWallIds.has(wall.id),
@@ -492,21 +548,22 @@ export class WallRenderer {
     if (!wall) return;
 
     this.removeControlPoints(wallId);
-    const endpointSize = this.toSceneSize(16);
+    const endpointRadius = this.toSceneSize(6.5);
     const endpointStroke = this.toSceneSize(2.8);
     const bevelRadius = this.toSceneSize(5.5);
     const bevelStroke = this.toSceneSize(1.5);
-    const thicknessRadius = this.toSceneSize(8);
+    const thicknessRadius = this.toSceneSize(6);
     const centerRadius = this.toSceneSize(11);
-    const rotationRadius = this.toSceneSize(11);
+    const rotationRadius = this.toSceneSize(8.5);
     const crossHalf = this.toSceneSize(5);
     const crossStroke = this.toSceneSize(1.8);
-    const stemStroke = this.toSceneSize(1.8);
+    const stemStroke = this.toSceneSize(1.4);
     const endpointHitRadiusPx = 16;
     const bevelHitRadiusPx = 14;
     const thicknessHitRadiusPx = 16;
     const centerHitRadiusPx = 16;
     const rotationHitRadiusPx = 16;
+    const showAdvancedControls = this.selectedWallIds.size === 1;
 
     const midpoint = {
       x: (wall.startPoint.x + wall.endPoint.x) / 2,
@@ -535,11 +592,10 @@ export class WallRenderer {
       y: (wall.exteriorLine.start.y + wall.exteriorLine.end.y) / 2,
     };
 
-    const startHandle = new fabric.Rect({
+    const startHandle = new fabric.Circle({
       left: wall.startPoint.x * MM_TO_PX,
       top: this.toCanvasY(wall.startPoint.y),
-      width: endpointSize,
-      height: endpointSize,
+      radius: endpointRadius,
       fill: '#FFFFFF',
       stroke: '#1D4ED8',
       strokeWidth: endpointStroke,
@@ -562,11 +618,10 @@ export class WallRenderer {
       endpointHitRadiusPx
     );
 
-    const endHandle = new fabric.Rect({
+    const endHandle = new fabric.Circle({
       left: wall.endPoint.x * MM_TO_PX,
       top: this.toCanvasY(wall.endPoint.y),
-      width: endpointSize,
-      height: endpointSize,
+      radius: endpointRadius,
       fill: '#FFFFFF',
       stroke: '#1D4ED8',
       strokeWidth: endpointStroke,
@@ -603,6 +658,22 @@ export class WallRenderer {
       ?? (endCornerConnectionCount === 0
         ? computeDeadEndBevelDotsForEndpoint(wall, 'end')
         : null);
+    const startBevel = wall.startBevel ?? { outerOffset: 0, innerOffset: 0 };
+    const endBevel = wall.endBevel ?? { outerOffset: 0, innerOffset: 0 };
+    const showStartBevelControls = showAdvancedControls && Boolean(
+      startCorner && (
+        startCornerConnectionCount === 0 ||
+        startBevel.outerOffset > 0.01 ||
+        startBevel.innerOffset > 0.01
+      )
+    );
+    const showEndBevelControls = showAdvancedControls && Boolean(
+      endCorner && (
+        endCornerConnectionCount === 0 ||
+        endBevel.outerOffset > 0.01 ||
+        endBevel.innerOffset > 0.01
+      )
+    );
 
     const createBevelDot = (
       corner: NonNullable<typeof startCorner>,
@@ -650,16 +721,16 @@ export class WallRenderer {
       };
     };
 
-    const startOuterBevelDot = startCorner
+    const startOuterBevelDot = showStartBevelControls && startCorner
       ? createBevelDot(startCorner, 'start', 'outer')
       : null;
-    const startInnerBevelDot = startCorner
+    const startInnerBevelDot = showStartBevelControls && startCorner
       ? createBevelDot(startCorner, 'start', 'inner')
       : null;
-    const endOuterBevelDot = endCorner
+    const endOuterBevelDot = showEndBevelControls && endCorner
       ? createBevelDot(endCorner, 'end', 'outer')
       : null;
-    const endInnerBevelDot = endCorner
+    const endInnerBevelDot = showEndBevelControls && endCorner
       ? createBevelDot(endCorner, 'end', 'inner')
       : null;
 
@@ -667,8 +738,8 @@ export class WallRenderer {
       left: interiorMid.x * MM_TO_PX,
       top: this.toCanvasY(interiorMid.y),
       radius: thicknessRadius,
-      fill: '#EFF6FF',
-      stroke: '#1D4ED8',
+      fill: '#F0FDFA',
+      stroke: '#0F766E',
       strokeWidth: endpointStroke,
       originX: 'center',
       originY: 'center',
@@ -693,8 +764,8 @@ export class WallRenderer {
       left: exteriorMid.x * MM_TO_PX,
       top: this.toCanvasY(exteriorMid.y),
       radius: thicknessRadius,
-      fill: '#EFF6FF',
-      stroke: '#1D4ED8',
+      fill: '#F0FDFA',
+      stroke: '#0F766E',
       strokeWidth: endpointStroke,
       originX: 'center',
       originY: 'center',
@@ -794,7 +865,7 @@ export class WallRenderer {
       left: rotationPoint.x * MM_TO_PX,
       top: this.toCanvasY(rotationPoint.y),
       radius: rotationRadius,
-      fill: '#ECFDF5',
+      fill: '#FFFFFF',
       stroke: '#15803D',
       strokeWidth: endpointStroke,
       originX: 'center',
@@ -815,6 +886,18 @@ export class WallRenderer {
       'alias',
       rotationHitRadiusPx
     );
+    const rotationLabel = new fabric.Text('R', {
+      left: rotationPoint.x * MM_TO_PX,
+      top: this.toCanvasY(rotationPoint.y),
+      fill: '#166534',
+      fontSize: this.toSceneSize(10),
+      fontFamily: 'Arial',
+      fontWeight: 'bold',
+      originX: 'center',
+      originY: 'center',
+      selectable: false,
+      evented: false,
+    });
 
     const controls: fabric.FabricObject[] = [
       startHandleHit,
@@ -825,17 +908,20 @@ export class WallRenderer {
       ...(startInnerBevelDot ? [startInnerBevelDot.hit, startInnerBevelDot.visual] : []),
       ...(endOuterBevelDot ? [endOuterBevelDot.hit, endOuterBevelDot.visual] : []),
       ...(endInnerBevelDot ? [endInnerBevelDot.hit, endInnerBevelDot.visual] : []),
-      interiorThicknessHandleHit,
-      interiorThicknessHandle,
-      exteriorThicknessHandleHit,
-      exteriorThicknessHandle,
       centerHandleHit,
       centerHandle,
       centerCrossH,
       centerCrossV,
-      rotationStem,
-      rotationHandleHit,
-      rotationHandle,
+      ...(showAdvancedControls ? [
+        interiorThicknessHandleHit,
+        interiorThicknessHandle,
+        exteriorThicknessHandleHit,
+        exteriorThicknessHandle,
+        rotationStem,
+        rotationHandleHit,
+        rotationHandle,
+        rotationLabel,
+      ] : []),
     ];
 
     controls.forEach((control) => this.canvas.add(control));
@@ -932,6 +1018,10 @@ export class WallRenderer {
     });
     this.controlPointObjects.clear();
 
+    walls.forEach((wall) => {
+      this.wallData.set(wall.id, wall);
+    });
+
     const joinsMap = this.computeAllJoins(walls);
 
     for (const wall of walls) {
@@ -960,8 +1050,8 @@ export class WallRenderer {
 
         const matches = this.findJoinMatches(wall, otherWall);
         for (const match of matches) {
-          const angle = angleBetweenWalls(wall, otherWall, match.point);
-          if (!Number.isFinite(angle) || angle < 5 || angle > 175) {
+          const angle = this.computeJoinAngle(wall, otherWall, match);
+          if (!this.isRenderableJoinAngle(match, angle)) {
             continue;
           }
 
@@ -1016,6 +1106,8 @@ export class WallRenderer {
     const ENDPOINT_T_RATIO = 0.02;
     const matches: WallJoinMatch[] = [];
     const seen = new Set<string>();
+    const connected = this.isConnectedToWall(wall, otherWall);
+    const endpointTolerance = connected ? JOIN_TOLERANCE_MM * 3 : JOIN_TOLERANCE_MM;
 
     const endpoints: Array<{ endpoint: 'start' | 'end'; point: Point2D }> = [
       { endpoint: 'start', point: wall.startPoint },
@@ -1024,13 +1116,23 @@ export class WallRenderer {
 
     for (const { endpoint, point } of endpoints) {
       if (
-        this.pointsNear(point, otherWall.startPoint, JOIN_TOLERANCE_MM) ||
-        this.pointsNear(point, otherWall.endPoint, JOIN_TOLERANCE_MM)
+        this.pointsNear(point, otherWall.startPoint, endpointTolerance) ||
+        this.pointsNear(point, otherWall.endPoint, endpointTolerance)
       ) {
-        const key = `${endpoint}:endpoint`;
+        const otherEndpoint =
+          this.pointDistance(point, otherWall.startPoint) <=
+            this.pointDistance(point, otherWall.endPoint)
+            ? 'start'
+            : 'end';
+        const key = `${endpoint}:endpoint:${otherEndpoint}`;
         if (!seen.has(key)) {
           seen.add(key);
-          matches.push({ endpoint, point: { ...point }, matchType: 'endpoint' });
+          matches.push({
+            endpoint,
+            point: this.midpoint(point, this.endpointPoint(otherWall, otherEndpoint)),
+            matchType: 'endpoint',
+            otherEndpoint,
+          });
         }
         continue;
       }
@@ -1040,7 +1142,7 @@ export class WallRenderer {
         otherWall.startPoint,
         otherWall.endPoint
       );
-      if (projection.distance > JOIN_TOLERANCE_MM) {
+      if (projection.distance > endpointTolerance) {
         continue;
       }
 
@@ -1049,26 +1151,84 @@ export class WallRenderer {
         this.pointDistance(otherWall.startPoint, otherWall.endPoint)
       );
       const endpointBand = Math.min(
-        0.2,
-        ENDPOINT_T_RATIO + JOIN_TOLERANCE_MM / segmentLength
+        connected ? 0.3 : 0.2,
+        (connected ? ENDPOINT_T_RATIO * 2 : ENDPOINT_T_RATIO) + endpointTolerance / segmentLength
       );
       const nearOtherStart =
         projection.t <= endpointBand &&
-        this.pointDistance(point, otherWall.startPoint) <= JOIN_TOLERANCE_MM * 2;
+        this.pointDistance(point, otherWall.startPoint) <= endpointTolerance * 2;
       const nearOtherEnd =
         projection.t >= 1 - endpointBand &&
-        this.pointDistance(point, otherWall.endPoint) <= JOIN_TOLERANCE_MM * 2;
+        this.pointDistance(point, otherWall.endPoint) <= endpointTolerance * 2;
       const matchType: 'endpoint' | 'segment' =
         nearOtherStart || nearOtherEnd ? 'endpoint' : 'segment';
-
-      const key = `${endpoint}:${matchType}`;
+      const otherEndpoint =
+        matchType === 'endpoint'
+          ? nearOtherStart && !nearOtherEnd
+            ? 'start'
+            : nearOtherEnd && !nearOtherStart
+              ? 'end'
+              : this.pointDistance(point, otherWall.startPoint) <=
+                  this.pointDistance(point, otherWall.endPoint)
+                ? 'start'
+                : 'end'
+          : undefined;
+      const key = `${endpoint}:${matchType}:${otherEndpoint ?? 'segment'}`;
       if (!seen.has(key)) {
         seen.add(key);
-        matches.push({ endpoint, point: { ...point }, matchType });
+        matches.push({
+          endpoint,
+          point:
+            matchType === 'endpoint' && otherEndpoint
+              ? this.midpoint(point, this.endpointPoint(otherWall, otherEndpoint))
+              : { ...projection.point },
+          matchType,
+          otherEndpoint,
+        });
       }
     }
 
     return matches;
+  }
+
+  private computeJoinAngle(
+    wall: Wall,
+    otherWall: Wall,
+    match: WallJoinMatch
+  ): number {
+    const wallDirection = this.directionAwayFromEndpoint(wall, match.endpoint);
+
+    if (match.matchType === 'endpoint' && match.otherEndpoint) {
+      const otherDirection = this.directionAwayFromEndpoint(otherWall, match.otherEndpoint);
+      const dot =
+        wallDirection.x * otherDirection.x + wallDirection.y * otherDirection.y;
+      const clampedDot = Math.max(-1, Math.min(1, dot));
+      return Math.acos(clampedDot) * (180 / Math.PI);
+    }
+
+    const hostVector = {
+      x: otherWall.endPoint.x - otherWall.startPoint.x,
+      y: otherWall.endPoint.y - otherWall.startPoint.y,
+    };
+    const hostLength = Math.hypot(hostVector.x, hostVector.y);
+    if (hostLength < 0.000001) {
+      return 0;
+    }
+
+    const hostDirection = {
+      x: hostVector.x / hostLength,
+      y: hostVector.y / hostLength,
+    };
+    const alignment = Math.abs(
+      wallDirection.x * hostDirection.x + wallDirection.y * hostDirection.y
+    );
+    const clampedAlignment = Math.max(-1, Math.min(1, alignment));
+    return Math.acos(clampedAlignment) * (180 / Math.PI);
+  }
+
+  private isRenderableJoinAngle(match: WallJoinMatch, angle: number): boolean {
+    void match;
+    return Number.isFinite(angle) && angle >= 30 ;
   }
 
   private resolveJoinGeometry(
@@ -1076,7 +1236,7 @@ export class WallRenderer {
     otherWall: Wall,
     match: WallJoinMatch,
     angle: number
-  ): { joinType: 'miter' | 'butt'; interiorVertex: Point2D; exteriorVertex: Point2D } {
+  ): { joinType: 'miter' | 'bevel' | 'butt'; interiorVertex: Point2D; exteriorVertex: Point2D } {
     if (match.matchType === 'segment') {
       return {
         joinType: 'butt',
@@ -1084,26 +1244,179 @@ export class WallRenderer {
       };
     }
 
-    const preferredJoinType = determineJoinType(angle);
-    if (preferredJoinType === 'butt') {
+    const cornerJoin = this.computeCornerJoinGeometry(wall, otherWall, match, angle);
+    if (cornerJoin) {
+      return cornerJoin;
+    }
+
+    return {
+      joinType: 'butt',
+      ...this.computeButtJoinVertices(wall, otherWall, match.endpoint),
+    };
+  }
+
+  private computeCornerJoinGeometry(
+    wall: Wall,
+    otherWall: Wall,
+    match: WallJoinMatch,
+    angle: number
+  ): { joinType: 'miter' | 'bevel'; interiorVertex: Point2D; exteriorVertex: Point2D } | null {
+    if (!match.otherEndpoint) {
+      const miter = computeMiterJoin(wall, otherWall, match.point);
       return {
-        joinType: 'butt',
-        ...this.computeButtJoinVertices(wall, otherWall, match.endpoint),
+        joinType: 'miter',
+        interiorVertex: miter.interiorVertex,
+        exteriorVertex: miter.exteriorVertex,
       };
     }
 
-    const miter = computeMiterJoin(wall, otherWall, match.point);
-    if (this.shouldFallbackToButtJoin(wall, otherWall, match.point, miter)) {
+    const corner = this.computeEndpointMiterJoinVertices(
+      wall,
+      otherWall,
+      match.endpoint,
+      match.otherEndpoint,
+      match.point
+    );
+    const maxReach = this.computeMaxCornerJoinReach(wall, otherWall, angle);
+    if (!Number.isFinite(maxReach) || maxReach <= 0.0001) {
+      return null;
+    }
+
+    // Decide from the solved outer wall face itself. If the miter extension stays
+    // within the limit, keep a true miter regardless of whether the center-line
+    // angle is acute or obtuse.
+    if (corner.outerReach <= maxReach) {
       return {
-        joinType: 'butt',
-        ...this.computeButtJoinVertices(wall, otherWall, match.endpoint),
+        joinType: 'miter',
+        interiorVertex: corner.interiorVertex,
+        exteriorVertex: corner.exteriorVertex,
       };
     }
 
     return {
-      joinType: 'miter',
-      ...miter,
+      joinType: 'bevel',
+      ...this.computeBevelJoinVertices(
+        wall,
+        match.endpoint,
+        {
+          interiorVertex: corner.interiorVertex,
+          exteriorVertex: corner.exteriorVertex,
+        },
+        corner.outerKind
+      ),
     };
+  }
+
+  private endpointLocalFaces(
+    wall: Wall,
+    endpoint: 'start' | 'end'
+  ): {
+    direction: Point2D;
+    left: { kind: 'interior' | 'exterior'; anchor: Point2D };
+    right: { kind: 'interior' | 'exterior'; anchor: Point2D };
+  } {
+    const direction = this.directionAwayFromEndpoint(wall, endpoint);
+    if (endpoint === 'start') {
+      return {
+        direction,
+        left: { kind: 'interior', anchor: wall.interiorLine.start },
+        right: { kind: 'exterior', anchor: wall.exteriorLine.start },
+      };
+    }
+
+    return {
+      direction,
+      left: { kind: 'exterior', anchor: wall.exteriorLine.end },
+      right: { kind: 'interior', anchor: wall.interiorLine.end },
+    };
+  }
+
+  private computeEndpointMiterJoinVertices(
+    wall: Wall,
+    otherWall: Wall,
+    endpoint: 'start' | 'end',
+    otherEndpoint: 'start' | 'end',
+    joinPoint: Point2D
+  ): {
+    interiorVertex: Point2D;
+    exteriorVertex: Point2D;
+    outerKind: 'interior' | 'exterior';
+    outerReach: number;
+  } {
+    const wallFaces = this.endpointLocalFaces(wall, endpoint);
+    const otherFaces = this.endpointLocalFaces(otherWall, otherEndpoint);
+    const leftVertex =
+      lineIntersection(
+        wallFaces.left.anchor,
+        {
+          x: wallFaces.left.anchor.x + wallFaces.direction.x,
+          y: wallFaces.left.anchor.y + wallFaces.direction.y,
+        },
+        otherFaces.right.anchor,
+        {
+          x: otherFaces.right.anchor.x + otherFaces.direction.x,
+          y: otherFaces.right.anchor.y + otherFaces.direction.y,
+        }
+      ) ?? joinPoint;
+    const rightVertex =
+      lineIntersection(
+        wallFaces.right.anchor,
+        {
+          x: wallFaces.right.anchor.x + wallFaces.direction.x,
+          y: wallFaces.right.anchor.y + wallFaces.direction.y,
+        },
+        otherFaces.left.anchor,
+        {
+          x: otherFaces.left.anchor.x + otherFaces.direction.x,
+          y: otherFaces.left.anchor.y + otherFaces.direction.y,
+        }
+      ) ?? joinPoint;
+
+    const interiorVertex = wallFaces.left.kind === 'interior' ? leftVertex : rightVertex;
+    const exteriorVertex = wallFaces.left.kind === 'exterior' ? leftVertex : rightVertex;
+    const leftReach = this.pointDistance(joinPoint, leftVertex);
+    const rightReach = this.pointDistance(joinPoint, rightVertex);
+    const outerKind = leftReach >= rightReach ? wallFaces.left.kind : wallFaces.right.kind;
+
+    return {
+      interiorVertex,
+      exteriorVertex,
+      outerKind,
+      outerReach: Math.max(leftReach, rightReach),
+    };
+  }
+
+  private endpointFaceAnchors(
+    wall: Wall,
+    endpoint: 'start' | 'end'
+  ): { interiorVertex: Point2D; exteriorVertex: Point2D } {
+    return endpoint === 'start'
+      ? {
+        interiorVertex: wall.interiorLine.start,
+        exteriorVertex: wall.exteriorLine.start,
+      }
+      : {
+        interiorVertex: wall.interiorLine.end,
+        exteriorVertex: wall.exteriorLine.end,
+      };
+  }
+
+  private computeBevelJoinVertices(
+    wall: Wall,
+    endpoint: 'start' | 'end',
+    miter: { interiorVertex: Point2D; exteriorVertex: Point2D },
+    outerKind: 'interior' | 'exterior'
+  ): { interiorVertex: Point2D; exteriorVertex: Point2D } {
+    const anchors = this.endpointFaceAnchors(wall, endpoint);
+    return outerKind === 'interior'
+      ? {
+        interiorVertex: anchors.interiorVertex,
+        exteriorVertex: miter.exteriorVertex,
+      }
+      : {
+        interiorVertex: miter.interiorVertex,
+        exteriorVertex: anchors.exteriorVertex,
+      };
   }
 
   private computeButtJoinVertices(
@@ -1164,6 +1477,41 @@ export class WallRenderer {
     return { interiorVertex, exteriorVertex };
   }
 
+  private computeMaxCornerJoinReach(
+    wall: Wall,
+    otherWall: Wall,
+    _angle: number
+  ): number {
+    const shortestWallLength = Math.min(
+      this.pointDistance(wall.startPoint, wall.endPoint),
+      this.pointDistance(otherWall.startPoint, otherWall.endPoint)
+    );
+    const halfThickness = wall.thickness / 2;
+    const miterLimitedReach = halfThickness * CORNER_MITER_LIMIT;
+    return Math.min(miterLimitedReach, shortestWallLength * 0.45);
+  }
+
+  private boundCornerVertex(
+    joinPoint: Point2D,
+    vertex: Point2D,
+    maxReach: number
+  ): Point2D {
+    const dx = vertex.x - joinPoint.x;
+    const dy = vertex.y - joinPoint.y;
+    const reach = Math.hypot(dx, dy);
+    if (!Number.isFinite(reach) || reach < 0.0001) {
+      return { ...joinPoint };
+    }
+    if (reach <= maxReach) {
+      return vertex;
+    }
+    const ratio = maxReach / reach;
+    return {
+      x: joinPoint.x + dx * ratio,
+      y: joinPoint.y + dy * ratio,
+    };
+  }
+
   private shouldFallbackToButtJoin(
     wall: Wall,
     otherWall: Wall,
@@ -1174,12 +1522,7 @@ export class WallRenderer {
       this.pointDistance(joinPoint, vertices.interiorVertex),
       this.pointDistance(joinPoint, vertices.exteriorVertex)
     );
-    const shortestWallLength = Math.min(
-      this.pointDistance(wall.startPoint, wall.endPoint),
-      this.pointDistance(otherWall.startPoint, otherWall.endPoint)
-    );
-    const maxThickness = Math.max(wall.thickness, otherWall.thickness);
-    const maxAllowedReach = Math.min(maxThickness * 2.5, shortestWallLength * 0.7);
+    const maxAllowedReach = this.computeMaxCornerJoinReach(wall, otherWall, 40);
 
     return !Number.isFinite(longestMiterReach) || longestMiterReach > maxAllowedReach;
   }

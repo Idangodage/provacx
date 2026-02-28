@@ -222,53 +222,37 @@ export function computeMiterJoin(
   const isWall2Start = Math.abs(wall2.startPoint.x - joinPoint.x) < 0.1 &&
                        Math.abs(wall2.startPoint.y - joinPoint.y) < 0.1;
 
-  // Get offset line endpoints at the join
-  let w1Interior: Point2D, w1InteriorDir: Point2D;
-  let w1Exterior: Point2D, w1ExteriorDir: Point2D;
-  let w2Interior: Point2D, w2InteriorDir: Point2D;
-  let w2Exterior: Point2D, w2ExteriorDir: Point2D;
+  const w1Direction = isWall1Start
+    ? direction(wall1.startPoint, wall1.endPoint)
+    : direction(wall1.endPoint, wall1.startPoint);
+  const w2Direction = isWall2Start
+    ? direction(wall2.startPoint, wall2.endPoint)
+    : direction(wall2.endPoint, wall2.startPoint);
 
-  if (isWall1Start) {
-    w1Interior = wall1.interiorLine.start;
-    w1InteriorDir = direction(wall1.interiorLine.start, wall1.interiorLine.end);
-    w1Exterior = wall1.exteriorLine.start;
-    w1ExteriorDir = direction(wall1.exteriorLine.start, wall1.exteriorLine.end);
-  } else {
-    w1Interior = wall1.interiorLine.end;
-    w1InteriorDir = direction(wall1.interiorLine.end, wall1.interiorLine.start);
-    w1Exterior = wall1.exteriorLine.end;
-    w1ExteriorDir = direction(wall1.exteriorLine.end, wall1.exteriorLine.start);
-  }
+  const w1Left = isWall1Start ? wall1.interiorLine.start : wall1.exteriorLine.end;
+  const w1Right = isWall1Start ? wall1.exteriorLine.start : wall1.interiorLine.end;
+  const w2Left = isWall2Start ? wall2.interiorLine.start : wall2.exteriorLine.end;
+  const w2Right = isWall2Start ? wall2.exteriorLine.start : wall2.interiorLine.end;
 
-  if (isWall2Start) {
-    w2Interior = wall2.interiorLine.start;
-    w2InteriorDir = direction(wall2.interiorLine.start, wall2.interiorLine.end);
-    w2Exterior = wall2.exteriorLine.start;
-    w2ExteriorDir = direction(wall2.exteriorLine.start, wall2.exteriorLine.end);
-  } else {
-    w2Interior = wall2.interiorLine.end;
-    w2InteriorDir = direction(wall2.interiorLine.end, wall2.interiorLine.start);
-    w2Exterior = wall2.exteriorLine.end;
-    w2ExteriorDir = direction(wall2.exteriorLine.end, wall2.exteriorLine.start);
-  }
-
-  // Find intersection of interior lines
-  const interiorVertex = lineIntersection(
-    w1Interior,
-    add(w1Interior, w1InteriorDir),
-    w2Interior,
-    add(w2Interior, w2InteriorDir)
+  // Solve the node in local left/right space. The two valid face intersections are
+  // left(A)-right(B) and right(A)-left(B); the stored interior/exterior labels are
+  // mapped back afterward based on which endpoint is being used.
+  const leftVertex = lineIntersection(
+    w1Left,
+    add(w1Left, w1Direction),
+    w2Right,
+    add(w2Right, w2Direction)
+  ) || joinPoint;
+  const rightVertex = lineIntersection(
+    w1Right,
+    add(w1Right, w1Direction),
+    w2Left,
+    add(w2Left, w2Direction)
   ) || joinPoint;
 
-  // Find intersection of exterior lines
-  const exteriorVertex = lineIntersection(
-    w1Exterior,
-    add(w1Exterior, w1ExteriorDir),
-    w2Exterior,
-    add(w2Exterior, w2ExteriorDir)
-  ) || joinPoint;
-
-  return { interiorVertex, exteriorVertex };
+  return isWall1Start
+    ? { interiorVertex: leftVertex, exteriorVertex: rightVertex }
+    : { interiorVertex: rightVertex, exteriorVertex: leftVertex };
 }
 
 // =============================================================================
@@ -303,13 +287,14 @@ export function computeWallPolygon(wall: Wall, joins?: JoinData[]): Point2D[] {
         wall.endPoint.x - join.joinPoint.x,
         wall.endPoint.y - join.joinPoint.y
       );
-
-      if (Math.min(startDistance, endDistance) > JOIN_ENDPOINT_TOLERANCE) {
+      const hasExplicitEndpoint = join.endpoint === 'start' || join.endpoint === 'end';
+      if (!hasExplicitEndpoint && Math.min(startDistance, endDistance) > JOIN_ENDPOINT_TOLERANCE) {
         continue;
       }
 
-      // Apply the join to whichever endpoint is closer to the join point.
-      const isStart = startDistance <= endDistance;
+      // Prefer the explicitly matched endpoint when available so slight node drift
+      // does not cause the join to be applied to the wrong side of the wall.
+      const isStart = hasExplicitEndpoint ? join.endpoint === 'start' : startDistance <= endDistance;
 
       if (isStart) {
         interiorStart = join.interiorVertex;
