@@ -980,6 +980,10 @@ export interface DrawingState {
     updates: Partial<Wall>,
     options?: { skipHistory?: boolean; source?: 'ui' | 'drag'; skipRoomDetection?: boolean }
   ) => void;
+  updateWalls: (
+    updates: Array<{ id: string; updates: Partial<Wall> }>,
+    options?: { skipHistory?: boolean; source?: 'ui' | 'drag'; skipRoomDetection?: boolean }
+  ) => void;
   updateWallBevel: (
     wallId: string,
     end: CornerEnd,
@@ -1863,6 +1867,102 @@ export const useDrawingStore = create<DrawingState>()(
         }
         if (!options?.skipHistory) {
           get().saveToHistory('Update wall');
+        }
+        if (geometryChanged && !options?.skipRoomDetection) {
+          get().detectRooms({ debounce: options?.source === 'drag' });
+        }
+        if (elevationChanged) {
+          get().regenerateElevations({ debounce: options?.source === 'drag' });
+        }
+      },
+
+      updateWalls: (updates, options) => {
+        if (!updates.length) {
+          return;
+        }
+
+        const mergedUpdates = new Map<string, Partial<Wall>>();
+        updates.forEach(({ id, updates: nextUpdates }) => {
+          const existing = mergedUpdates.get(id) ?? {};
+          const safeUpdates = nextUpdates.thickness !== undefined
+            ? { ...nextUpdates, thickness: clampThickness(nextUpdates.thickness) }
+            : nextUpdates;
+          mergedUpdates.set(id, {
+            ...existing,
+            ...safeUpdates,
+            startBevel: safeUpdates.startBevel ?? existing.startBevel,
+            endBevel: safeUpdates.endBevel ?? existing.endBevel,
+          });
+        });
+
+        let geometryChanged = false;
+        let elevationChanged = false;
+        const previousValues = new Map<string, Wall3D>();
+
+        set((state) => {
+          let nextWalls = state.walls.map((wall) => {
+            const wallUpdates = mergedUpdates.get(wall.id);
+            if (!wallUpdates) {
+              return wall;
+            }
+
+            previousValues.set(wall.id, wall.properties3D);
+            const updatedWall = normalizeWallBevel({
+              ...wall,
+              ...wallUpdates,
+              startBevel: wallUpdates.startBevel ?? wall.startBevel,
+              endBevel: wallUpdates.endBevel ?? wall.endBevel,
+            });
+
+            const wallGeometryChanged = Boolean(
+              wallUpdates.startPoint ||
+              wallUpdates.endPoint ||
+              wallUpdates.thickness !== undefined ||
+              wallUpdates.openings
+            );
+            const wallElevationChanged = Boolean(
+              wallGeometryChanged ||
+              wallUpdates.material !== undefined ||
+              wallUpdates.layer !== undefined
+            );
+
+            geometryChanged = geometryChanged || wallGeometryChanged;
+            elevationChanged = elevationChanged || wallElevationChanged;
+
+            const reboundWall = bindWallAttributes(
+              wallGeometryChanged ? rebuildWallGeometry(updatedWall) : updatedWall,
+              updatedWall.properties3D
+            );
+            return reboundWall;
+          });
+
+          if (geometryChanged && options?.source !== 'drag') {
+            mergedUpdates.forEach((_wallUpdates, wallId) => {
+              nextWalls = cleanupStraightWallRuns(nextWalls, wallId);
+            });
+          }
+
+          return { walls: nextWalls };
+        });
+
+        const currentWalls = get().walls;
+        mergedUpdates.forEach((_wallUpdates, wallId) => {
+          const nextWall = currentWalls.find((wall) => wall.id === wallId);
+          const previousValue = previousValues.get(wallId);
+          if (nextWall && previousValue) {
+            attributeChangeObserver.notify({
+              entity: 'wall',
+              entityId: wallId,
+              previousValue,
+              nextValue: nextWall.properties3D,
+              source: options?.source ?? 'ui',
+              timestamp: Date.now(),
+            });
+          }
+        });
+
+        if (!options?.skipHistory) {
+          get().saveToHistory('Update walls');
         }
         if (geometryChanged && !options?.skipRoomDetection) {
           get().detectRooms({ debounce: options?.source === 'drag' });

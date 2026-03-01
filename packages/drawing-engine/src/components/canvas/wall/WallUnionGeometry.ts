@@ -2,13 +2,11 @@ import * as turf from '@turf/turf';
 
 import type { JoinData, Point2D, Wall } from '../../../types';
 
-import { computeWallBodyPolygon, lineIntersection } from './WallGeometry';
+import { computeWallBodyPolygon } from './WallGeometry';
 import { computeWallJoinMap } from './WallJoinNetwork';
 
 const COMPONENT_TOLERANCE_MM = 2;
 const COORDINATE_TOLERANCE_MM = 0.001;
-const ACUTE_BEVEL_THRESHOLD_DEG = 30;
-const CORNER_MITER_LIMIT = 3;
 const MIN_PATCH_AREA_MM2 = 0.1;
 
 type Endpoint = 'start' | 'end';
@@ -100,24 +98,6 @@ function normalizeAngleDeg(angleDeg: number): number {
     normalized += 360;
   }
   return normalized;
-}
-
-function directionSeparationDeg(a: Point2D, b: Point2D): number {
-  const lengthProduct = Math.hypot(a.x, a.y) * Math.hypot(b.x, b.y);
-  if (lengthProduct < 0.000001) {
-    return 180;
-  }
-
-  const clampedDot = Math.max(-1, Math.min(1, dot(a, b) / lengthProduct));
-  return Math.acos(clampedDot) * (180 / Math.PI);
-}
-
-function exposedCornerAngleDeg(prev: WallEndpointRef, next: WallEndpointRef): number {
-  return Math.abs(180 - directionSeparationDeg(prev.direction, next.direction));
-}
-
-function lineFromAnchor(anchor: Point2D, direction: Point2D): Point2D {
-  return add(anchor, direction);
 }
 
 function polygonArea(points: Point2D[]): number {
@@ -439,41 +419,99 @@ function buildEndpointNodes(walls: Wall[]): EndpointNode[] {
   return nodes;
 }
 
-function buildJunctionPatch(
-  prev: WallEndpointRef,
-  next: WallEndpointRef,
-  nodePoint: Point2D
-): PolygonFeature | null {
-  const miterPoint =
-    lineIntersection(
-      prev.left.anchor,
-      lineFromAnchor(prev.left.anchor, prev.direction),
-      next.right.anchor,
-      lineFromAnchor(next.right.anchor, next.direction)
-    ) ?? null;
-
-  const cornerAngle = exposedCornerAngleDeg(prev, next);
-  const halfThickness = Math.max(prev.thickness, next.thickness) / 2;
-  const miterReach = miterPoint
-    ? Math.max(
-      pointDistance(miterPoint, prev.left.anchor),
-      pointDistance(miterPoint, next.right.anchor)
-    )
-    : Number.POSITIVE_INFINITY;
-  const shouldFlatBevel =
-    !miterPoint ||
-    !Number.isFinite(miterReach) ||
-    cornerAngle < ACUTE_BEVEL_THRESHOLD_DEG ||
-    miterReach > halfThickness * CORNER_MITER_LIMIT;
-
-  const vertices = shouldFlatBevel
-    ? [copyPoint(prev.left.anchor), copyPoint(nodePoint), copyPoint(next.right.anchor)]
-    : [copyPoint(prev.left.anchor), copyPoint(miterPoint), copyPoint(next.right.anchor)];
-
-  return patchPolygonFeature(vertices);
+function anchorAngleDeg(nodePoint: Point2D, anchor: Point2D): number {
+  return normalizeAngleDeg(Math.atan2(anchor.y - nodePoint.y, anchor.x - nodePoint.x) * (180 / Math.PI));
 }
 
-function buildJunctionPatchFeatures(walls: Wall[]): PolygonFeature[] {
+function endpointRawCapVertices(endpointRef: WallEndpointRef): {
+  interiorVertex: Point2D;
+  exteriorVertex: Point2D;
+} {
+  if (endpointRef.endpoint === 'start') {
+    return {
+      interiorVertex: copyPoint(endpointRef.wall.interiorLine.start),
+      exteriorVertex: copyPoint(endpointRef.wall.exteriorLine.start),
+    };
+  }
+
+  return {
+    interiorVertex: copyPoint(endpointRef.wall.interiorLine.end),
+    exteriorVertex: copyPoint(endpointRef.wall.exteriorLine.end),
+  };
+}
+
+function resolveJoinEdgeVertices(wall: Wall, join: JoinData): {
+  interiorVertex: Point2D;
+  exteriorVertex: Point2D;
+} {
+  let interiorVertex = copyPoint(join.interiorVertex);
+  let exteriorVertex = copyPoint(join.exteriorVertex);
+
+  if (!join.bevelDirection) {
+    return { interiorVertex, exteriorVertex };
+  }
+
+  const bevelDirection = normalize(join.bevelDirection);
+  if (Math.hypot(bevelDirection.x, bevelDirection.y) < 0.0001) {
+    return { interiorVertex, exteriorVertex };
+  }
+
+  const wallVector = subtract(wall.endPoint, wall.startPoint);
+  const wallLen = Math.hypot(wallVector.x, wallVector.y);
+  const maxOffset = Math.max(0, join.maxBevelOffset ?? wallLen / 2);
+  const bevel =
+    join.endpoint === 'start'
+      ? wall.startBevel ?? { outerOffset: 0, innerOffset: 0 }
+      : wall.endBevel ?? { outerOffset: 0, innerOffset: 0 };
+  const innerOffset = Math.min(maxOffset, Math.max(0, bevel.innerOffset ?? 0));
+  const outerOffset = Math.min(maxOffset, Math.max(0, bevel.outerOffset ?? 0));
+
+  interiorVertex = add(interiorVertex, scale(bevelDirection, -innerOffset));
+  exteriorVertex = add(exteriorVertex, scale(bevelDirection, -outerOffset));
+  return { interiorVertex, exteriorVertex };
+}
+
+function buildEndpointJoinPatchFeature(wall: Wall, join: JoinData): PolygonFeature | null {
+  if (!join.endpoint) {
+    return null;
+  }
+
+  const endpointRef = buildEndpointRef(wall, join.endpoint);
+  const rawCap = endpointRawCapVertices(endpointRef);
+  const joined = resolveJoinEdgeVertices(wall, join);
+  return patchPolygonFeature([
+    rawCap.interiorVertex,
+    joined.interiorVertex,
+    joined.exteriorVertex,
+    rawCap.exteriorVertex,
+  ]);
+}
+
+function buildEndpointJoinPatchFeatures(
+  walls: Wall[],
+  joinsMap: Map<string, JoinData[]>
+): PolygonFeature[] {
+  const wallsById = new Map(walls.map((wall) => [wall.id, wall]));
+  const features: PolygonFeature[] = [];
+
+  joinsMap.forEach((joins, wallId) => {
+    const wall = wallsById.get(wallId);
+    if (!wall) {
+      return;
+    }
+
+    joins.forEach((join) => {
+      const feature = buildEndpointJoinPatchFeature(wall, join);
+      if (feature) {
+        features.push(feature);
+      }
+    });
+  });
+
+  return features;
+}
+
+function buildNodeCorePatchFeatures(walls: Wall[]): PolygonFeature[] {
   const nodes = buildEndpointNodes(walls);
   const features: PolygonFeature[] = [];
 
@@ -482,15 +520,26 @@ function buildJunctionPatchFeatures(walls: Wall[]): PolygonFeature[] {
       continue;
     }
 
-    const sorted = [...node.endpoints].sort((a, b) => a.angleDeg - b.angleDeg);
-
-    for (let index = 0; index < sorted.length; index += 1) {
-      const prev = sorted[index];
-      const next = sorted[(index + 1) % sorted.length];
-      const patch = buildJunctionPatch(prev, next, node.point);
-      if (patch) {
-        features.push(patch);
+    const anchors = node.endpoints.flatMap((endpoint) => [
+      copyPoint(endpoint.left.anchor),
+      copyPoint(endpoint.right.anchor),
+    ]);
+    const uniqueAnchors: Point2D[] = [];
+    anchors.forEach((anchor) => {
+      if (!uniqueAnchors.some((candidate) => pointDistance(candidate, anchor) <= COORDINATE_TOLERANCE_MM)) {
+        uniqueAnchors.push(anchor);
       }
+    });
+
+    if (uniqueAnchors.length < 3) {
+      continue;
+    }
+
+    const ring = uniqueAnchors
+      .sort((a, b) => anchorAngleDeg(node.point, a) - anchorAngleDeg(node.point, b));
+    const patch = patchPolygonFeature(ring);
+    if (patch) {
+      features.push(patch);
     }
   }
 
@@ -507,7 +556,8 @@ function unionWallComponent(
 
   const features = [
     ...walls.map((wall) => wallPolygonFeature(wall)),
-    ...buildJunctionPatchFeatures(walls),
+    ...buildNodeCorePatchFeatures(walls),
+    ...buildEndpointJoinPatchFeatures(walls, joinsMap),
   ];
 
   if (features.length === 1) {

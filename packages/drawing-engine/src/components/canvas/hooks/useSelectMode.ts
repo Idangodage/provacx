@@ -77,6 +77,10 @@ export interface UseSelectModeOptions {
   setSelectedIds: (ids: string[]) => void;
   setHoveredElement: (id: string | null) => void;
   updateWall: (id: string, updates: Partial<Wall>, options?: WallUpdateOptions) => void;
+  updateWalls: (
+    updates: Array<{ id: string; updates: Partial<Wall> }>,
+    options?: WallUpdateOptions
+  ) => void;
   updateWallBevel: (
     wallId: string,
     end: CornerEnd,
@@ -487,6 +491,7 @@ export function useSelectMode({
   setSelectedIds,
   setHoveredElement,
   updateWall,
+  updateWalls,
   updateWallBevel,
   resetWallBevel,
   getCornerBevelDots,
@@ -521,6 +526,7 @@ export function useSelectMode({
     setSelectedIds,
     setHoveredElement,
     updateWall,
+    updateWalls,
     updateWallBevel,
     resetWallBevel,
     getCornerBevelDots,
@@ -541,6 +547,7 @@ export function useSelectMode({
       setSelectedIds,
       setHoveredElement,
       updateWall,
+      updateWalls,
       updateWallBevel,
       resetWallBevel,
       getCornerBevelDots,
@@ -559,6 +566,7 @@ export function useSelectMode({
     setSelectedIds,
     setHoveredElement,
     updateWall,
+    updateWalls,
     updateWallBevel,
     resetWallBevel,
     getCornerBevelDots,
@@ -1044,6 +1052,77 @@ export function useSelectMode({
           : options;
       optionsRef.current.updateWall(wallId, updates, normalizedOptions);
       wallUpdateCacheRef.current.set(wallId, cacheKey);
+    },
+    [findWallById]
+  );
+
+  const updateWallsIfChanged = useCallback(
+    (entries: Array<{ id: string; updates: Partial<Wall> }>, options?: WallUpdateOptions) => {
+      if (entries.length === 0) {
+        return;
+      }
+
+      const merged = new Map<string, Partial<Wall>>();
+      entries.forEach(({ id, updates }) => {
+        const existing = merged.get(id) ?? {};
+        merged.set(id, {
+          ...existing,
+          ...updates,
+          startBevel: updates.startBevel ?? existing.startBevel,
+          endBevel: updates.endBevel ?? existing.endBevel,
+        });
+      });
+
+      const changedEntries: Array<{ id: string; updates: Partial<Wall> }> = [];
+      const threshold = 0.08;
+
+      merged.forEach((updates, wallId) => {
+        const cacheKey = [
+          `s:${pointCacheKey(updates.startPoint)}`,
+          `e:${pointCacheKey(updates.endPoint)}`,
+          `t:${updates.thickness !== undefined ? updates.thickness.toFixed(3) : ''}`,
+        ].join('|');
+        const cached = wallUpdateCacheRef.current.get(wallId);
+        if (cached === cacheKey) {
+          return;
+        }
+
+        const current = findWallById(wallId);
+        if (!current) {
+          changedEntries.push({ id: wallId, updates });
+          wallUpdateCacheRef.current.set(wallId, cacheKey);
+          return;
+        }
+
+        const startChanged = updates.startPoint
+          ? magnitude(subtract(updates.startPoint, current.startPoint)) > threshold
+          : false;
+        const endChanged = updates.endPoint
+          ? magnitude(subtract(updates.endPoint, current.endPoint)) > threshold
+          : false;
+        const thicknessChanged =
+          updates.thickness !== undefined
+            ? Math.abs(updates.thickness - current.thickness) > threshold
+            : false;
+
+        if (!startChanged && !endChanged && !thicknessChanged) {
+          wallUpdateCacheRef.current.set(wallId, cacheKey);
+          return;
+        }
+
+        changedEntries.push({ id: wallId, updates });
+        wallUpdateCacheRef.current.set(wallId, cacheKey);
+      });
+
+      if (changedEntries.length === 0) {
+        return;
+      }
+
+      const normalizedOptions =
+        options?.source === 'drag' && options.skipRoomDetection === undefined
+          ? { ...options, skipRoomDetection: true }
+          : options;
+      optionsRef.current.updateWalls(changedEntries, normalizedOptions);
     },
     [findWallById]
   );
@@ -1590,17 +1669,6 @@ export function useSelectMode({
         optionsRef.current.setProcessingStatus('Overlap warning: wall intersects other walls.', false);
       }
 
-      candidates.forEach((candidateWall, wallId) => {
-        updateWallIfChanged(
-          wallId,
-          {
-            startPoint: candidateWall.startPoint,
-            endPoint: candidateWall.endPoint,
-          },
-          { skipHistory: true, source: 'drag' }
-        );
-      });
-
       // Elastic mode: stretch neighboring non-selected walls by moving shared endpoints.
       const followerUpdates = new Map<string, Partial<Wall>>();
       for (const endpointConstraint of state.endpointConstraints) {
@@ -1623,13 +1691,20 @@ export function useSelectMode({
         }
       }
 
-      followerUpdates.forEach((updates, wallId) => {
-        updateWallIfChanged(
-          wallId,
-          updates,
-          { skipHistory: true, source: 'drag' }
-        );
+      const dragUpdates: Array<{ id: string; updates: Partial<Wall> }> = [];
+      candidates.forEach((candidateWall, wallId) => {
+        dragUpdates.push({
+          id: wallId,
+          updates: {
+            startPoint: candidateWall.startPoint,
+            endPoint: candidateWall.endPoint,
+          },
+        });
       });
+      followerUpdates.forEach((updates, wallId) => {
+        dragUpdates.push({ id: wallId, updates });
+      });
+      updateWallsIfChanged(dragUpdates, { skipHistory: true, source: 'drag' });
 
       const anchor = candidates.get(state.anchorWallId);
       if (anchor) {
@@ -1696,6 +1771,7 @@ export function useSelectMode({
         return null;
       }
 
+      const roomCornerUpdates: Array<{ id: string; updates: Partial<Wall> }> = [];
       state.baselineWalls.forEach((baselineWall, wallId) => {
         let nextStart = { ...baselineWall.startPoint };
         let nextEnd = { ...baselineWall.endPoint };
@@ -1708,13 +1784,16 @@ export function useSelectMode({
           }
         });
         if (!pointsNear(nextStart, baselineWall.startPoint) || !pointsNear(nextEnd, baselineWall.endPoint)) {
-          updateWallIfChanged(
-            wallId,
-            { startPoint: nextStart, endPoint: nextEnd },
-            { skipHistory: true, source: 'drag', skipRoomDetection: true }
-          );
+          roomCornerUpdates.push({
+            id: wallId,
+            updates: { startPoint: nextStart, endPoint: nextEnd },
+          });
         }
       });
+      updateWallsIfChanged(
+        roomCornerUpdates,
+        { skipHistory: true, source: 'drag', skipRoomDetection: true }
+      );
 
       const areaM2 = GeometryEngine.calculateRoomAreaM2({ vertices: nextVertices });
       const centroid = GeometryEngine.findRoomCentroid({ vertices: nextVertices });
@@ -1790,6 +1869,7 @@ export function useSelectMode({
         return null;
       }
 
+      const roomScaleUpdates: Array<{ id: string; updates: Partial<Wall> }> = [];
       state.baselineWalls.forEach((baselineWall, wallId) => {
         let nextStart = { ...baselineWall.startPoint };
         let nextEnd = { ...baselineWall.endPoint };
@@ -1802,13 +1882,16 @@ export function useSelectMode({
           }
         });
         if (!pointsNear(nextStart, baselineWall.startPoint) || !pointsNear(nextEnd, baselineWall.endPoint)) {
-          updateWallIfChanged(
-            wallId,
-            { startPoint: nextStart, endPoint: nextEnd },
-            { skipHistory: true, source: 'drag', skipRoomDetection: true }
-          );
+          roomScaleUpdates.push({
+            id: wallId,
+            updates: { startPoint: nextStart, endPoint: nextEnd },
+          });
         }
       });
+      updateWallsIfChanged(
+        roomScaleUpdates,
+        { skipHistory: true, source: 'drag', skipRoomDetection: true }
+      );
 
       const areaM2 = GeometryEngine.calculateRoomAreaM2({ vertices: nextVertices });
       const centroid = GeometryEngine.findRoomCentroid({ vertices: nextVertices });
@@ -1829,14 +1912,15 @@ export function useSelectMode({
         ctrl: modifierKeysRef.current.ctrl,
       });
 
-      updateWallIfChanged(
-        state.wallId,
+      const rotationUpdates: Array<{ id: string; updates: Partial<Wall> }> = [
         {
-          startPoint: rotationPreview.startPoint,
-          endPoint: rotationPreview.endPoint,
+          id: state.wallId,
+          updates: {
+            startPoint: rotationPreview.startPoint,
+            endPoint: rotationPreview.endPoint,
+          },
         },
-        { skipHistory: true, source: 'drag' }
-      );
+      ];
 
       for (const connected of state.connectedEndpoints) {
         const baselineConnected = findWallById(connected.wallId);
@@ -1846,46 +1930,44 @@ export function useSelectMode({
           connected.endpoint === 'start' &&
           pointsNear(baselineConnected.startPoint, state.baselineWall.startPoint)
         ) {
-          updateWallIfChanged(
-            connected.wallId,
-            { startPoint: rotationPreview.startPoint },
-            { skipHistory: true, source: 'drag' }
-          );
+          rotationUpdates.push({
+            id: connected.wallId,
+            updates: { startPoint: rotationPreview.startPoint },
+          });
           continue;
         }
         if (
           connected.endpoint === 'end' &&
           pointsNear(baselineConnected.endPoint, state.baselineWall.startPoint)
         ) {
-          updateWallIfChanged(
-            connected.wallId,
-            { endPoint: rotationPreview.startPoint },
-            { skipHistory: true, source: 'drag' }
-          );
+          rotationUpdates.push({
+            id: connected.wallId,
+            updates: { endPoint: rotationPreview.startPoint },
+          });
           continue;
         }
         if (
           connected.endpoint === 'start' &&
           pointsNear(baselineConnected.startPoint, state.baselineWall.endPoint)
         ) {
-          updateWallIfChanged(
-            connected.wallId,
-            { startPoint: rotationPreview.endPoint },
-            { skipHistory: true, source: 'drag' }
-          );
+          rotationUpdates.push({
+            id: connected.wallId,
+            updates: { startPoint: rotationPreview.endPoint },
+          });
           continue;
         }
         if (
           connected.endpoint === 'end' &&
           pointsNear(baselineConnected.endPoint, state.baselineWall.endPoint)
         ) {
-          updateWallIfChanged(
-            connected.wallId,
-            { endPoint: rotationPreview.endPoint },
-            { skipHistory: true, source: 'drag' }
-          );
+          rotationUpdates.push({
+            id: connected.wallId,
+            updates: { endPoint: rotationPreview.endPoint },
+          });
         }
       }
+
+      updateWallsIfChanged(rotationUpdates, { skipHistory: true, source: 'drag' });
 
       setStatusFromWall({
         ...state.baselineWall,
@@ -2010,36 +2092,26 @@ export function useSelectMode({
       connectWallsIfNeeded(endpointState.wallId, bestConstraint.wallId);
     }
 
-    if (endpointState.endpoint === 'start') {
-      updateWallIfChanged(
-        endpointState.wallId,
-        { startPoint: snappedPoint },
-        { skipHistory: true, source: 'drag' }
-      );
-    } else {
-      updateWallIfChanged(
-        endpointState.wallId,
-        { endPoint: snappedPoint },
-        { skipHistory: true, source: 'drag' }
-      );
-    }
+    const endpointUpdates: Array<{ id: string; updates: Partial<Wall> }> = [
+      {
+        id: endpointState.wallId,
+        updates: endpointState.endpoint === 'start'
+          ? { startPoint: snappedPoint }
+          : { endPoint: snappedPoint },
+      },
+    ];
 
     for (const connected of endpointState.connectedEndpoints) {
-      if (connected.endpoint === 'start') {
-        updateWallIfChanged(
-          connected.wallId,
-          { startPoint: snappedPoint },
-          { skipHistory: true, source: 'drag' }
-        );
-      } else {
-        updateWallIfChanged(
-          connected.wallId,
-          { endPoint: snappedPoint },
-          { skipHistory: true, source: 'drag' }
-        );
-      }
+      endpointUpdates.push({
+        id: connected.wallId,
+        updates: connected.endpoint === 'start'
+          ? { startPoint: snappedPoint }
+          : { endPoint: snappedPoint },
+      });
       connectWallsIfNeeded(endpointState.wallId, connected.wallId);
     }
+
+    updateWallsIfChanged(endpointUpdates, { skipHistory: true, source: 'drag' });
 
     if (snappedWallId) {
       connectWallsIfNeeded(endpointState.wallId, snappedWallId);
@@ -2082,6 +2154,7 @@ export function useSelectMode({
     showSnapIndicator,
     updateWallBevelIfChanged,
     updateWallIfChanged,
+    updateWallsIfChanged,
   ]);
 
   const flushDragFrame = useCallback(() => {
