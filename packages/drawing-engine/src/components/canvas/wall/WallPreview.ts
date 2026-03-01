@@ -7,11 +7,12 @@
 
 import * as fabric from 'fabric';
 
-import type { Point2D, WallMaterial } from '../../../types';
+import type { Point2D, Wall, WallMaterial } from '../../../types';
 import { WALL_MATERIAL_COLORS } from '../../../types/wall';
 import { MM_TO_PX } from '../scale';
 
-import { computeOffsetLines } from './WallGeometry';
+import { buildTemporaryWall } from './WallJoinNetwork';
+import { computeWallUnionRenderData, type WallUnionComponent } from './WallUnionGeometry';
 
 // =============================================================================
 // WallPreview Class
@@ -25,7 +26,10 @@ export class WallPreview {
   private thickness: number = 150;
   private material: WallMaterial = 'brick';
   private queuedEndPoint: Point2D | null = null;
+  private lastEndPoint: Point2D | null = null;
   private frameHandle: number | null = null;
+  private walls: Wall[] = [];
+  private preferredStartWall: Wall | null = null;
 
   constructor(canvas: fabric.Canvas, pageHeight: number = 3000) {
     this.canvas = canvas;
@@ -39,6 +43,31 @@ export class WallPreview {
     return y * MM_TO_PX;
   }
 
+  private toCanvasPoint(point: Point2D): { x: number; y: number } {
+    return {
+      x: point.x * MM_TO_PX,
+      y: this.toCanvasY(point.y),
+    };
+  }
+
+  private componentPathData(component: WallUnionComponent): string {
+    return component.polygons
+      .flatMap((polygon) =>
+        polygon
+          .filter((ring) => ring.length >= 3)
+          .map((ring) => {
+            const [first, ...rest] = ring.map((point) => this.toCanvasPoint(point));
+            const commands = [`M ${first.x} ${first.y}`];
+            rest.forEach((point) => {
+              commands.push(`L ${point.x} ${point.y}`);
+            });
+            commands.push('Z');
+            return commands.join(' ');
+          })
+      )
+      .join(' ');
+  }
+
   /**
    * Set page height for compatibility with existing hook contracts.
    */
@@ -46,14 +75,29 @@ export class WallPreview {
     this.pageHeight = height;
   }
 
+  setWalls(walls: Wall[]): void {
+    this.walls = walls;
+    this.preferredStartWall = null;
+    if (this.startPoint && this.lastEndPoint) {
+      this.queuedEndPoint = { ...this.lastEndPoint };
+      this.scheduleRender();
+    }
+  }
+
   /**
    * Start preview from a point.
    */
-  startPreview(startPoint: Point2D, thickness: number, material: WallMaterial): void {
+  startPreview(
+    startPoint: Point2D,
+    thickness: number,
+    material: WallMaterial,
+    preferredStartWall?: Wall | null
+  ): void {
     this.clearPreview();
     this.startPoint = { ...startPoint };
     this.thickness = thickness;
     this.material = material;
+    this.preferredStartWall = preferredStartWall ? { ...preferredStartWall } : null;
   }
 
   /**
@@ -89,50 +133,46 @@ export class WallPreview {
       this.previewGroup = null;
     }
 
+    this.lastEndPoint = { ...endPoint };
+
     const dx = endPoint.x - this.startPoint.x;
     const dy = endPoint.y - this.startPoint.y;
     const length = Math.sqrt(dx * dx + dy * dy);
     if (length < 1) return;
 
-    const { interiorLine, exteriorLine } = computeOffsetLines(
+    const previewWall = buildTemporaryWall(
+      '__preview__',
       this.startPoint,
       endPoint,
-      this.thickness
+      this.thickness,
+      this.material
     );
+    const previewWalls = [
+      ...this.walls,
+      ...(this.preferredStartWall ? [this.preferredStartWall] : []),
+      previewWall,
+    ];
+    const renderData = computeWallUnionRenderData(previewWalls);
+    const previewComponent = renderData.components.find((component) =>
+      component.wallIds.includes(previewWall.id)
+    );
+
+    if (!previewComponent) {
+      return;
+    }
 
     const materialColors = WALL_MATERIAL_COLORS[this.material];
-
-    const fillPolygon = new fabric.Polygon(
-      [
-        { x: interiorLine.start.x * MM_TO_PX, y: this.toCanvasY(interiorLine.start.y) },
-        { x: interiorLine.end.x * MM_TO_PX, y: this.toCanvasY(interiorLine.end.y) },
-        { x: exteriorLine.end.x * MM_TO_PX, y: this.toCanvasY(exteriorLine.end.y) },
-        { x: exteriorLine.start.x * MM_TO_PX, y: this.toCanvasY(exteriorLine.start.y) },
-      ],
-      {
-        fill: materialColors.fill,
-        opacity: 0.55,
-        stroke: 'transparent',
-        strokeWidth: 0,
-        selectable: false,
-        evented: false,
-      }
-    );
-
-    const interiorBoundary = new fabric.Line(
-      [
-        interiorLine.start.x * MM_TO_PX,
-        this.toCanvasY(interiorLine.start.y),
-        interiorLine.end.x * MM_TO_PX,
-        this.toCanvasY(interiorLine.end.y),
-      ],
-      {
-        stroke: '#000000',
-        strokeWidth: 2,
-        selectable: false,
-        evented: false,
-      }
-    );
+    const mergedPreviewPath = new fabric.Path(this.componentPathData(previewComponent), {
+      fill: materialColors.fill,
+      opacity: 0.55,
+      fillRule: 'evenodd',
+      stroke: '#000000',
+      strokeWidth: 2,
+      strokeLineJoin: 'miter',
+      selectable: false,
+      evented: false,
+      objectCaching: false,
+    });
 
     const centerPreviewLine = new fabric.Line(
       [
@@ -150,53 +190,11 @@ export class WallPreview {
       }
     );
 
-    const exteriorBoundary = new fabric.Line(
-      [
-        exteriorLine.start.x * MM_TO_PX,
-        this.toCanvasY(exteriorLine.start.y),
-        exteriorLine.end.x * MM_TO_PX,
-        this.toCanvasY(exteriorLine.end.y),
-      ],
-      {
-        stroke: '#000000',
-        strokeWidth: 2,
-        selectable: false,
-        evented: false,
-      }
-    );
-
-    const startCap = new fabric.Line(
-      [
-        interiorLine.start.x * MM_TO_PX,
-        this.toCanvasY(interiorLine.start.y),
-        exteriorLine.start.x * MM_TO_PX,
-        this.toCanvasY(exteriorLine.start.y),
-      ],
-      {
-        stroke: '#000000',
-        strokeWidth: 2,
-        selectable: false,
-        evented: false,
-      }
-    );
-
-    const endCap = new fabric.Line(
-      [
-        interiorLine.end.x * MM_TO_PX,
-        this.toCanvasY(interiorLine.end.y),
-        exteriorLine.end.x * MM_TO_PX,
-        this.toCanvasY(exteriorLine.end.y),
-      ],
-      {
-        stroke: '#000000',
-        strokeWidth: 2,
-        selectable: false,
-        evented: false,
-      }
-    );
-
     this.previewGroup = new fabric.Group(
-      [fillPolygon, interiorBoundary, centerPreviewLine, exteriorBoundary, startCap, endCap],
+      [
+        mergedPreviewPath,
+        centerPreviewLine,
+      ],
       {
         selectable: false,
         evented: false,
@@ -239,6 +237,8 @@ export class WallPreview {
     }
 
     this.startPoint = null;
+    this.lastEndPoint = null;
+    this.preferredStartWall = null;
     this.canvas.requestRenderAll();
   }
 

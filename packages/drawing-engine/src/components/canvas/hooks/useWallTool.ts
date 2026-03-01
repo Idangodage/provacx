@@ -12,6 +12,7 @@ import type { Point2D, Room, Wall, WallSettings, WallDrawingState } from '../../
 import { WallManager } from '../wall/WallManager';
 import { WallPreview } from '../wall/WallPreview';
 import { WallRenderer } from '../wall/WallRenderer';
+import { buildTemporaryWall } from '../wall/WallJoinNetwork';
 import { snapWallPoint } from '../wall/WallSnapping';
 
 // =============================================================================
@@ -110,6 +111,7 @@ export function useWallTool({
     if (wallManagerRef.current) {
       wallManagerRef.current.setWalls(walls);
     }
+    wallPreviewRef.current?.setWalls(walls);
   }, [walls]);
 
   // Update renderer when walls change
@@ -228,10 +230,18 @@ export function useWallTool({
 
           // If chain mode, update preview for next wall
           if (wallDrawingState.chainMode) {
+            const continuationWall = buildTemporaryWall(
+              '__preview-anchor__',
+              wallDrawingState.startPoint ?? snapResult.snappedPoint,
+              snapResult.snappedPoint,
+              wallDrawingState.previewThickness,
+              wallDrawingState.previewMaterial
+            );
             wallPreviewRef.current?.startPreview(
               snapResult.snappedPoint,
               wallSettings.defaultThickness,
-              wallSettings.defaultMaterial
+              wallSettings.defaultMaterial,
+              continuationWall
             );
           } else {
             wallPreviewRef.current?.clearPreview();

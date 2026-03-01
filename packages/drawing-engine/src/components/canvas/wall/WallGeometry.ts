@@ -260,6 +260,19 @@ export function computeMiterJoin(
 // =============================================================================
 
 /**
+ * Compute the raw wall body polygon without any join cleanup.
+ * Returns vertices in order: interior start, interior end, exterior end, exterior start
+ */
+export function computeWallBodyPolygon(wall: Wall): Point2D[] {
+  return [
+    wall.interiorLine.start,
+    wall.interiorLine.end,
+    wall.exteriorLine.end,
+    wall.exteriorLine.start,
+  ];
+}
+
+/**
  * Compute wall polygon vertices for rendering
  * Returns vertices in order: interior start, interior end, exterior end, exterior start
  */
@@ -268,11 +281,12 @@ export function computeWallPolygon(wall: Wall, joins?: JoinData[]): Point2D[] {
   const clampOffset = (value: number, maxOffset: number): number =>
     Math.min(maxOffset, Math.max(0, Number.isFinite(value) ? value : 0));
 
-  // Start with basic rectangle from offset lines
-  let interiorStart = wall.interiorLine.start;
-  let interiorEnd = wall.interiorLine.end;
-  let exteriorStart = wall.exteriorLine.start;
-  let exteriorEnd = wall.exteriorLine.end;
+  // Start with the basic unjoined wall body.
+  const basePolygon = computeWallBodyPolygon(wall);
+  let interiorStart = basePolygon[0];
+  let interiorEnd = basePolygon[1];
+  let exteriorEnd = basePolygon[2];
+  let exteriorStart = basePolygon[3];
   let startJoin: JoinData | null = null;
   let endJoin: JoinData | null = null;
 

@@ -17,10 +17,12 @@ import {
 import { MM_TO_PX } from '../scale';
 
 import {
+  computeWallBodyPolygon,
   computeWallPolygon,
   computeMiterJoin,
   lineIntersection,
 } from './WallGeometry';
+import { computeWallUnionRenderData, type WallUnionComponent } from './WallUnionGeometry';
 
 // =============================================================================
 // Types
@@ -66,6 +68,7 @@ const CORNER_MITER_LIMIT = 3;
 export class WallRenderer {
   private canvas: fabric.Canvas;
   private wallObjects: Map<string, WallGroup> = new Map();
+  private componentObjects: fabric.Object[] = [];
   private wallData: Map<string, Wall> = new Map();
   private showCenterLines: boolean = true;
   private pageHeight: number;
@@ -242,15 +245,7 @@ export class WallRenderer {
     this.renderAllWalls(Array.from(this.wallData.values()));
   }
 
-  /**
-   * Render a wall as a Fabric.js group.
-   */
-  renderWall(wall: Wall, joins?: JoinData[]): WallGroup {
-    this.removeWall(wall.id);
-    this.wallData.set(wall.id, wall);
-
-    const vertices = computeWallPolygon(wall, joins);
-    const canvasVertices = vertices.map((v) => this.toCanvasPoint(v));
+  private resolveWallVisualFill(wall: Wall): string | fabric.Pattern {
     const materialColors = WALL_MATERIAL_COLORS[wall.material];
     const libraryMaterial = getArchitecturalMaterial(wall.properties3D.materialId);
     const defaultMaterialFill = libraryMaterial?.color ?? materialColors.fill;
@@ -261,42 +256,90 @@ export class WallRenderer {
         ? colorFromExposure(exposureDirection)
         : defaultMaterialFill;
 
+    if (this.wallColorMode === 'material' && materialColors.pattern === 'hatch') {
+      const pattern = this.hatchPatterns.get(wall.material);
+      if (pattern) {
+        return pattern;
+      }
+    }
+
+    return fillColor;
+  }
+
+  private wallComponentPathData(component: WallUnionComponent): string {
+    return component.polygons
+      .flatMap((polygon) =>
+        polygon
+          .filter((ring) => ring.length >= 3)
+          .map((ring) => {
+            const [first, ...rest] = ring.map((point) => this.toCanvasPoint(point));
+            const commands = [`M ${first.x} ${first.y}`];
+            rest.forEach((point) => {
+              commands.push(`L ${point.x} ${point.y}`);
+            });
+            commands.push('Z');
+            return commands.join(' ');
+          })
+      )
+      .join(' ');
+  }
+
+  private renderMergedComponent(component: WallUnionComponent, representativeWall: Wall): void {
+    const pathData = this.wallComponentPathData(component);
+    if (!pathData) {
+      return;
+    }
+
+    const mergedPath = new fabric.Path(pathData, {
+      fill: this.resolveWallVisualFill(representativeWall),
+      fillRule: 'evenodd',
+      stroke: '#000000',
+      strokeWidth: 2,
+      strokeLineJoin: 'miter',
+      selectable: false,
+      evented: false,
+      objectCaching: false,
+    });
+
+    this.canvas.add(mergedPath);
+    this.componentObjects.push(mergedPath);
+  }
+
+  private clearMergedComponents(): void {
+    this.componentObjects.forEach((object) => {
+      this.canvas.remove(object);
+    });
+    this.componentObjects = [];
+  }
+
+  /**
+   * Render a wall as a Fabric.js group.
+   */
+  renderWall(wall: Wall, joins?: JoinData[]): WallGroup {
+    this.removeWall(wall.id);
+    this.wallData.set(wall.id, wall);
+
+    const interactionVertices = computeWallBodyPolygon(wall);
+    const canvasVertices = interactionVertices.map((v) => this.toCanvasPoint(v));
+
     const fillPolygon = new fabric.Polygon(canvasVertices, {
-      fill: fillColor,
+      fill: 'rgba(0,0,0,0.001)',
       stroke: 'transparent',
       strokeWidth: 0,
       selectable: false,
       evented: false,
     });
     (fillPolygon as NamedObject).name = 'wallFill';
-
-    if (this.wallColorMode === 'material' && materialColors.pattern === 'hatch') {
-      const pattern = this.hatchPatterns.get(wall.material);
-      if (pattern) {
-        fillPolygon.set('fill', pattern);
-      }
-    }
     this.annotateWallTarget(fillPolygon, wall.id);
 
     const interiorStart = canvasVertices[0];
     const interiorEnd = canvasVertices[1];
     const exteriorEnd = canvasVertices[2];
     const exteriorStart = canvasVertices[3];
-    const joinEndpointTolerance = this.toSceneTolerance(10, 2, 180);
-    const hasStartJoin = (joins ?? []).some((join) => join.endpoint === 'start');
-    const hasEndJoin = (joins ?? []).some((join) => join.endpoint === 'end');
-    const startAttachmentKind = this.wallEndpointAttachmentKind(
-      wall,
-      'start',
-      joinEndpointTolerance
-    );
-    const endAttachmentKind = this.wallEndpointAttachmentKind(
-      wall,
-      'end',
-      joinEndpointTolerance
-    );
-    const hasStartAttachment = hasStartJoin || startAttachmentKind === 'segment';
-    const hasEndAttachment = hasEndJoin || endAttachmentKind === 'segment';
+    const startJoin = (joins ?? []).find((join) => join.endpoint === 'start') ?? null;
+    const endJoin = (joins ?? []).find((join) => join.endpoint === 'end') ?? null;
+    const showStartCap = !startJoin || startJoin.joinType === 'bevel';
+    const showEndCap = !endJoin || endJoin.joinType === 'bevel';
 
     const interiorBoundary = new fabric.Line(
       [interiorStart.x, interiorStart.y, interiorEnd.x, interiorEnd.y],
@@ -305,6 +348,7 @@ export class WallRenderer {
         strokeWidth: 2,
         selectable: false,
         evented: false,
+        visible: false,
       }
     );
     (interiorBoundary as NamedObject).name = 'interiorBoundary';
@@ -317,6 +361,7 @@ export class WallRenderer {
         strokeWidth: 2,
         selectable: false,
         evented: false,
+        visible: false,
       }
     );
     (exteriorBoundary as NamedObject).name = 'exteriorBoundary';
@@ -329,7 +374,7 @@ export class WallRenderer {
         strokeWidth: 2,
         selectable: false,
         evented: false,
-        visible: !hasStartAttachment,
+        visible: false,
       }
     );
     (startCap as NamedObject).name = 'startCap';
@@ -342,7 +387,7 @@ export class WallRenderer {
         strokeWidth: 2,
         selectable: false,
         evented: false,
-        visible: !hasEndAttachment,
+        visible: false,
       }
     );
     (endCap as NamedObject).name = 'endCap';
@@ -483,8 +528,9 @@ export class WallRenderer {
    * Update an existing wall's rendering.
    */
   updateWall(wall: Wall, joins?: JoinData[]): void {
-    this.renderWall(wall, joins);
-    this.setSelectedWalls([...this.selectedWallIds]);
+    this.wallData.set(wall.id, wall);
+    void joins;
+    this.renderAllWalls(Array.from(this.wallData.values()));
   }
 
   /**
@@ -1007,6 +1053,7 @@ export class WallRenderer {
    * Render all walls with proper joins.
    */
   renderAllWalls(walls: Wall[]): void {
+    this.clearMergedComponents();
     this.wallObjects.forEach((obj) => {
       this.canvas.remove(obj);
     });
@@ -1022,10 +1069,21 @@ export class WallRenderer {
       this.wallData.set(wall.id, wall);
     });
 
-    const joinsMap = this.computeAllJoins(walls);
+    const renderData = computeWallUnionRenderData(walls);
+    const wallsById = new Map(walls.map((wall) => [wall.id, wall]));
+
+    for (const component of renderData.components) {
+      const representativeWall = component.wallIds
+        .map((wallId) => wallsById.get(wallId))
+        .find((wall): wall is Wall => Boolean(wall));
+      if (!representativeWall) {
+        continue;
+      }
+      this.renderMergedComponent(component, representativeWall);
+    }
 
     for (const wall of walls) {
-      const joins = joinsMap.get(wall.id) || [];
+      const joins = renderData.joinsMap.get(wall.id) || [];
       this.renderWall(wall, joins);
     }
 
@@ -1661,6 +1719,7 @@ export class WallRenderer {
    * Clear all walls.
    */
   clearAllWalls(): void {
+    this.clearMergedComponents();
     this.wallObjects.forEach((obj) => {
       this.canvas.remove(obj);
     });

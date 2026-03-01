@@ -32,7 +32,7 @@ import {
   type CornerEnd,
 } from '../../../utils/wallBevel';
 import { MM_TO_PX } from '../scale';
-import { computeWallPolygon } from '../wall/WallGeometry';
+ import { computeWallBodyPolygon } from '../wall/WallGeometry';
 import { snapToGrid } from '../wall/WallSnapping';
 
 const THICKNESS_PRESETS_MM = [100, 150, 200, 250];
@@ -646,7 +646,7 @@ export function useSelectMode({
 
     const overlays: fabric.FabricObject[] = [];
     for (const wall of ghostWalls) {
-      const polygon = computeWallPolygon(wall).map((point) => toCanvasPoint(point));
+        const polygon = computeWallBodyPolygon(wall).map((point) => toCanvasPoint(point));
       const ghost = new fabric.Polygon(polygon, {
         fill: 'rgba(148,163,184,0.08)',
         stroke: '#64748B',
