@@ -2,7 +2,7 @@ import * as turf from '@turf/turf';
 
 import type { JoinData, Point2D, Wall } from '../../../types';
 
-import { computeWallBodyPolygon } from './WallGeometry';
+import { computeWallBodyPolygon, computeWallPolygon } from './WallGeometry';
 import { computeWallJoinMap } from './WallJoinNetwork';
 
 const COMPONENT_TOLERANCE_MM = 2;
@@ -40,6 +40,7 @@ export interface WallUnionComponent {
   id: string;
   wallIds: string[];
   polygons: Point2D[][][];
+  junctionOverlays: Point2D[][][];
 }
 
 export interface WallUnionRenderData {
@@ -196,8 +197,8 @@ function openRing(ring: ReadonlyArray<RingCoordinate>): Point2D[] {
   );
 }
 
-function wallPolygonFeature(wall: Wall): PolygonFeature {
-  return turf.polygon([closeRing(computeWallBodyPolygon(wall))]);
+function wallPolygonFeature(wall: Wall, joins?: JoinData[]): PolygonFeature {
+  return turf.polygon([closeRing(computeWallPolygon(wall, joins))]);
 }
 
 function patchPolygonFeature(vertices: Point2D[]): PolygonFeature | null {
@@ -440,6 +441,45 @@ function endpointRawCapVertices(endpointRef: WallEndpointRef): {
   };
 }
 
+function endpointJoinForRef(
+  endpointRef: WallEndpointRef,
+  joinsMap: Map<string, JoinData[]>
+): JoinData | undefined {
+  return (joinsMap.get(endpointRef.wall.id) ?? []).find(
+    (join) => join.endpoint === endpointRef.endpoint
+  );
+}
+
+function endpointResolvedCapVertices(
+  endpointRef: WallEndpointRef,
+  joinsMap: Map<string, JoinData[]>
+): { leftVertex: Point2D; rightVertex: Point2D } {
+  const join = endpointJoinForRef(endpointRef, joinsMap);
+  if (!join) {
+    const raw = endpointRawCapVertices(endpointRef);
+    return endpointRef.endpoint === 'start'
+      ? {
+        leftVertex: raw.interiorVertex,
+        rightVertex: raw.exteriorVertex,
+      }
+      : {
+        leftVertex: raw.exteriorVertex,
+        rightVertex: raw.interiorVertex,
+      };
+  }
+
+  const resolved = resolveJoinEdgeVertices(endpointRef.wall, join);
+  return endpointRef.endpoint === 'start'
+    ? {
+      leftVertex: resolved.interiorVertex,
+      rightVertex: resolved.exteriorVertex,
+    }
+    : {
+      leftVertex: resolved.exteriorVertex,
+      rightVertex: resolved.interiorVertex,
+    };
+}
+
 function resolveJoinEdgeVertices(wall: Wall, join: JoinData): {
   interiorVertex: Point2D;
   exteriorVertex: Point2D;
@@ -489,7 +529,8 @@ function buildEndpointJoinPatchFeature(wall: Wall, join: JoinData): PolygonFeatu
 
 function buildEndpointJoinPatchFeatures(
   walls: Wall[],
-  joinsMap: Map<string, JoinData[]>
+  joinsMap: Map<string, JoinData[]>,
+  filter?: (join: JoinData) => boolean
 ): PolygonFeature[] {
   const wallsById = new Map(walls.map((wall) => [wall.id, wall]));
   const features: PolygonFeature[] = [];
@@ -501,6 +542,9 @@ function buildEndpointJoinPatchFeatures(
     }
 
     joins.forEach((join) => {
+      if (filter && !filter(join)) {
+        return;
+      }
       const feature = buildEndpointJoinPatchFeature(wall, join);
       if (feature) {
         features.push(feature);
@@ -511,7 +555,11 @@ function buildEndpointJoinPatchFeatures(
   return features;
 }
 
-function buildNodeCorePatchFeatures(walls: Wall[]): PolygonFeature[] {
+function buildNodeCorePatchFeatures(
+  walls: Wall[],
+  joinsMap: Map<string, JoinData[]>,
+  includeNode?: (node: EndpointNode) => boolean
+): PolygonFeature[] {
   const nodes = buildEndpointNodes(walls);
   const features: PolygonFeature[] = [];
 
@@ -519,23 +567,26 @@ function buildNodeCorePatchFeatures(walls: Wall[]): PolygonFeature[] {
     if (node.endpoints.length < 2) {
       continue;
     }
-
-    const anchors = node.endpoints.flatMap((endpoint) => [
-      copyPoint(endpoint.left.anchor),
-      copyPoint(endpoint.right.anchor),
-    ]);
-    const uniqueAnchors: Point2D[] = [];
-    anchors.forEach((anchor) => {
-      if (!uniqueAnchors.some((candidate) => pointDistance(candidate, anchor) <= COORDINATE_TOLERANCE_MM)) {
-        uniqueAnchors.push(anchor);
-      }
-    });
-
-    if (uniqueAnchors.length < 3) {
+    if (includeNode && !includeNode(node)) {
       continue;
     }
 
-    const ring = uniqueAnchors
+    const resolvedVertices = node.endpoints.flatMap((endpointRef) => {
+      const vertices = endpointResolvedCapVertices(endpointRef, joinsMap);
+      return [vertices.leftVertex, vertices.rightVertex];
+    });
+    const uniqueVertices: Point2D[] = [];
+    resolvedVertices.forEach((vertex) => {
+      if (!uniqueVertices.some((candidate) => pointDistance(candidate, vertex) <= COORDINATE_TOLERANCE_MM)) {
+        uniqueVertices.push(copyPoint(vertex));
+      }
+    });
+
+    if (uniqueVertices.length < 3) {
+      continue;
+    }
+
+    const ring = uniqueVertices
       .sort((a, b) => anchorAngleDeg(node.point, a) - anchorAngleDeg(node.point, b));
     const patch = patchPolygonFeature(ring);
     if (patch) {
@@ -546,19 +597,10 @@ function buildNodeCorePatchFeatures(walls: Wall[]): PolygonFeature[] {
   return features;
 }
 
-function unionWallComponent(
-  walls: Wall[],
-  joinsMap: Map<string, JoinData[]>
-): Point2D[][][] {
-  if (walls.length === 0) {
+function featureUnionPolygons(features: PolygonFeature[]): Point2D[][][] {
+  if (features.length === 0) {
     return [];
   }
-
-  const features = [
-    ...walls.map((wall) => wallPolygonFeature(wall)),
-    ...buildNodeCorePatchFeatures(walls),
-    ...buildEndpointJoinPatchFeatures(walls, joinsMap),
-  ];
 
   if (features.length === 1) {
     return [features[0].geometry.coordinates.map(openRing)];
@@ -576,6 +618,39 @@ function unionWallComponent(
   return features.map((feature) => feature.geometry.coordinates.map(openRing));
 }
 
+function unionWallComponent(
+  walls: Wall[],
+  joinsMap: Map<string, JoinData[]>
+): { polygons: Point2D[][][]; junctionOverlays: Point2D[][][] } {
+  if (walls.length === 0) {
+    return { polygons: [], junctionOverlays: [] };
+  }
+
+  const features = [
+    ...walls.map((wall) => wallPolygonFeature(wall, joinsMap.get(wall.id))),
+    ...buildNodeCorePatchFeatures(walls, joinsMap),
+  ];
+  const overlayFeatures = [
+    ...buildNodeCorePatchFeatures(
+      walls,
+      joinsMap,
+      (node) =>
+        node.endpoints.length >= 2 &&
+        !node.endpoints.some((endpointRef) => endpointJoinForRef(endpointRef, joinsMap)?.joinType === 'bevel')
+    ),
+    ...buildEndpointJoinPatchFeatures(
+      walls,
+      joinsMap,
+      (join) => join.joinType !== 'bevel'
+    ),
+  ];
+
+  return {
+    polygons: featureUnionPolygons(features),
+    junctionOverlays: featureUnionPolygons(overlayFeatures),
+  };
+}
+
 export function computeWallUnionRenderData(walls: Wall[]): WallUnionRenderData {
   const joinsMap = computeWallJoinMap(walls);
   const wallsById = new Map(walls.map((wall) => [wall.id, wall]));
@@ -588,10 +663,10 @@ export function computeWallUnionRenderData(walls: Wall[]): WallUnionRenderData {
       return {
         id: `wall-component-${index}`,
         wallIds,
-        polygons: unionWallComponent(componentWalls, joinsMap),
+        ...unionWallComponent(componentWalls, joinsMap),
       };
     })
-    .filter((component) => component.polygons.length > 0);
+    .filter((component) => component.polygons.length > 0 || component.junctionOverlays.length > 0);
 
   return {
     joinsMap,

@@ -51,7 +51,11 @@ export class WallPreview {
   }
 
   private componentPathData(component: WallUnionComponent): string {
-    return component.polygons
+    return this.polygonsPathData(component.polygons);
+  }
+
+  private polygonsPathData(polygons: Point2D[][][]): string {
+    return polygons
       .flatMap((polygon) =>
         polygon
           .filter((ring) => ring.length >= 3)
@@ -173,6 +177,19 @@ export class WallPreview {
       evented: false,
       objectCaching: false,
     });
+    const overlayPreviewPathData = this.polygonsPathData(previewComponent.junctionOverlays);
+    const overlayPreviewPath = overlayPreviewPathData
+      ? new fabric.Path(overlayPreviewPathData, {
+        fill: '#000000',
+        opacity: 0.85,
+        fillRule: 'evenodd',
+        stroke: 'transparent',
+        strokeWidth: 0,
+        selectable: false,
+        evented: false,
+        objectCaching: false,
+      })
+      : null;
 
     const centerPreviewLine = new fabric.Line(
       [
@@ -193,6 +210,7 @@ export class WallPreview {
     this.previewGroup = new fabric.Group(
       [
         mergedPreviewPath,
+        ...(overlayPreviewPath ? [overlayPreviewPath] : []),
         centerPreviewLine,
       ],
       {

@@ -267,7 +267,11 @@ export class WallRenderer {
   }
 
   private wallComponentPathData(component: WallUnionComponent): string {
-    return component.polygons
+    return this.componentPolygonsPathData(component.polygons);
+  }
+
+  private componentPolygonsPathData(polygons: Point2D[][][]): string {
+    return polygons
       .flatMap((polygon) =>
         polygon
           .filter((ring) => ring.length >= 3)
@@ -303,6 +307,21 @@ export class WallRenderer {
 
     this.canvas.add(mergedPath);
     this.componentObjects.push(mergedPath);
+
+    const overlayPathData = this.componentPolygonsPathData(component.junctionOverlays);
+    if (overlayPathData) {
+      const overlayPath = new fabric.Path(overlayPathData, {
+        fill: '#000000',
+        fillRule: 'evenodd',
+        stroke: 'transparent',
+        strokeWidth: 0,
+        selectable: false,
+        evented: false,
+        objectCaching: false,
+      });
+      this.canvas.add(overlayPath);
+      this.componentObjects.push(overlayPath);
+    }
   }
 
   private clearMergedComponents(): void {
