@@ -117,9 +117,11 @@ export function useWallTool({
   // Update renderer when walls change
   useEffect(() => {
     if (wallRendererRef.current && fabricRef.current) {
+      wallRendererRef.current.setRooms(rooms);
+      wallRendererRef.current.setRoomWallIds(rooms.flatMap((room) => room.wallIds));
       wallRendererRef.current.renderAllWalls(walls);
     }
-  }, [walls, fabricRef]);
+  }, [walls, rooms, fabricRef]);
 
   // Update selected wall highlights + control points
   useEffect(() => {

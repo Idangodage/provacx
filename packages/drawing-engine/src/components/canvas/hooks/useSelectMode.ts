@@ -537,6 +537,14 @@ export function useSelectMode({
     setProcessingStatus,
   });
 
+  const canRotateWall = useCallback((wall: Wall): boolean => {
+    if (wall.connectedWalls.length > 0) {
+      return false;
+    }
+
+    return !optionsRef.current.rooms.some((room) => room.wallIds.includes(wall.id));
+  }, []);
+
   useEffect(() => {
     optionsRef.current = {
       walls,
@@ -1421,6 +1429,10 @@ export function useSelectMode({
     }
 
     if (meta.controlType === 'wall-rotation-handle') {
+      if (!canRotateWall(wall)) {
+        isWallHandleDraggingRef.current = false;
+        return false;
+      }
       const connectedEndpoints: ConnectedEndpointRef[] = [];
       for (const connectedWallId of wall.connectedWalls) {
         const connectedWall = findWallById(connectedWallId);
@@ -1478,7 +1490,7 @@ export function useSelectMode({
     }
 
     return false;
-  }, [buildEndpointConstraints, findRoomById, findWallById, resetDragDynamics, showGhostWalls]);
+  }, [buildEndpointConstraints, canRotateWall, findRoomById, findWallById, resetDragDynamics, showGhostWalls]);
 
   const computePerpendicularSnap = useCallback(
     (state: EndpointDragState, candidatePoint: Point2D): { snapped: Point2D; line?: { start: Point2D; end: Point2D } } => {

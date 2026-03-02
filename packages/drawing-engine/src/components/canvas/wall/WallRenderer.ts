@@ -7,7 +7,7 @@
 import * as fabric from 'fabric';
 
 import { colorFromExposure, getArchitecturalMaterial, heatColorFromUValue } from '../../../attributes';
-import type { Point2D, Wall, WallColorMode, WallMaterial, JoinData } from '../../../types';
+import type { Point2D, Room, Wall, WallColorMode, WallMaterial, JoinData } from '../../../types';
 import { WALL_MATERIAL_COLORS } from '../../../types/wall';
 import {
   computeCornerBevelDotsForEndpoint,
@@ -22,6 +22,7 @@ import {
   computeMiterJoin,
   lineIntersection,
 } from './WallGeometry';
+import { computeWallSelectionComponents } from './WallSelectionGeometry';
 import { computeWallUnionRenderData, type WallUnionComponent } from './WallUnionGeometry';
 
 // =============================================================================
@@ -69,7 +70,10 @@ export class WallRenderer {
   private canvas: fabric.Canvas;
   private wallObjects: Map<string, WallGroup> = new Map();
   private componentObjects: fabric.Object[] = [];
+  private selectionComponentObjects: fabric.Object[] = [];
   private wallData: Map<string, Wall> = new Map();
+  private roomWallIds: Set<string> = new Set();
+  private rooms: Room[] = [];
   private showCenterLines: boolean = true;
   private pageHeight: number;
   private hatchPatterns: Map<WallMaterial, fabric.Pattern | null> = new Map();
@@ -161,6 +165,10 @@ export class WallRenderer {
     return wall.connectedWalls.includes(otherWall.id) || otherWall.connectedWalls.includes(wall.id);
   }
 
+  private canRotateWall(wall: Wall): boolean {
+    return wall.connectedWalls.length === 0 && !this.roomWallIds.has(wall.id);
+  }
+
   private endpointPoint(wall: Wall, endpoint: 'start' | 'end'): Point2D {
     return endpoint === 'start' ? wall.startPoint : wall.endPoint;
   }
@@ -243,6 +251,22 @@ export class WallRenderer {
   setShowLayerCountIndicators(show: boolean): void {
     this.showLayerCountIndicators = show;
     this.renderAllWalls(Array.from(this.wallData.values()));
+  }
+
+  setRoomWallIds(wallIds: Iterable<string>): void {
+    this.roomWallIds = new Set(wallIds);
+    if (this.selectedWallIds.size > 0) {
+      this.setSelectedWalls([...this.selectedWallIds]);
+    }
+  }
+
+  setRooms(rooms: Room[]): void {
+    this.rooms = rooms.map((room) => ({
+      ...room,
+      vertices: room.vertices.map((vertex) => ({ ...vertex })),
+      wallIds: [...room.wallIds],
+    }));
+    this.setRoomWallIds(this.rooms.flatMap((room) => room.wallIds));
   }
 
   private resolveWallVisualFill(wall: Wall): string | fabric.Pattern {
@@ -329,6 +353,42 @@ export class WallRenderer {
       this.canvas.remove(object);
     });
     this.componentObjects = [];
+  }
+
+  private clearSelectionComponents(): void {
+    this.selectionComponentObjects.forEach((object) => {
+      this.canvas.remove(object);
+    });
+    this.selectionComponentObjects = [];
+  }
+
+  private renderSelectionComponents(selectedWallIds: string[]): void {
+    const selectionComponents = computeWallSelectionComponents(
+      Array.from(this.wallData.values()),
+      this.rooms,
+      selectedWallIds
+    );
+    selectionComponents.forEach((component) => {
+      const rings = [...component.outerRings, ...component.innerRings];
+      const pathData = this.componentPolygonsPathData([rings]);
+      if (!pathData) {
+        return;
+      }
+
+      const outline = new fabric.Path(pathData, {
+        fill: 'transparent',
+        fillRule: 'evenodd',
+        stroke: '#1D4ED8',
+        strokeWidth: this.toSceneSize(2.5),
+        strokeLineJoin: 'round',
+        selectable: false,
+        evented: false,
+        objectCaching: false,
+      });
+
+      this.canvas.add(outline);
+      this.selectionComponentObjects.push(outline);
+    });
   }
 
   /**
@@ -964,6 +1024,8 @@ export class WallRenderer {
       evented: false,
     });
 
+    const showRotationControl = showAdvancedControls && this.canRotateWall(wall);
+
     const controls: fabric.FabricObject[] = [
       startHandleHit,
       startHandle,
@@ -982,6 +1044,8 @@ export class WallRenderer {
         interiorThicknessHandle,
         exteriorThicknessHandleHit,
         exteriorThicknessHandle,
+      ] : []),
+      ...(showRotationControl ? [
         rotationStem,
         rotationHandleHit,
         rotationHandle,
@@ -999,6 +1063,16 @@ export class WallRenderer {
    */
   setSelectedWalls(selectedWallIds: string[]): void {
     this.selectedWallIds = new Set(selectedWallIds);
+    const selectionComponents = computeWallSelectionComponents(
+      Array.from(this.wallData.values()),
+      this.rooms,
+      selectedWallIds
+    );
+    const combinedWallIds = new Set(
+      selectionComponents
+        .filter((component) => component.wallIds.length > 1 || component.innerRings.length > 0)
+        .flatMap((component) => component.wallIds)
+    );
 
     this.wallObjects.forEach((group, wallId) => {
       const outline = group
@@ -1008,7 +1082,7 @@ export class WallRenderer {
         .getObjects()
         .find((obj) => (obj as NamedObject).name === 'hoverOutline');
       if (outline) {
-        outline.set('visible', this.selectedWallIds.has(wallId));
+        outline.set('visible', this.selectedWallIds.has(wallId) && !combinedWallIds.has(wallId));
       }
       if (hoverOutline) {
         hoverOutline.set(
@@ -1023,6 +1097,9 @@ export class WallRenderer {
         this.removeControlPoints(wallId);
       }
     });
+
+    this.clearSelectionComponents();
+    this.renderSelectionComponents(selectedWallIds);
 
     this.selectedWallIds.forEach((wallId) => {
       if (this.wallObjects.has(wallId)) {
@@ -1073,6 +1150,7 @@ export class WallRenderer {
    */
   renderAllWalls(walls: Wall[]): void {
     this.clearMergedComponents();
+    this.clearSelectionComponents();
     this.wallObjects.forEach((obj) => {
       this.canvas.remove(obj);
     });
@@ -1739,11 +1817,13 @@ export class WallRenderer {
    */
   clearAllWalls(): void {
     this.clearMergedComponents();
+    this.clearSelectionComponents();
     this.wallObjects.forEach((obj) => {
       this.canvas.remove(obj);
     });
     this.wallObjects.clear();
     this.wallData.clear();
+    this.rooms = [];
     this.selectedWallIds.clear();
     this.hoveredWallId = null;
 
