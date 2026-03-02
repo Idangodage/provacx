@@ -118,10 +118,11 @@ const AUTO_TRIM_TOLERANCE_MM = 120;
 const STRAIGHT_WALL_MERGE_NODE_TOLERANCE_MM = 4;
 const STRAIGHT_WALL_MERGE_ANGLE_TOLERANCE_DEG = 6;
 const STRAIGHT_WALL_MERGE_THICKNESS_TOLERANCE_MM = 1;
-const ROOM_DETECTION_DEBOUNCE_MS = 120;
+const ROOM_DETECTION_FRAME_FALLBACK_MS = 16;
 const ELEVATION_REGEN_DEBOUNCE_MS = 120;
 
 let roomDetectionTimer: ReturnType<typeof setTimeout> | null = null;
+let roomDetectionFrame: number | null = null;
 let elevationRegenTimer: ReturnType<typeof setTimeout> | null = null;
 let lastRoomTopologyHash = '';
 const INITIAL_ELEVATION_VIEWS = createStandardElevationViews(
@@ -129,6 +130,42 @@ const INITIAL_ELEVATION_VIEWS = createStandardElevationViews(
   [],
   DEFAULT_ELEVATION_SETTINGS
 );
+
+function clearScheduledRoomDetection(): void {
+  if (roomDetectionTimer) {
+    clearTimeout(roomDetectionTimer);
+    roomDetectionTimer = null;
+  }
+  if (
+    roomDetectionFrame !== null &&
+    typeof window !== 'undefined' &&
+    typeof window.cancelAnimationFrame === 'function'
+  ) {
+    window.cancelAnimationFrame(roomDetectionFrame);
+  }
+  roomDetectionFrame = null;
+}
+
+function scheduleRoomDetection(runDetection: () => void): void {
+  if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+    if (roomDetectionFrame !== null) {
+      return;
+    }
+    roomDetectionFrame = window.requestAnimationFrame(() => {
+      roomDetectionFrame = null;
+      runDetection();
+    });
+    return;
+  }
+
+  if (roomDetectionTimer) {
+    return;
+  }
+  roomDetectionTimer = setTimeout(() => {
+    roomDetectionTimer = null;
+    runDetection();
+  }, ROOM_DETECTION_FRAME_FALLBACK_MS);
+}
 
 // Build a lookup map for architectural object definitions by id
 const objectDefMap = new Map(DEFAULT_ARCHITECTURAL_OBJECT_LIBRARY.map((d) => [d.id, d]));
@@ -1420,21 +1457,14 @@ export const useDrawingStore = create<DrawingState>()(
           });
         };
 
+        // Drag updates call this with debounce=true; keep those updates live by
+        // frame-throttling instead of resetting a trailing debounce on every move.
         if (options?.debounce) {
-          if (roomDetectionTimer) {
-            clearTimeout(roomDetectionTimer);
-          }
-          roomDetectionTimer = setTimeout(() => {
-            roomDetectionTimer = null;
-            runDetection();
-          }, ROOM_DETECTION_DEBOUNCE_MS);
+          scheduleRoomDetection(runDetection);
           return;
         }
 
-        if (roomDetectionTimer) {
-          clearTimeout(roomDetectionTimer);
-          roomDetectionTimer = null;
-        }
+        clearScheduledRoomDetection();
         runDetection();
       },
 

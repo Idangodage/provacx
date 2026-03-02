@@ -116,6 +116,10 @@ function polygonArea(points: Point2D[]): number {
   return area / 2;
 }
 
+function isFinitePoint(point: Point2D): boolean {
+  return Number.isFinite(point.x) && Number.isFinite(point.y);
+}
+
 function arePointsNear(a: Point2D, b: Point2D, tolerance = COMPONENT_TOLERANCE_MM): boolean {
   return pointDistance(a, b) <= tolerance;
 }
@@ -155,6 +159,9 @@ function normalizeRing(ring: Point2D[]): Point2D[] {
   const cleaned: Point2D[] = [];
 
   for (const point of ring) {
+    if (!isFinitePoint(point)) {
+      continue;
+    }
     const previous = cleaned[cleaned.length - 1];
     if (!previous || pointDistance(previous, point) > COORDINATE_TOLERANCE_MM) {
       cleaned.push({ x: point.x, y: point.y });
@@ -197,17 +204,33 @@ function openRing(ring: ReadonlyArray<RingCoordinate>): Point2D[] {
   );
 }
 
-function wallPolygonFeature(wall: Wall, joins?: JoinData[]): PolygonFeature {
-  return turf.polygon([closeRing(computeWallPolygon(wall, joins))]);
-}
-
-function patchPolygonFeature(vertices: Point2D[]): PolygonFeature | null {
+function makePolygonFeature(vertices: Point2D[]): PolygonFeature | null {
   const ring = normalizeRing(vertices);
   if (ring.length < 3 || Math.abs(polygonArea(ring)) < MIN_PATCH_AREA_MM2) {
     return null;
   }
 
-  return turf.polygon([closeRing(ring)]);
+  const closedRing = closeRing(ring);
+  if (closedRing.length < 4) {
+    return null;
+  }
+
+  try {
+    return turf.polygon([closedRing]);
+  } catch {
+    return null;
+  }
+}
+
+function wallPolygonFeature(wall: Wall, joins?: JoinData[]): PolygonFeature | null {
+  return (
+    makePolygonFeature(computeWallPolygon(wall, joins)) ??
+    makePolygonFeature(computeWallBodyPolygon(wall))
+  );
+}
+
+function patchPolygonFeature(vertices: Point2D[]): PolygonFeature | null {
+  return makePolygonFeature(vertices);
 }
 
 function wallsTouch(wall: Wall, otherWall: Wall): boolean {
@@ -627,7 +650,10 @@ function unionWallComponent(
   }
 
   const features = [
-    ...walls.map((wall) => wallPolygonFeature(wall, joinsMap.get(wall.id))),
+    ...walls.flatMap((wall) => {
+      const feature = wallPolygonFeature(wall, joinsMap.get(wall.id));
+      return feature ? [feature] : [];
+    }),
     ...buildNodeCorePatchFeatures(walls, joinsMap),
   ];
   const overlayFeatures = [

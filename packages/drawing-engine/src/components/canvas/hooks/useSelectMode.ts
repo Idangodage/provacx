@@ -1029,11 +1029,7 @@ export function useSelectMode({
 
       const current = findWallById(wallId);
       if (!current) {
-        const normalizedOptions =
-          options?.source === 'drag' && options.skipRoomDetection === undefined
-            ? { ...options, skipRoomDetection: true }
-            : options;
-        optionsRef.current.updateWall(wallId, updates, normalizedOptions);
+        optionsRef.current.updateWall(wallId, updates, options);
         wallUpdateCacheRef.current.set(wallId, cacheKey);
         return;
       }
@@ -1054,11 +1050,7 @@ export function useSelectMode({
         wallUpdateCacheRef.current.set(wallId, cacheKey);
         return;
       }
-      const normalizedOptions =
-        options?.source === 'drag' && options.skipRoomDetection === undefined
-          ? { ...options, skipRoomDetection: true }
-          : options;
-      optionsRef.current.updateWall(wallId, updates, normalizedOptions);
+      optionsRef.current.updateWall(wallId, updates, options);
       wallUpdateCacheRef.current.set(wallId, cacheKey);
     },
     [findWallById]
@@ -1126,11 +1118,7 @@ export function useSelectMode({
         return;
       }
 
-      const normalizedOptions =
-        options?.source === 'drag' && options.skipRoomDetection === undefined
-          ? { ...options, skipRoomDetection: true }
-          : options;
-      optionsRef.current.updateWalls(changedEntries, normalizedOptions);
+      optionsRef.current.updateWalls(changedEntries, options);
     },
     [findWallById]
   );
@@ -1154,11 +1142,7 @@ export function useSelectMode({
 
       const current = findWallById(wallId);
       if (!current) {
-        const normalizedOptions =
-          options?.source === 'drag' && options.skipRoomDetection === undefined
-            ? { ...options, skipRoomDetection: true }
-            : options;
-        optionsRef.current.updateWallBevel(wallId, end, bevel, normalizedOptions);
+        optionsRef.current.updateWallBevel(wallId, end, bevel, options);
         wallBevelUpdateCacheRef.current.set(bevelCacheKey, cacheKey);
         return;
       }
@@ -1175,11 +1159,7 @@ export function useSelectMode({
         wallBevelUpdateCacheRef.current.set(bevelCacheKey, cacheKey);
         return;
       }
-      const normalizedOptions =
-        options?.source === 'drag' && options.skipRoomDetection === undefined
-          ? { ...options, skipRoomDetection: true }
-          : options;
-      optionsRef.current.updateWallBevel(wallId, end, bevel, normalizedOptions);
+      optionsRef.current.updateWallBevel(wallId, end, bevel, options);
       wallBevelUpdateCacheRef.current.set(bevelCacheKey, cacheKey);
     },
     [findWallById]
@@ -1459,7 +1439,6 @@ export function useSelectMode({
             optionsRef.current.updateWall(id, updates, {
               skipHistory: true,
               source: 'drag',
-              skipRoomDetection: true,
             }),
         }),
       };
@@ -1597,7 +1576,6 @@ export function useSelectMode({
         {
           skipHistory: true,
           source: 'drag',
-          skipRoomDetection: true,
         }
       );
 
@@ -1804,7 +1782,7 @@ export function useSelectMode({
       });
       updateWallsIfChanged(
         roomCornerUpdates,
-        { skipHistory: true, source: 'drag', skipRoomDetection: true }
+        { skipHistory: true, source: 'drag' }
       );
 
       const areaM2 = GeometryEngine.calculateRoomAreaM2({ vertices: nextVertices });
@@ -1902,7 +1880,7 @@ export function useSelectMode({
       });
       updateWallsIfChanged(
         roomScaleUpdates,
-        { skipHistory: true, source: 'drag', skipRoomDetection: true }
+        { skipHistory: true, source: 'drag' }
       );
 
       const areaM2 = GeometryEngine.calculateRoomAreaM2({ vertices: nextVertices });
