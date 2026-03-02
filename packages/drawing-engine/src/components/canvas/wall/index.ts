@@ -15,7 +15,40 @@ export { WallPreview } from './WallPreview';
 export { RoomConfigPopup } from './RoomConfigPopup';
 export type { RoomConfigPopupProps } from './RoomConfigPopup';
 
-export * from './WallGeometry';
+export {
+  normalize,
+  perpendicular,
+  direction,
+  scale,
+  add,
+  subtract,
+  dot,
+  cross,
+  distance,
+  distanceSq,
+  lerp,
+  midpoint,
+  magnitude,
+  lineIntersection,
+  segmentIntersection,
+  projectPointOnLine,
+  computeOffsetLines,
+  refreshOffsetLines,
+  wallAngle,
+  angleBetweenWalls,
+  signedAngleBetween,
+  determineJoinType,
+  computeMiterJoin,
+  computeWallBodyPolygon,
+  computeWallPolygon,
+  isPolygonSelfIntersecting,
+  wallLength,
+  wallCenter,
+  wallBounds,
+  isPointInsideWall,
+  distanceToWallCenterLine,
+} from './WallGeometry';
+export type { MiterJoinResult } from './WallGeometry';
 export {
   snapToGrid,
   snapToEndpoint,
