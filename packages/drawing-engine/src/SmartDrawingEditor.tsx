@@ -30,6 +30,7 @@ import {
   SplitSquareVertical,
   ArrowUpFromLine,
   ArrowRightFromLine,
+  Box,
 } from 'lucide-react';
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 
@@ -42,6 +43,7 @@ import {
   SymbolPalette,
   ZoomIndicator,
   CoordinatesDisplay,
+  IsometricViewCanvas,
 } from './components';
 import { ElevationViewCanvas } from './components/canvas/elevation';
 import { MM_TO_PX } from './components/canvas';
@@ -1188,6 +1190,19 @@ export function SmartDrawingEditor({
                 <ArrowRightFromLine size={12} />
                 End
               </button>
+              <button
+                type="button"
+                onClick={() => setEditorViewMode('isometric')}
+                className={`inline-flex items-center gap-1 rounded px-2 py-1 text-[10px] font-medium transition-colors ${
+                  editorViewMode === 'isometric'
+                    ? 'bg-amber-200 text-amber-900 border border-amber-300'
+                    : 'text-slate-500 hover:bg-amber-50 border border-transparent'
+                }`}
+                title="Isometric view"
+              >
+                <Box size={12} />
+                Iso
+              </button>
             </div>
           </div>
 
@@ -1276,6 +1291,18 @@ export function SmartDrawingEditor({
               elevationSettings={elevationSettings}
               viewLabel="END ELEVATION"
               roomHeightMm={rooms[0]?.properties3D?.ceilingHeight ?? 2700}
+            />
+          )}
+
+          {editorViewMode === 'isometric' && (
+            <IsometricViewCanvas
+              className="flex-1"
+              walls={walls}
+              rooms={rooms}
+              symbols={symbols}
+              hvacElements={hvacElements}
+              objectDefinitions={architecturalObjects}
+              viewLabel="ISOMETRIC VIEW"
             />
           )}
         </div>

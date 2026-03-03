@@ -22,6 +22,7 @@ export {
   DrawingPageLayout,
   RoomLayer,
   RoomTag,
+  IsometricViewCanvas,
   ZoomIndicator,
   CoordinatesDisplay,
   type DrawingCanvasProps,
@@ -35,6 +36,7 @@ export {
   type DrawingPageLayoutProps,
   type RoomLayerProps,
   type RoomTagProps,
+  type IsometricViewCanvasProps,
 } from './components';
 
 // Spatial hash for interaction proximity detection

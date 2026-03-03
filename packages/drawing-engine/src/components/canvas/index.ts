@@ -50,6 +50,9 @@ export * from './object';
 // Elevation module
 export * from './elevation';
 
+// Isometric module
+export * from './isometric';
+
 // HVAC module
 export * from './hvac';
 

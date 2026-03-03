@@ -32,7 +32,7 @@ export type SectionLineKind = 'elevation' | 'section';
 export type ElevationViewKind = 'north' | 'south' | 'east' | 'west' | 'custom';
 export type ElevationRenderMode = 'simplified' | 'realistic';
 export type SectionLineDirection = 1 | -1;
-export type EditorViewMode = 'plan' | 'split' | 'front-elevation' | 'end-elevation';
+export type EditorViewMode = 'plan' | 'split' | 'front-elevation' | 'end-elevation' | 'isometric';
 export type HvacElementType = 'ducted-ac' | 'split-ac' | 'diffuser' | 'return-grille';
 export type HvacMountType = 'ceiling' | 'floor' | 'wall';
 

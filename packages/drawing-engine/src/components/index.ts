@@ -14,4 +14,5 @@ export { PageLayout as DrawingPageLayout, type PageLayoutProps as DrawingPageLay
 export { RoomLayer, type RoomLayerProps } from './RoomLayer';
 export { RoomTag, type RoomTagProps } from './RoomTag';
 export { ElevationViewCanvas, type ElevationViewCanvasProps } from './canvas/elevation';
+export { IsometricViewCanvas, type IsometricViewCanvasProps } from './canvas/isometric';
 export { HvacPlanRenderer } from './canvas/hvac';
