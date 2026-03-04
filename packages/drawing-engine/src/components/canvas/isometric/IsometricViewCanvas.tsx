@@ -12,10 +12,11 @@ const VIEW_MARGIN = 1.14;
 const EPSILON = 0.001;
 const DEFAULT_EMPTY_SIZE = { width: 800, height: 600 };
 const ISO_CAMERA_DIRECTION = new THREE.Vector3(1, 1, 1).normalize();
+const CAMERA_FOV_DEGREES = 40;
 const MIN_POLAR_ANGLE = THREE.MathUtils.degToRad(20);
 const MAX_POLAR_ANGLE = THREE.MathUtils.degToRad(88);
-const MIN_ZOOM = 0.25;
-const MAX_ZOOM = 16;
+const MIN_CAMERA_DISTANCE = 250;
+const MAX_CAMERA_DISTANCE = 160000;
 
 type WallPalette = {
   top: string;
@@ -53,7 +54,7 @@ type ScreenLabel = {
 type SceneState = {
   renderer: THREE.WebGLRenderer;
   scene: THREE.Scene;
-  camera: THREE.OrthographicCamera;
+  camera: THREE.PerspectiveCamera;
   controls: OrbitControls;
   contentRoot: THREE.Group;
   geometryRoot: THREE.Group;
@@ -218,44 +219,45 @@ function ensurePlanBounds(points: Point2D[]): { minX: number; maxX: number; minY
 }
 
 function fitCameraToBox(
-  camera: THREE.OrthographicCamera,
+  camera: THREE.PerspectiveCamera,
   box: THREE.Box3,
   width: number,
   height: number,
   viewDirection: THREE.Vector3 = ISO_CAMERA_DIRECTION
 ): THREE.Vector3 {
+  const aspect = Math.max(width / Math.max(height, 1), 0.1);
+  camera.aspect = aspect;
+
   if (box.isEmpty()) {
-    camera.left = -4000;
-    camera.right = 4000;
-    camera.top = 3000;
-    camera.bottom = -3000;
-    camera.zoom = 1;
+    camera.fov = CAMERA_FOV_DEGREES;
     camera.near = 1;
     camera.far = 50000;
     camera.position.set(6000, 6000, 6000);
     camera.lookAt(0, 0, 0);
     camera.updateProjectionMatrix();
+    camera.updateMatrixWorld(true);
     return new THREE.Vector3(0, 0, 0);
   }
 
   const sphere = box.getBoundingSphere(new THREE.Sphere());
   const center = sphere.center.clone();
   const radius = Math.max(sphere.radius, 1000);
-  const distance = radius * 1.9;
-  const aspect = Math.max(width / Math.max(height, 1), 0.1);
-  const halfHeight = radius * VIEW_MARGIN;
   const safeDirection = viewDirection.clone().normalize();
+  const verticalHalfFov = THREE.MathUtils.degToRad(camera.fov / 2);
+  const horizontalHalfFov = Math.atan(Math.tan(verticalHalfFov) * aspect);
+  const limitingHalfFov = Math.max(
+    Math.min(verticalHalfFov, horizontalHalfFov),
+    THREE.MathUtils.degToRad(5)
+  );
+  const distance = Math.max(
+    (radius / Math.sin(limitingHalfFov)) * VIEW_MARGIN,
+    radius * 2.25
+  );
 
   camera.up.set(0, 0, 1);
   camera.position.copy(center).addScaledVector(safeDirection, distance);
-  camera.zoom = 1;
-  camera.near = 1;
-  camera.far = distance * 6 + radius * 2;
-  camera.top = halfHeight;
-  camera.bottom = -halfHeight;
-  camera.right = halfHeight * aspect;
-  camera.left = -halfHeight * aspect;
-
+  camera.near = Math.max(1, distance - radius * 3);
+  camera.far = distance + radius * 6;
   camera.lookAt(center);
   camera.updateProjectionMatrix();
   camera.updateMatrixWorld(true);
@@ -263,22 +265,50 @@ function fitCameraToBox(
 }
 
 function resizeCameraFrustum(
-  camera: THREE.OrthographicCamera,
+  camera: THREE.PerspectiveCamera,
   width: number,
   height: number
 ): void {
-  const aspect = Math.max(width / Math.max(height, 1), 0.1);
-  const halfHeight = Math.max((camera.top - camera.bottom) / 2, 1);
-  camera.top = halfHeight;
-  camera.bottom = -halfHeight;
-  camera.right = halfHeight * aspect;
-  camera.left = -halfHeight * aspect;
+  camera.aspect = Math.max(width / Math.max(height, 1), 0.1);
   camera.updateProjectionMatrix();
+}
+
+function updateCameraClipping(
+  camera: THREE.PerspectiveCamera,
+  box: THREE.Box3
+): void {
+  if (box.isEmpty()) {
+    return;
+  }
+
+  const sphere = box.getBoundingSphere(new THREE.Sphere());
+  const radius = Math.max(sphere.radius, 1000);
+  const distance = Math.max(camera.position.distanceTo(sphere.center), radius * 0.5);
+  const near = Math.max(1, distance - radius * 3);
+  const far = distance + radius * 6;
+
+  if (Math.abs(camera.near - near) > 0.5 || Math.abs(camera.far - far) > 1) {
+    camera.near = near;
+    camera.far = far;
+    camera.updateProjectionMatrix();
+  }
+}
+
+function updateControlDistanceLimits(controls: OrbitControls, box: THREE.Box3): void {
+  if (box.isEmpty()) {
+    controls.minDistance = MIN_CAMERA_DISTANCE;
+    controls.maxDistance = MAX_CAMERA_DISTANCE;
+    return;
+  }
+
+  const radius = Math.max(box.getBoundingSphere(new THREE.Sphere()).radius, 1000);
+  controls.minDistance = Math.max(MIN_CAMERA_DISTANCE, radius * 0.3);
+  controls.maxDistance = Math.max(MAX_CAMERA_DISTANCE / 16, radius * 18);
 }
 
 function projectLabels(
   anchors: LabelAnchor[],
-  camera: THREE.OrthographicCamera,
+  camera: THREE.Camera,
   width: number,
   height: number
 ): ScreenLabel[] {
@@ -556,6 +586,10 @@ export function IsometricViewCanvas({
 
     const { renderer, scene, camera } = sceneState;
     const { width, height } = sizeRef.current;
+    const box = boundsRef.current;
+    if (box) {
+      updateCameraClipping(camera, box);
+    }
     renderer.render(scene, camera);
     setScreenLabels(projectLabels(labelAnchorsRef.current, camera, width, height));
   }, []);
@@ -598,7 +632,7 @@ export function IsometricViewCanvas({
     const scene = new THREE.Scene();
     scene.background = new THREE.Color('#f5efe1');
 
-    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 50000);
+    const camera = new THREE.PerspectiveCamera(CAMERA_FOV_DEGREES, 1, 1, 50000);
     camera.up.set(0, 0, 1);
 
     const controls = new OrbitControls(camera, canvas);
@@ -614,8 +648,8 @@ export function IsometricViewCanvas({
     controls.panSpeed = 1.1;
     controls.minPolarAngle = MIN_POLAR_ANGLE;
     controls.maxPolarAngle = MAX_POLAR_ANGLE;
-    controls.minZoom = MIN_ZOOM;
-    controls.maxZoom = MAX_ZOOM;
+    controls.minDistance = MIN_CAMERA_DISTANCE;
+    controls.maxDistance = MAX_CAMERA_DISTANCE;
     controls.mouseButtons = {
       LEFT: THREE.MOUSE.ROTATE,
       MIDDLE: THREE.MOUSE.DOLLY,
@@ -901,16 +935,13 @@ export function IsometricViewCanvas({
     const box = new THREE.Box3().setFromObject(geometryRoot);
     boundsRef.current = box.clone();
     controls.enabled = true;
+    updateControlDistanceLimits(controls, box);
     if (!hasAutoFitRef.current || !box.containsPoint(controls.target)) {
       const target = fitCameraToBox(camera, box, width, height);
       controls.target.copy(target);
       hasAutoFitRef.current = true;
     } else {
-      const sphere = box.getBoundingSphere(new THREE.Sphere());
-      const distance = camera.position.distanceTo(controls.target);
-      camera.near = 1;
-      camera.far = Math.max(distance * 6 + sphere.radius * 2, 5000);
-      camera.updateProjectionMatrix();
+      updateCameraClipping(camera, box);
     }
     controls.update();
     renderRequestedRef.current = true;
