@@ -379,8 +379,8 @@ export interface WallSettings {
   showSectionReferenceLines: boolean;
   snapToGrid: boolean;
   gridSize: number;               // snap grid size (mm), default 100
-  endpointSnapTolerance: number;  // snap tolerance in pixels, default 15
-  midpointSnapTolerance: number;  // midpoint snap tolerance in pixels, default 18
+  endpointSnapTolerance: number;  // [SNAP SCALE FIX] snap tolerance in SCREEN PIXELS (not mm), default 18px — zoom-corrected inside snapWallPoint
+  midpointSnapTolerance: number;  // [SNAP SCALE FIX] midpoint snap tolerance in SCREEN PIXELS (not mm), default 14px — zoom-corrected inside snapWallPoint
   chainModeEnabled: boolean;      // auto-chain walls
 }
 
@@ -466,9 +466,9 @@ export const DEFAULT_WALL_THICKNESS: Record<WallLayer, number> = {
 };
 
 export const WALL_MATERIAL_COLORS: Record<WallMaterial, { fill: string; stroke: string; pattern?: 'hatch' }> = {
-  brick: { fill: '#E3E3E3', stroke: '#000000', pattern: 'hatch' },
-  concrete: { fill: '#D9D9D9', stroke: '#000000' },
-  partition: { fill: '#ECECEC', stroke: '#000000' },
+  brick: { fill: '#B0B0B0', stroke: '#000000', pattern: 'hatch' },
+  concrete: { fill: '#A0A0A0', stroke: '#000000' },
+  partition: { fill: '#BABABA', stroke: '#000000' },
 };
 
 export const DEFAULT_WALL_SETTINGS: WallSettings = {
@@ -487,8 +487,8 @@ export const DEFAULT_WALL_SETTINGS: WallSettings = {
   showSectionReferenceLines: true,
   snapToGrid: true,
   gridSize: 100,
-  endpointSnapTolerance: 15,
-  midpointSnapTolerance: 18,
+  endpointSnapTolerance: 18,  // [SNAP SCALE FIX] screen pixels, zoom-corrected inside snapWallPoint
+  midpointSnapTolerance: 14,  // [SNAP SCALE FIX] screen pixels, zoom-corrected inside snapWallPoint
   chainModeEnabled: true,
 };
 

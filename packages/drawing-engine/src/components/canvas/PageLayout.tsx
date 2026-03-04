@@ -26,8 +26,8 @@ export const PageLayout: React.FC<PageLayoutProps> = ({
   zoom,
   panOffset,
   showPage = true,
-  backgroundColor = '#fefcf7',
-  borderColor = 'rgba(217, 177, 117, 0.9)',
+  backgroundColor = '#ffffff',
+  borderColor = '#000000',
   shadow = '0 20px 45px rgba(15, 23, 42, 0.15)',
   originOffset = { x: 0, y: 0 },
 }) => {

@@ -12,6 +12,8 @@ export type { WallRenderOptions } from './WallRenderer';
 
 export { WallPreview } from './WallPreview';
 
+export { WallSnapIndicatorRenderer } from './WallSnapIndicatorRenderer'; // [SNAP WIRE]
+
 export { RoomConfigPopup } from './RoomConfigPopup';
 export type { RoomConfigPopupProps } from './RoomConfigPopup';
 
@@ -59,3 +61,10 @@ export {
   // Renamed export to avoid conflict with canvas/snapping.ts
   applyOrthogonalConstraint as applyWallOrthogonalConstraint,
 } from './WallSnapping';
+export type { EnhancedSnapResult, SnapGuideLine } from './WallSnapping'; // [SNAP WIRE]
+export {
+  refreshAllWalls,
+  refreshAfterPointMove,
+  validateWallPolygon,
+  refreshAllWallGeometry,
+} from './WallUpdatePipeline'; // [PATCH APPLIED]

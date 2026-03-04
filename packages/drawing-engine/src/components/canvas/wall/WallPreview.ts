@@ -180,8 +180,8 @@ export class WallPreview {
     const overlayPreviewPathData = this.polygonsPathData(previewComponent.junctionOverlays);
     const overlayPreviewPath = overlayPreviewPathData
       ? new fabric.Path(overlayPreviewPathData, {
-        fill: '#000000',
-        opacity: 0.85,
+        fill: materialColors.fill,
+        opacity: 0.55,
         fillRule: 'evenodd',
         stroke: 'transparent',
         strokeWidth: 0,

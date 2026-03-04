@@ -142,6 +142,7 @@ export function DrawingCanvas({
 }: DrawingCanvasProps) {
     // Core refs
     const canvasRef = useRef<HTMLCanvasElement>(null);
+    const snapOverlayRef = useRef<HTMLCanvasElement>(null); // [SNAP WIRE] overlay for snap indicators
     const outerRef = useRef<HTMLDivElement>(null);
     const hostRef = useRef<HTMLDivElement>(null);
     const fabricRef = useRef<fabric.Canvas | null>(null);
@@ -1123,7 +1124,9 @@ export function DrawingCanvas({
         wallDrawingState,
         wallSettings,
         zoom: viewportZoom,
+        panOffset,
         pageHeight: pageConfig.height,
+        overlayCanvasRef: snapOverlayRef, // [SNAP WIRE]
         startWallDrawing,
         updateWallPreview,
         commitWall,
@@ -1315,12 +1318,23 @@ export function DrawingCanvas({
         onCanvasReady?.(canvas);
         setViewportSize({ width: outer.clientWidth, height: outer.clientHeight });
 
+        // [SNAP WIRE] Size overlay canvas to match fabric canvas
+        if (snapOverlayRef.current) {
+            snapOverlayRef.current.width = host.clientWidth;
+            snapOverlayRef.current.height = host.clientHeight;
+        }
+
         const resizeObserver = new ResizeObserver((entries) => {
             for (const entry of entries) {
                 const { width, height } = entry.contentRect;
                 if (entry.target === host) {
                     canvas.setDimensions({ width, height });
                     canvas.renderAll();
+                    // [SNAP WIRE] Keep overlay in sync
+                    if (snapOverlayRef.current) {
+                        snapOverlayRef.current.width = width;
+                        snapOverlayRef.current.height = height;
+                    }
                 }
                 if (entry.target === outer) {
                     setViewportSize({ width, height });
@@ -1369,10 +1383,11 @@ export function DrawingCanvas({
         ];
         canvas.setViewportTransform(viewportTransform);
         roomRendererRef.current?.setViewportZoom(viewportZoom);
+        wallRenderer?.setViewportZoom(viewportZoom);
         canvas.requestRenderAll();
         zoomRef.current = viewportZoom;
         panOffsetRef.current = panOffset;
-    }, [viewportZoom, panOffset]);
+    }, [viewportZoom, panOffset, wallRenderer]);
 
     useEffect(() => {
         wallRenderer?.setHoveredWall(hoveredElementId ?? null);
@@ -1386,18 +1401,18 @@ export function DrawingCanvas({
 
     useEffect(() => {
         roomRendererRef.current?.renderAllRooms(rooms);
-    }, [rooms]);
+    }, [rooms, fabricCanvas]);
 
     useEffect(() => {
         roomRendererRef.current?.setShowTemperatureIcons(wallSettings.showRoomTemperatureIcons);
         roomRendererRef.current?.setShowVentilationBadges(wallSettings.showRoomVentilationBadges);
-    }, [wallSettings.showRoomTemperatureIcons, wallSettings.showRoomVentilationBadges]);
+    }, [wallSettings.showRoomTemperatureIcons, wallSettings.showRoomVentilationBadges, fabricCanvas]);
 
     useEffect(() => {
         if (!dimensionRendererRef.current) return;
         dimensionRendererRef.current.setContext(walls, rooms, dimensionSettings);
         dimensionRendererRef.current.renderAllDimensions(dimensions);
-    }, [walls, rooms, dimensions, dimensionSettings]);
+    }, [walls, rooms, dimensions, dimensionSettings, fabricCanvas]);
 
     useEffect(() => {
         const roomIdSet = new Set(rooms.map((room) => room.id));
@@ -1430,11 +1445,11 @@ export function DrawingCanvas({
     useEffect(() => {
         if (!objectRendererRef.current) return;
         objectRendererRef.current.setDefinitions(objectDefinitions);
-    }, [objectDefinitions]);
+    }, [objectDefinitions, fabricCanvas]);
 
     useEffect(() => {
         objectRendererRef.current?.renderAll(symbols);
-    }, [symbols, objectDefinitions]);
+    }, [symbols, objectDefinitions, fabricCanvas]);
 
     useEffect(() => {
         const symbolIdSet = new Set(symbols.map((symbol) => symbol.id));
@@ -1454,13 +1469,13 @@ export function DrawingCanvas({
         if (!sectionLineRendererRef.current) return;
         sectionLineRendererRef.current.setShowReferenceIndicators(wallSettings.showSectionReferenceLines);
         sectionLineRendererRef.current.renderAll(sectionLines);
-    }, [sectionLines, wallSettings.showSectionReferenceLines]);
+    }, [sectionLines, wallSettings.showSectionReferenceLines, fabricCanvas]);
 
     // Render HVAC elements on plan canvas
     useEffect(() => {
         if (!hvacRendererRef.current) return;
         hvacRendererRef.current.renderAll(hvacElements);
-    }, [hvacElements]);
+    }, [hvacElements, fabricCanvas]);
 
     useEffect(() => {
         const sectionIds = new Set(sectionLines.map((line) => line.id));
@@ -1803,13 +1818,18 @@ export function DrawingCanvas({
             }
 
             // Handle wall tool movement - convert from pixels to mm
-            if (tool === 'wall' && isWallDrawing) {
+            // Show snap indicators on hover even before drawing starts
+            if (tool === 'wall') {
                 const wallPoint = {
                     x: rawPoint.x / MM_TO_PX,
                     y: rawPoint.y / MM_TO_PX,
                 };
                 handleWallMouseMove(wallPoint);
-                return;
+                if (!isWallDrawing) {
+                    // Don't return early — allow other handlers below to still fire
+                    // But snap indicators are already rendered by handleWallMouseMove
+                }
+                if (isWallDrawing) return;
             }
 
             if (tool === 'section-line' && sectionLineDrawingState.isDrawing) {
@@ -2503,6 +2523,12 @@ export function DrawingCanvas({
                     gridSubdivisions={safeGridSubdivisions}
                 />
                 <canvas ref={canvasRef} className="relative z-[2] block" />
+                {/* [SNAP WIRE] Overlay canvas for snap indicators — sits on top, pointer-events: none */}
+                <canvas
+                    ref={snapOverlayRef}
+                    className="absolute left-0 top-0 z-[10] block"
+                    style={{ pointerEvents: 'none' }}
+                />
             </div>
 
             {/* Room Configuration Popup */}

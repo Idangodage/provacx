@@ -52,7 +52,14 @@ import {
   wallCenter as computeWallCenter,
   wallBounds,
   distance as pointDistance,
+  refreshOffsetLines, // [PATCH APPLIED]
+  isPolygonSelfIntersecting, // [PATCH APPLIED]
 } from './WallGeometry';
+import {
+  refreshAllWalls, // [PATCH APPLIED]
+  refreshAfterPointMove, // [PATCH APPLIED]
+  validateWallPolygon, // [PATCH APPLIED]
+} from './WallUpdatePipeline';
 import { computeWallSelectionComponents } from './WallSelectionGeometry';
 import { computeWallUnionRenderData, type WallUnionComponent } from './WallUnionGeometry';
 import type { SnapGuideLine, EnhancedSnapResult } from './WallSnapping';
@@ -114,46 +121,47 @@ export const VISUAL_CONFIG = {
   centerLineWidth: 1,
 
   // Selection
-  selectionStroke: '#1D4ED8',
-  selectionStrokeWidth: 2.5, // in screen pixels, scaled to scene
+  selectionStroke: '#2563EB',
+  selectionStrokeWidth: 2, // in screen pixels, scaled to scene
   hoverStroke: '#059669',
-  hoverStrokeWidth: 2,
+  hoverStrokeWidth: 1.5,
 
-  // Control handles
-  endpointRadius: 6.5,
-  endpointStroke: 2.8,
+  // Control handles — all sizes in screen pixels (zoom-independent)
+  endpointRadius: 7,
+  endpointStroke: 2,
   endpointFill: '#FFFFFF',
-  endpointStrokeColor: '#1D4ED8',
+  endpointStrokeColor: '#2563EB',
+  endpointShadow: 'rgba(37, 99, 235, 0.3)',
 
-  bevelRadius: 5.5,
+  bevelRadius: 5,
   bevelStroke: 1.5,
   bevelOuterFill: '#FF6B35',
   bevelInnerFill: '#4ECDC4',
 
-  thicknessRadius: 6,
+  thicknessRadius: 5,
   thicknessFill: '#F0FDFA',
   thicknessStroke: '#0F766E',
 
-  centerHandleRadius: 11,
-  centerHandleFill: '#DBEAFE',
-  centerHandleStroke: '#1E40AF',
-  crossHalf: 5,
+  centerHandleRadius: 10,
+  centerHandleFill: '#EFF6FF',
+  centerHandleStroke: '#2563EB',
+  crossHalf: 4.5,
   crossStroke: '#1E3A8A',
-  crossStrokeWidth: 1.8,
+  crossStrokeWidth: 1.5,
 
-  rotationRadius: 8.5,
+  rotationRadius: 7.5,
   rotationStroke: '#15803D',
   rotationLabelColor: '#166534',
-  rotationStemStroke: 1.4,
+  rotationStemStroke: 1.2,
   rotationStemDash: 4,
   rotationDistanceMm: 300,
 
   // Hit target radii (screen pixels)
-  endpointHitRadius: 16,
-  bevelHitRadius: 14,
-  thicknessHitRadius: 16,
-  centerHitRadius: 16,
-  rotationHitRadius: 16,
+  endpointHitRadius: 14,
+  bevelHitRadius: 12,
+  thicknessHitRadius: 14,
+  centerHitRadius: 14,
+  rotationHitRadius: 14,
 
   // [NEW] Dimension labels
   dimensionFontSize: 11,
@@ -199,6 +207,9 @@ export class WallRenderer {
   private showLayerCountIndicators: boolean = false;
   private hoveredWallId: string | null = null;
 
+  // Track zoom for zoom-resilient control point sizing
+  private lastZoom: number = 1;
+
   // [NEW] Snap indicator objects (cleared on each snap update)
   private snapIndicatorObjects: fabric.Object[] = [];
 
@@ -235,7 +246,7 @@ export class WallRenderer {
 
     if (!ctx) return null;
 
-    ctx.fillStyle = '#E3E3E3';
+    ctx.fillStyle = '#B0B0B0';
     ctx.fillRect(0, 0, patternSize, patternSize);
     ctx.strokeStyle = strokeColor;
     ctx.lineWidth = 1;
@@ -390,6 +401,46 @@ export class WallRenderer {
     this.setRoomWallIds(this.rooms.flatMap((room) => room.wallIds));
   }
 
+  /**
+   * React to zoom-level changes by refreshing all zoom-dependent visuals:
+   * control point sizes, selection/hover outlines, dimension labels.
+   * This ensures consistent screen-pixel sizes regardless of zoom.
+   */
+  setViewportZoom(zoom: number): void {
+    const prevZoom = this.lastZoom;
+    this.lastZoom = zoom;
+
+    // Skip if zoom didn't meaningfully change (< 0.5% difference)
+    if (Math.abs(zoom - prevZoom) / Math.max(prevZoom, 0.01) < 0.005) return;
+
+    // Refresh selection outlines stroke widths
+    this.wallObjects.forEach((group) => {
+      const selOutline = group.getObjects().find((obj) => (obj as NamedObject).name === 'selectionOutline');
+      const hovOutline = group.getObjects().find((obj) => (obj as NamedObject).name === 'hoverOutline');
+      if (selOutline) selOutline.set('strokeWidth', this.toSceneSize(VISUAL_CONFIG.selectionStrokeWidth));
+      if (hovOutline) hovOutline.set('strokeWidth', this.toSceneSize(VISUAL_CONFIG.hoverStrokeWidth));
+    });
+
+    // Refresh merged selection component outlines
+    this.selectionComponentObjects.forEach((obj) => {
+      obj.set('strokeWidth', this.toSceneSize(VISUAL_CONFIG.selectionStrokeWidth));
+    });
+
+    // Recreate control points at current zoom (only if there's a selection)
+    if (this.selectedWallIds.size > 0) {
+      for (const wallId of this.selectedWallIds) {
+        this.removeControlPoints(wallId);
+        if (this.wallObjects.has(wallId)) {
+          this.createControlPoints(wallId);
+        }
+      }
+      // Refresh dimension labels
+      this.renderDimensionLabels([...this.selectedWallIds]);
+    }
+
+    this.canvas.requestRenderAll();
+  }
+
   // ─── Fill Resolution ────────────────────────────────────────────────────
 
   private resolveWallVisualFill(wall: Wall): string | fabric.Pattern {
@@ -458,7 +509,7 @@ export class WallRenderer {
     const overlayPathData = this.componentPolygonsPathData(component.junctionOverlays);
     if (overlayPathData) {
       const overlayPath = new fabric.Path(overlayPathData, {
-        fill: '#000000',
+        fill: this.resolveWallVisualFill(representativeWall),
         fillRule: 'evenodd',
         stroke: 'transparent',
         strokeWidth: 0,
@@ -514,7 +565,8 @@ export class WallRenderer {
     this.removeWall(wall.id);
     this.wallData.set(wall.id, wall);
 
-    const interactionVertices = computeWallBodyPolygon(wall);
+    let interactionVertices = computeWallBodyPolygon(wall);
+    interactionVertices = validateWallPolygon(interactionVertices, wall); // [PATCH APPLIED]
     const canvasVertices = interactionVertices.map((v) => this.toCanvasPoint(v));
 
     const fillPolygon = new fabric.Polygon(canvasVertices, {
@@ -588,7 +640,7 @@ export class WallRenderer {
     this.annotateWallTarget(selectionOutline, wall.id);
 
     const hoverOutline = new fabric.Polygon(canvasVertices, {
-      fill: 'transparent',
+      fill: 'rgba(5, 150, 105, 0.06)',
       stroke: VISUAL_CONFIG.hoverStroke,
       strokeWidth: this.toSceneSize(VISUAL_CONFIG.hoverStrokeWidth),
       strokeLineJoin: 'round',
@@ -692,14 +744,21 @@ export class WallRenderer {
 
       // Background
       const fontSize = this.toSceneSize(VISUAL_CONFIG.dimensionFontSize);
+      const bgPad = this.toSceneSize(VISUAL_CONFIG.dimensionBgPadding);
+      const bgCorner = this.toSceneSize(3);
       const bg = new fabric.Rect({
         left: labelX, top: labelY,
-        width: label.length * fontSize * 0.65,
-        height: fontSize * 1.6,
+        width: label.length * fontSize * 0.62 + bgPad * 2,
+        height: fontSize * 1.4 + bgPad,
         fill: VISUAL_CONFIG.dimensionBgColor,
-        rx: 3, ry: 3,
+        rx: bgCorner, ry: bgCorner,
         originX: 'center', originY: 'center',
         selectable: false, evented: false,
+        shadow: new fabric.Shadow({
+          color: 'rgba(0,0,0,0.12)',
+          blur: this.toSceneSize(4),
+          offsetX: 0, offsetY: this.toSceneSize(1),
+        }),
       });
 
       const text = new fabric.Text(label, {
@@ -707,7 +766,7 @@ export class WallRenderer {
         fill: VISUAL_CONFIG.dimensionColor,
         fontSize,
         fontFamily: VISUAL_CONFIG.dimensionFontFamily,
-        fontWeight: 'bold',
+        fontWeight: '600',
         originX: 'center', originY: 'center',
         selectable: false, evented: false,
       });
@@ -923,17 +982,29 @@ export class WallRenderer {
   updateWall(wall: Wall, joins?: JoinData[]): void {
     this.wallData.set(wall.id, wall);
 
+    // [PATCH APPLIED] CRITICAL FIX: Refresh offset lines BEFORE computing joins
+    refreshOffsetLines(wall); // [PATCH APPLIED]
+
+    // [PATCH APPLIED] Also refresh connected walls' offset lines
+    for (const connectedId of wall.connectedWalls) { // [PATCH APPLIED]
+      const connected = this.wallData.get(connectedId); // [PATCH APPLIED]
+      if (connected) { // [PATCH APPLIED]
+        refreshOffsetLines(connected); // [PATCH APPLIED]
+      } // [PATCH APPLIED]
+    } // [PATCH APPLIED]
+
     // Mark the wall and its neighbors as dirty
     this.dirtyWallIds.add(wall.id);
     for (const connectedId of wall.connectedWalls) {
       this.dirtyWallIds.add(connectedId);
     }
 
-    // For now, still do a full re-render since the merged component system
-    // requires it. The dirty tracking is here for future optimization when
-    // the component system supports incremental updates.
-    // TODO: Implement incremental merged component updates
-    this.renderAllWalls(Array.from(this.wallData.values()));
+    // [PATCH APPLIED] Compute fresh joins with the updated offset lines
+    const allWalls = Array.from(this.wallData.values()); // [PATCH APPLIED]
+    const joinsMap = refreshAfterPointMove(wall.id, allWalls); // [PATCH APPLIED]
+
+    // Re-render with fresh joins
+    this.renderAllWalls(allWalls, joinsMap); // [PATCH APPLIED]
     this.dirtyWallIds.clear();
   }
 
@@ -1045,6 +1116,11 @@ export class WallRenderer {
       hoverCursor: 'crosshair',
       lockMovementX: true, lockMovementY: true,
       selectable: false, evented: false,
+      shadow: new fabric.Shadow({
+        color: VISUAL_CONFIG.endpointShadow,
+        blur: this.toSceneSize(6),
+        offsetX: 0, offsetY: this.toSceneSize(1),
+      }),
     });
     this.annotateControlTarget(startHandle, wallId, 'wall-endpoint-start');
 
@@ -1063,6 +1139,11 @@ export class WallRenderer {
       hoverCursor: 'crosshair',
       lockMovementX: true, lockMovementY: true,
       selectable: false, evented: false,
+      shadow: new fabric.Shadow({
+        color: VISUAL_CONFIG.endpointShadow,
+        blur: this.toSceneSize(6),
+        offsetX: 0, offsetY: this.toSceneSize(1),
+      }),
     });
     this.annotateControlTarget(endHandle, wallId, 'wall-endpoint-end');
 
@@ -1162,6 +1243,11 @@ export class WallRenderer {
       hoverCursor: 'move',
       lockMovementX: true, lockMovementY: true,
       selectable: false, evented: false,
+      shadow: new fabric.Shadow({
+        color: 'rgba(37, 99, 235, 0.25)',
+        blur: this.toSceneSize(8),
+        offsetX: 0, offsetY: this.toSceneSize(1),
+      }),
     });
     this.annotateControlTarget(centerHandle, wallId, 'wall-center-handle');
     const centerHandleHit = this.createControlHitTarget(
@@ -1313,7 +1399,7 @@ export class WallRenderer {
    * Previously each canvas.add() triggered an intermediate repaint,
    * causing O(n²) work for n objects.
    */
-  renderAllWalls(walls: Wall[]): void {
+  renderAllWalls(walls: Wall[], precomputedJoinsMap?: Map<string, JoinData[]>): void { // [PATCH APPLIED]
     // [PERF] Disable intermediate repaints during batch add
     const previousRenderOnAdd = (this.canvas as any).renderOnAddRemove;
     (this.canvas as any).renderOnAddRemove = false;
@@ -1333,6 +1419,9 @@ export class WallRenderer {
 
       walls.forEach((wall) => this.wallData.set(wall.id, wall));
 
+      // [PATCH APPLIED] Use pre-computed joins if available, otherwise compute fresh
+      const joinsMap = precomputedJoinsMap ?? refreshAllWalls(walls); // [PATCH APPLIED]
+
       const renderData = computeWallUnionRenderData(walls);
       const wallsById = new Map(walls.map((wall) => [wall.id, wall]));
 
@@ -1345,7 +1434,7 @@ export class WallRenderer {
       }
 
       for (const wall of walls) {
-        const joins = renderData.joinsMap.get(wall.id) || [];
+        const joins = joinsMap.get(wall.id) || []; // [PATCH APPLIED]
         this.renderWall(wall, joins);
       }
 

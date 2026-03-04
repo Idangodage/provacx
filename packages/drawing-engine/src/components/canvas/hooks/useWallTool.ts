@@ -14,6 +14,10 @@ import { WallPreview } from '../wall/WallPreview';
 import { WallRenderer } from '../wall/WallRenderer';
 import { buildTemporaryWall } from '../wall/WallJoinNetwork';
 import { snapWallPoint } from '../wall/WallSnapping';
+import type { EnhancedSnapResult } from '../wall/WallSnapping'; // [SNAP WIRE]
+import { WallSnapIndicatorRenderer } from '../wall/WallSnapIndicatorRenderer'; // [SNAP WIRE]
+import { generateId } from '../../../utils/geometry'; // [SNAP WIRE]
+import { MM_TO_PX } from '../scale'; // [SNAP WIRE]
 
 // =============================================================================
 // Types
@@ -28,13 +32,18 @@ export interface UseWallToolOptions {
   wallDrawingState: WallDrawingState;
   wallSettings: WallSettings;
   zoom: number;
+  panOffset: { x: number; y: number }; // pan offset in scene pixels for snap indicator rendering
   pageHeight: number;
+  overlayCanvasRef?: React.RefObject<HTMLCanvasElement | null>; // [SNAP WIRE] overlay for snap indicators
   startWallDrawing: (startPoint: Point2D) => void;
   updateWallPreview: (currentPoint: Point2D) => void;
   commitWall: () => string | null;
   cancelWallDrawing: () => void;
   connectWalls: (wallId: string, otherWallId: string) => void;
+  addWall?: (params: { startPoint: Point2D; endPoint: Point2D; thickness?: number; material?: string; layer?: string }) => string; // [SNAP WIRE]
+  deleteWall?: (id: string) => void; // [SNAP WIRE]
   onWallCreated?: (wallId: string) => void;
+  onRoomClosed?: (wallIds: string[]) => void; // [SNAP WIRE]
 }
 
 export interface UseWallToolResult {
@@ -47,6 +56,7 @@ export interface UseWallToolResult {
   handleKeyDown: (e: KeyboardEvent) => void;
   handleKeyUp: (e: KeyboardEvent) => void;
   isDrawing: boolean;
+  lastSnapResult: EnhancedSnapResult | null; // [SNAP WIRE]
 }
 
 // =============================================================================
@@ -62,20 +72,33 @@ export function useWallTool({
   wallDrawingState,
   wallSettings,
   zoom,
+  panOffset,
   pageHeight,
+  overlayCanvasRef, // [SNAP WIRE]
   startWallDrawing,
   updateWallPreview,
   commitWall,
   cancelWallDrawing,
   connectWalls,
+  addWall: addWallProp, // [SNAP WIRE]
+  deleteWall: deleteWallProp, // [SNAP WIRE]
   onWallCreated,
+  onRoomClosed, // [SNAP WIRE]
 }: UseWallToolOptions): UseWallToolResult {
   // Refs for instances
   const wallRendererRef = useRef<WallRenderer | null>(null);
   const wallPreviewRef = useRef<WallPreview | null>(null);
   const wallManagerRef = useRef<WallManager | null>(null);
   const shiftPressedRef = useRef(false);
+  const ctrlPressedRef = useRef(false); // [SNAP WIRE]
+  const altPressedRef = useRef(false); // [SNAP WIRE]
+  const snapEnabledRef = useRef(true); // [SNAP WIRE] toggle via S key
   const lastSnappedWallRef = useRef<{ wallId: string } | null>(null);
+  const lastSnapResultRef = useRef<EnhancedSnapResult | null>(null); // [SNAP WIRE]
+  const snapIndicatorRef = useRef<WallSnapIndicatorRenderer | null>(null); // [SNAP WIRE]
+  const chainWallIdsRef = useRef<string[]>([]); // [SNAP WIRE] track wall chain for room close
+  const panOffsetRef = useRef(panOffset); // keep current pan offset for snap indicator coordinate conversion
+  panOffsetRef.current = panOffset; // always sync
 
   // Initialize instances when canvas is available
   useEffect(() => {
@@ -96,13 +119,25 @@ export function useWallTool({
     wallRendererRef.current.setPageHeight(pageHeight);
     wallPreviewRef.current.setPageHeight(pageHeight);
 
+    // [SNAP WIRE] Initialize snap indicator renderer on overlay canvas
+    if (overlayCanvasRef?.current && !snapIndicatorRef.current) {
+      snapIndicatorRef.current = new WallSnapIndicatorRenderer(
+        overlayCanvasRef.current,
+        MM_TO_PX,
+        () => canvas.getZoom(),
+        () => panOffsetRef.current,
+      );
+    }
+
     // Cleanup
     return () => {
       wallPreviewRef.current?.dispose();
       wallRendererRef.current?.dispose();
+      snapIndicatorRef.current?.clear(); // [SNAP WIRE]
       wallPreviewRef.current = null;
       wallRendererRef.current = null;
       wallManagerRef.current = null;
+      snapIndicatorRef.current = null; // [SNAP WIRE]
     };
   }, [canvas, pageHeight]);
 
@@ -114,14 +149,14 @@ export function useWallTool({
     wallPreviewRef.current?.setWalls(walls);
   }, [walls]);
 
-  // Update renderer when walls change
+  // Update renderer when walls change (canvas dep ensures re-render on remount)
   useEffect(() => {
-    if (wallRendererRef.current && fabricRef.current) {
+    if (wallRendererRef.current && canvas) {
       wallRendererRef.current.setRooms(rooms);
       wallRendererRef.current.setRoomWallIds(rooms.flatMap((room) => room.wallIds));
       wallRendererRef.current.renderAllWalls(walls);
     }
-  }, [walls, rooms, fabricRef]);
+  }, [walls, rooms, canvas]);
 
   // Update selected wall highlights + control points
   useEffect(() => {
@@ -171,19 +206,32 @@ export function useWallTool({
       const canvas = fabricRef.current;
       if (!canvas) return;
 
+      // [SNAP WIRE] Build effective settings based on modifier keys
+      const effectiveSettings = { ...wallSettings };
+      if (ctrlPressedRef.current) { // [SNAP WIRE] Ctrl forces grid-only snap
+        effectiveSettings.snapToGrid = true;
+        effectiveSettings.endpointSnapTolerance = 0;
+        effectiveSettings.midpointSnapTolerance = 0;
+      }
+      const effectiveWalls = altPressedRef.current ? [] : walls; // [SNAP WIRE] Alt disables all snaps
+      const effectiveShift = shiftPressedRef.current;
+
       // Snap the point
       const snapResult = snapWallPoint(
         scenePoint,
         wallDrawingState.startPoint,
-        wallSettings,
-        walls,
-        shiftPressedRef.current,
-        zoom
+        snapEnabledRef.current ? effectiveSettings : { ...effectiveSettings, endpointSnapTolerance: 0, midpointSnapTolerance: 0, snapToGrid: false }, // [SNAP WIRE]
+        effectiveWalls, // [SNAP WIRE]
+        effectiveShift, // [SNAP WIRE]
+        zoom,
+        undefined // excludeWallId
       );
+      lastSnapResultRef.current = snapResult; // [SNAP WIRE]
 
       if (!wallDrawingState.isDrawing) {
         // First click: start wall drawing
         startWallDrawing(snapResult.snappedPoint);
+        chainWallIdsRef.current = []; // [SNAP WIRE] reset chain
 
         // Track if we snapped to an endpoint
         if (
@@ -207,16 +255,90 @@ export function useWallTool({
         // Second click: commit wall
         updateWallPreview(snapResult.snappedPoint);
 
+        // [SNAP WIRE] Room close detection — if snapped point matches drawState.startPoint within 2mm
+        const drawStart = wallDrawingState.startPoint;
+        const isRoomClose = drawStart && chainWallIdsRef.current.length >= 2 &&
+          snapResult.snapType === 'endpoint' &&
+          Math.hypot(
+            snapResult.snappedPoint.x - (chainWallIdsRef.current.length > 0 ? walls.find(w => w.id === chainWallIdsRef.current[0])?.startPoint?.x ?? drawStart.x : drawStart.x),
+            snapResult.snappedPoint.y - (chainWallIdsRef.current.length > 0 ? walls.find(w => w.id === chainWallIdsRef.current[0])?.startPoint?.y ?? drawStart.y : drawStart.y)
+          ) <= 2; // [SNAP WIRE] 2mm tolerance
+
+        // [SNAP WIRE] T-junction detection: snapped to a wall body, not its endpoints
+        const isTJunction = snapResult.snapType === 'endpoint' &&
+          snapResult.connectedWallId &&
+          snapResult.endpoint === undefined;
+
         const newWallId = commitWall();
 
         if (newWallId) {
+          chainWallIdsRef.current.push(newWallId); // [SNAP WIRE]
+
           // Connect to start point wall if snapped
           if (lastSnappedWallRef.current) {
             connectWalls(newWallId, lastSnappedWallRef.current.wallId);
           }
 
-          // Connect to end point wall if snapped
-          if (
+          // [SNAP WIRE] Handle T-junction splitting
+          if (isTJunction && snapResult.connectedWallId && addWallProp && deleteWallProp) {
+            const hostWall = walls.find(w => w.id === snapResult.connectedWallId);
+            if (hostWall) {
+              const segmentAId = generateId();
+              const segmentBId = generateId();
+
+              // Create segment A (hostWall start → snap point)
+              const segmentAParams = {
+                startPoint: { ...hostWall.startPoint },
+                endPoint: { ...snapResult.snappedPoint },
+                thickness: hostWall.thickness,
+                material: hostWall.material as any,
+                layer: hostWall.layer as any,
+              };
+
+              // Create segment B (snap point → hostWall end)
+              const segmentBParams = {
+                startPoint: { ...snapResult.snappedPoint },
+                endPoint: { ...hostWall.endPoint },
+                thickness: hostWall.thickness,
+                material: hostWall.material as any,
+                layer: hostWall.layer as any,
+              };
+
+              // Remove host wall, add segments
+              deleteWallProp(hostWall.id);
+              const actualSegAId = addWallProp(segmentAParams);
+              const actualSegBId = addWallProp(segmentBParams);
+
+              // Connect the new wall and segments at the junction
+              connectWalls(newWallId, actualSegAId);
+              connectWalls(newWallId, actualSegBId);
+              connectWalls(actualSegAId, actualSegBId);
+
+              // Preserve original host connections on the new segments
+              for (const connId of hostWall.connectedWalls) {
+                if (connId !== newWallId) {
+                  // Check which segment the connected wall is closer to
+                  const connWall = walls.find(w => w.id === connId);
+                  if (connWall) {
+                    const dToStart = Math.min(
+                      Math.hypot(connWall.startPoint.x - hostWall.startPoint.x, connWall.startPoint.y - hostWall.startPoint.y),
+                      Math.hypot(connWall.endPoint.x - hostWall.startPoint.x, connWall.endPoint.y - hostWall.startPoint.y)
+                    );
+                    const dToEnd = Math.min(
+                      Math.hypot(connWall.startPoint.x - hostWall.endPoint.x, connWall.startPoint.y - hostWall.endPoint.y),
+                      Math.hypot(connWall.endPoint.x - hostWall.endPoint.x, connWall.endPoint.y - hostWall.endPoint.y)
+                    );
+                    if (dToStart < dToEnd) {
+                      connectWalls(actualSegAId, connId);
+                    } else {
+                      connectWalls(actualSegBId, connId);
+                    }
+                  }
+                }
+              }
+            }
+          } else if (
+            // [SNAP WIRE] Endpoint connection (snapping to existing endpoint)
             (snapResult.snapType === 'endpoint' || snapResult.snapType === 'midpoint') &&
             snapResult.connectedWallId
           ) {
@@ -229,6 +351,18 @@ export function useWallTool({
           }
 
           onWallCreated?.(newWallId);
+
+          // [SNAP WIRE] Room close detection
+          if (isRoomClose) {
+            const roomWallIds = [...chainWallIdsRef.current];
+            onRoomClosed?.(roomWallIds);
+            cancelWallDrawing();
+            wallPreviewRef.current?.clearPreview();
+            snapIndicatorRef.current?.clear(); // [SNAP WIRE]
+            lastSnappedWallRef.current = null;
+            chainWallIdsRef.current = [];
+            return;
+          }
 
           // If chain mode, update preview for next wall
           if (wallDrawingState.chainMode) {
@@ -247,6 +381,7 @@ export function useWallTool({
             );
           } else {
             wallPreviewRef.current?.clearPreview();
+            snapIndicatorRef.current?.clear(); // [SNAP WIRE]
           }
         }
       }
@@ -260,33 +395,56 @@ export function useWallTool({
       startWallDrawing,
       updateWallPreview,
       commitWall,
+      cancelWallDrawing,
       connectWalls,
+      addWallProp, // [SNAP WIRE]
+      deleteWallProp, // [SNAP WIRE]
       onWallCreated,
+      onRoomClosed, // [SNAP WIRE]
     ]
   );
 
   /**
-   * Handle mouse move - update preview
+   * Handle mouse move - update preview and show snap indicators
    */
   const handleMouseMove = useCallback(
     (scenePoint: Point2D) => {
-      if (!wallDrawingState.isDrawing) return;
+      // [SNAP WIRE] Build effective settings based on modifier keys
+      const effectiveSettings = { ...wallSettings };
+      if (ctrlPressedRef.current) {
+        effectiveSettings.snapToGrid = true;
+        effectiveSettings.endpointSnapTolerance = 0;
+        effectiveSettings.midpointSnapTolerance = 0;
+      }
+      const effectiveWalls = altPressedRef.current ? [] : walls;
 
       // Snap the point
       const snapResult = snapWallPoint(
         scenePoint,
         wallDrawingState.startPoint,
-        wallSettings,
-        walls,
+        snapEnabledRef.current ? effectiveSettings : { ...effectiveSettings, endpointSnapTolerance: 0, midpointSnapTolerance: 0, snapToGrid: false }, // [SNAP WIRE]
+        effectiveWalls, // [SNAP WIRE]
         shiftPressedRef.current,
-        zoom
+        zoom,
+        undefined // excludeWallId
       );
+      lastSnapResultRef.current = snapResult; // [SNAP WIRE]
 
-      // Update state
-      updateWallPreview(snapResult.snappedPoint);
+      if (wallDrawingState.isDrawing) {
+        // Update state
+        updateWallPreview(snapResult.snappedPoint);
 
-      // Update visual preview
-      wallPreviewRef.current?.updatePreview(snapResult.snappedPoint);
+        // Update visual preview
+        wallPreviewRef.current?.updatePreview(snapResult.snappedPoint);
+      }
+
+      // [SNAP WIRE] Render snap indicators on overlay canvas (even before drawing starts)
+      // cursorPx is in scene-pixel space for the angle indicator; the renderer handles the mm→viewport conversion internally
+      const cursorScenePx = {
+        x: scenePoint.x * MM_TO_PX,
+        y: scenePoint.y * MM_TO_PX,
+      };
+      snapIndicatorRef.current?.render(snapResult, cursorScenePx);
     },
     [wallDrawingState, wallSettings, walls, zoom, updateWallPreview]
   );
@@ -298,33 +456,53 @@ export function useWallTool({
     if (wallDrawingState.isDrawing) {
       cancelWallDrawing();
       wallPreviewRef.current?.clearPreview();
+      snapIndicatorRef.current?.clear(); // [SNAP WIRE]
       lastSnappedWallRef.current = null;
+      chainWallIdsRef.current = []; // [SNAP WIRE]
     }
   }, [wallDrawingState.isDrawing, cancelWallDrawing]);
 
   /**
-   * Handle key down - Shift for angle lock, Escape to cancel
+   * Handle key down - Shift for angle lock, Ctrl for grid-only, Alt for free draw, S to toggle, Escape to cancel
    */
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (e.key === 'Shift') {
         shiftPressedRef.current = true;
       }
+      if (e.key === 'Control') { // [SNAP WIRE]
+        ctrlPressedRef.current = true; // [SNAP WIRE]
+      }
+      if (e.key === 'Alt') { // [SNAP WIRE]
+        altPressedRef.current = true; // [SNAP WIRE]
+        e.preventDefault(); // prevent browser menu bar focus
+      }
+      if (e.key === 's' || e.key === 'S') { // [SNAP WIRE] toggle snap
+        snapEnabledRef.current = !snapEnabledRef.current; // [SNAP WIRE]
+      }
       if (e.key === 'Escape') {
         cancelWallDrawing();
         wallPreviewRef.current?.clearPreview();
+        snapIndicatorRef.current?.clear(); // [SNAP WIRE]
         lastSnappedWallRef.current = null;
+        chainWallIdsRef.current = []; // [SNAP WIRE]
       }
     },
     [cancelWallDrawing]
   );
 
   /**
-   * Handle key up - release Shift
+   * Handle key up - release modifier keys
    */
   const handleKeyUp = useCallback((e: KeyboardEvent) => {
     if (e.key === 'Shift') {
       shiftPressedRef.current = false;
+    }
+    if (e.key === 'Control') { // [SNAP WIRE]
+      ctrlPressedRef.current = false; // [SNAP WIRE]
+    }
+    if (e.key === 'Alt') { // [SNAP WIRE]
+      altPressedRef.current = false; // [SNAP WIRE]
     }
   }, []);
 
@@ -338,5 +516,6 @@ export function useWallTool({
     handleKeyDown,
     handleKeyUp,
     isDrawing: wallDrawingState.isDrawing,
+    lastSnapResult: lastSnapResultRef.current, // [SNAP WIRE]
   };
 }

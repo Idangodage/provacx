@@ -1208,7 +1208,7 @@ export function SmartDrawingEditor({
 
           {editorViewMode === 'plan' && (
             <DrawingCanvas
-              className="flex-1"
+              className="flex-1 bg-white"
               onCanvasReady={handleCanvasReady}
               showGrid={showGrid}
               showRulers={showRulers}
@@ -1234,7 +1234,7 @@ export function SmartDrawingEditor({
           {editorViewMode === 'split' && (
             <div className="flex flex-1 overflow-hidden">
               <DrawingCanvas
-                className="flex-1 border-r border-amber-200/70"
+                className="flex-1 bg-white border-r border-amber-200/70"
                 onCanvasReady={handleCanvasReady}
                 showGrid={showGrid}
                 showRulers={showRulers}
