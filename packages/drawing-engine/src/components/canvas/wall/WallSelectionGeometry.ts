@@ -24,21 +24,38 @@
  * ──────────────────────────────────────────────────────
  */
 
-import type { Point2D, Room, Wall } from '../../../types';
+import * as turf from '@turf/turf';
+
+import type { JoinData, Point2D, Room, Wall } from '../../../types';
 import { GeometryEngine } from '../../../utils/geometry-engine';
 
-import { lineIntersection, segmentIntersection, projectPointToSegment } from './WallGeometry';
+import {
+  computeWallBodyPolygon,
+  computeWallPolygon,
+  isPolygonSelfIntersecting,
+  lineIntersection,
+  segmentIntersection,
+  projectPointToSegment,
+} from './WallGeometry';
 import { computeWallUnionRenderData } from './WallUnionGeometry';
 
 // =============================================================================
 // Public Types
 // =============================================================================
 
+export type WallSelectionComponentKind = 'wall' | 'room' | 'component';
+
 export interface WallSelectionComponent {
   id: string;
+  kind: WallSelectionComponentKind;
   wallIds: string[];
-  outerRings: Point2D[][];
-  innerRings: Point2D[][];
+  outlineRings: Point2D[][];
+  fillRings: Point2D[][];
+}
+
+export interface WallSelectionPlan {
+  individualWallIds: string[];
+  mergedComponents: WallSelectionComponent[];
 }
 
 // =============================================================================
@@ -53,6 +70,27 @@ export interface WallSelectionComponent {
  * worst-case execution under 50ms.
  */
 const MAX_SEARCH_ITERATIONS = 50_000;
+const SELECTION_ENDPOINT_TOLERANCE_MM = 8;
+const SELECTION_SEGMENT_T_EPSILON = 0.001;
+const ROOM_OFFSET_MITER_LENGTH_RATIO = 0.35;
+const ROOM_OFFSET_MITER_GAP_FACTOR = 12;
+const SELECTION_SPIKE_ANGLE_THRESHOLD_DEG = 35;
+const SELECTION_SPIKE_CAP_FACTOR = 0.45;
+const SELECTION_SPIKE_MAX_REACH_FACTOR = 1.6;
+const SELECTION_SPIKE_MAX_REACH_MM = 55;
+const SELECTION_JOIN_ENDPOINT_TOLERANCE_MM = 8;
+const ROOM_OFFSET_MITER_MIN_REACH_MM = 20;
+const ROOM_OFFSET_MITER_MAX_REACH_MM = 80;
+const OUTER_RING_SPIKE_ANGLE_DEG = 42;
+const OUTER_RING_SPIKE_REACH_RATIO = 2.2;
+const OUTER_RING_SPIKE_MIN_EDGE_MM = 8;
+const ROOM_RING_SHORT_EDGE_FACTOR = 0.8;
+const ROOM_RING_SHORT_EDGE_MIN_MM = 10;
+const ROOM_RING_COLLINEAR_DISTANCE_FACTOR = 0.18;
+const ROOM_RING_COLLINEAR_DISTANCE_MIN_MM = 2;
+const ROOM_RING_MAX_AREA_DELTA_RATIO = 0.06;
+const ROOM_CONTOUR_INNER_AREA_RATIO_MIN = 0.6;
+const ROOM_CONTOUR_INNER_AREA_RATIO_MAX = 1.45;
 
 // =============================================================================
 // Ring Utilities
@@ -87,6 +125,13 @@ function normalizeInnerRings(polygons: Point2D[][][]): Point2D[][] {
     .map((ring) => ensureWindingOrder(ring, false)); // [NEW] Validate CW
 }
 
+function normalizeFillRings(polygons: Point2D[][][]): Point2D[][] {
+  return [
+    ...normalizeOuterRings(polygons),
+    ...normalizeInnerRings(polygons),
+  ];
+}
+
 interface RoomUnionContours {
   outerRing: Point2D[];
   innerRing: Point2D[];
@@ -95,6 +140,22 @@ interface RoomUnionContours {
 interface RoomUnionContourCandidate extends RoomUnionContours {
   score: number;
 }
+
+interface RoomOuterRingCandidate {
+  ring: Point2D[];
+  source: 'selectable' | 'traced' | 'body' | 'union';
+  priority: number;
+}
+
+interface RoomInnerRingCandidate {
+  ring: Point2D[];
+  source: 'traced' | 'selectable' | 'body' | 'union' | 'fallback';
+  priority: number;
+}
+
+type PolygonFeature = ReturnType<typeof turf.polygon>;
+type PolygonGeometry = PolygonFeature['geometry'];
+type MultiPolygonGeometry = ReturnType<typeof turf.multiPolygon>['geometry'];
 
 /**
  * [NEW] Compute signed area of a polygon ring.
@@ -124,6 +185,199 @@ function ensureWindingOrder(ring: Point2D[], wantCCW: boolean): Point2D[] {
 
 function absoluteRingArea(ring: Point2D[]): number {
   return Math.abs(signedArea(ring));
+}
+
+function ringSignature(ring: Point2D[]): string {
+  const normalized = normalizeRing(ring);
+  if (normalized.length < 3) {
+    return '';
+  }
+
+  const centroid = ringCentroid(normalized);
+  const area = absoluteRingArea(normalized);
+  return [
+    normalized.length,
+    centroid.x.toFixed(2),
+    centroid.y.toFixed(2),
+    area.toFixed(2),
+  ].join(':');
+}
+
+function pushUniqueRing(
+  rings: Point2D[][],
+  ring: Point2D[] | null | undefined,
+  wantCCW: boolean,
+  seenSignatures: Set<string>
+): void {
+  if (!ring) {
+    return;
+  }
+
+  const normalized = normalizeRing(ring);
+  if (normalized.length < 3) {
+    return;
+  }
+
+  const oriented = ensureWindingOrder(normalized, wantCCW);
+  const signature = ringSignature(oriented);
+  if (!signature || seenSignatures.has(signature)) {
+    return;
+  }
+
+  seenSignatures.add(signature);
+  rings.push(oriented);
+}
+
+function ringsIntersect(a: Point2D[], b: Point2D[]): boolean {
+  const ringA = normalizeRing(a);
+  const ringB = normalizeRing(b);
+  if (ringA.length < 2 || ringB.length < 2) {
+    return false;
+  }
+
+  for (let i = 0; i < ringA.length; i += 1) {
+    const a1 = ringA[i];
+    const a2 = ringA[(i + 1) % ringA.length];
+    for (let j = 0; j < ringB.length; j += 1) {
+      const b1 = ringB[j];
+      const b2 = ringB[(j + 1) % ringB.length];
+      if (segmentIntersection(a1, a2, b1, b2)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function pointToRingDistance(point: Point2D, ring: Point2D[]): number {
+  const normalized = normalizeRing(ring);
+  if (normalized.length < 2) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  let best = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < normalized.length; i += 1) {
+    const start = normalized[i];
+    const end = normalized[(i + 1) % normalized.length];
+    const distance = pointToSegmentDistance(point, start, end);
+    if (distance < best) {
+      best = distance;
+    }
+  }
+  return best;
+}
+
+function averageRingDistanceToRing(sampleRing: Point2D[], targetRing: Point2D[]): number {
+  const sample = normalizeRing(sampleRing);
+  if (sample.length === 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const totalDistance = sample.reduce((sum, point) => sum + pointToRingDistance(point, targetRing), 0);
+  return totalDistance / sample.length;
+}
+
+function minRingDistanceToRing(sampleRing: Point2D[], targetRing: Point2D[]): number {
+  const sample = normalizeRing(sampleRing);
+  if (sample.length === 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  let minDistance = Number.POSITIVE_INFINITY;
+  for (const point of sample) {
+    const distance = pointToRingDistance(point, targetRing);
+    if (distance < minDistance) {
+      minDistance = distance;
+    }
+  }
+  return minDistance;
+}
+
+function outerRingQualityScore(
+  room: Room,
+  outerRing: Point2D[],
+  canonicalInnerRing: Point2D[],
+  expectedBandWidthMm: number,
+  minBandWidthMm: number
+): number {
+  const outer = normalizeRing(outerRing);
+  const inner = normalizeRing(canonicalInnerRing);
+  if (outer.length < 3 || inner.length < 3) {
+    return Number.POSITIVE_INFINITY;
+  }
+  if (isRingSelfIntersecting(outer)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  if (ringsIntersect(outer, inner)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  if (!GeometryEngine.pointInPolygon(room.centroid, outer)) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const roomArea = Math.max(1, Math.abs(room.area));
+  const innerArea = Math.max(1, absoluteRingArea(inner));
+  const outerArea = absoluteRingArea(outer);
+  if (outerArea <= innerArea + 1) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const innerAreaRatio = innerArea / roomArea;
+  if (innerAreaRatio < ROOM_CONTOUR_INNER_AREA_RATIO_MIN || innerAreaRatio > ROOM_CONTOUR_INNER_AREA_RATIO_MAX) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const centroidDistance = pointDistance(ringCentroid(outer), room.centroid) / Math.max(1, Math.sqrt(roomArea));
+  const meanBandWidth = averageRingDistanceToRing(inner, outer);
+  const minBandWidth = minRingDistanceToRing(inner, outer);
+  if (minBandWidth < minBandWidthMm) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const relativeBandArea = (outerArea - innerArea) / innerArea;
+  const widthDeviation = Math.abs(meanBandWidth - expectedBandWidthMm) / Math.max(1, expectedBandWidthMm);
+  return centroidDistance * 2 + relativeBandArea + widthDeviation * 0.8;
+}
+
+function innerRingQualityScore(
+  room: Room,
+  innerRing: Point2D[],
+  outerRing: Point2D[],
+  expectedBandWidthMm: number,
+  minBandWidthMm: number
+): number {
+  const inner = normalizeRing(innerRing);
+  const outer = normalizeRing(outerRing);
+  if (inner.length < 3 || outer.length < 3) {
+    return Number.POSITIVE_INFINITY;
+  }
+  if (isRingSelfIntersecting(inner)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  if (ringsIntersect(inner, outer)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  if (!GeometryEngine.pointInPolygon(room.centroid, inner)) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const roomArea = Math.max(1, Math.abs(room.area));
+  const innerArea = absoluteRingArea(inner);
+  const outerArea = absoluteRingArea(outer);
+  if (outerArea <= innerArea + 1) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const meanBandWidth = averageRingDistanceToRing(inner, outer);
+  const minBandWidth = minRingDistanceToRing(inner, outer);
+  if (minBandWidth < minBandWidthMm) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const areaDeltaRatio = Math.abs(innerArea - roomArea) / roomArea;
+  const widthDeviation = Math.abs(meanBandWidth - expectedBandWidthMm) / Math.max(1, expectedBandWidthMm);
+  const centroidDistance =
+    pointDistance(ringCentroid(inner), room.centroid) / Math.max(1, Math.sqrt(roomArea));
+  return areaDeltaRatio + widthDeviation * 0.9 + centroidDistance * 0.5;
 }
 
 function ringCentroid(ring: Point2D[]): Point2D {
@@ -197,6 +451,95 @@ function pointOnEdge(edgeStart: Point2D, edgeEnd: Point2D, t: number): Point2D {
   };
 }
 
+function median(values: number[]): number {
+  if (values.length === 0) {
+    return 0;
+  }
+
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 0) {
+    return (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+  return sorted[mid];
+}
+
+function estimateRoomWallThickness(roomWalls: Wall[]): number {
+  const thicknesses = roomWalls
+    .map((wall) => wall.thickness)
+    .filter((thickness) => Number.isFinite(thickness) && thickness > 0);
+  return median(thicknesses);
+}
+
+function cleanRoomRingCornerArtifacts(
+  ring: Point2D[],
+  nominalWallThicknessMm: number
+): Point2D[] {
+  const normalized = normalizeRing(ring);
+  if (normalized.length < 4) {
+    return normalized;
+  }
+
+  const shortEdgeThreshold = Math.max(
+    ROOM_RING_SHORT_EDGE_MIN_MM,
+    nominalWallThicknessMm * ROOM_RING_SHORT_EDGE_FACTOR
+  );
+  const chordDistanceThreshold = Math.max(
+    ROOM_RING_COLLINEAR_DISTANCE_MIN_MM,
+    nominalWallThicknessMm * ROOM_RING_COLLINEAR_DISTANCE_FACTOR
+  );
+
+  let working = [...normalized];
+  let changed = true;
+  let iteration = 0;
+  const maxIterations = working.length * 3;
+
+  while (changed && iteration < maxIterations && working.length >= 4) {
+    iteration += 1;
+    changed = false;
+    const baselineArea = Math.max(1, absoluteRingArea(working));
+
+    for (let i = 0; i < working.length; i += 1) {
+      const prev = working[(i - 1 + working.length) % working.length];
+      const curr = working[i];
+      const next = working[(i + 1) % working.length];
+      const lenPrev = pointDistance(prev, curr);
+      const lenNext = pointDistance(curr, next);
+      const shortestAdjacentEdge = Math.min(lenPrev, lenNext);
+
+      if (shortestAdjacentEdge > shortEdgeThreshold) {
+        continue;
+      }
+
+      const distanceToChord = pointToSegmentDistance(curr, prev, next);
+      const maxAllowedDistance = Math.max(chordDistanceThreshold, shortestAdjacentEdge * 0.65);
+      if (distanceToChord > maxAllowedDistance) {
+        continue;
+      }
+
+      const candidate = working.filter((_, idx) => idx !== i);
+      if (candidate.length < 3) {
+        continue;
+      }
+      if (isRingSelfIntersecting(candidate)) {
+        continue;
+      }
+
+      const candidateArea = Math.max(1, absoluteRingArea(candidate));
+      const areaDeltaRatio = Math.abs(candidateArea - baselineArea) / baselineArea;
+      if (areaDeltaRatio > ROOM_RING_MAX_AREA_DELTA_RATIO) {
+        continue;
+      }
+
+      working = candidate;
+      changed = true;
+      break;
+    }
+  }
+
+  return working;
+}
+
 // =============================================================================
 // Room Edge Matching
 // =============================================================================
@@ -231,21 +574,6 @@ function buildRoomEdges(room: Room): RoomEdge[] {
       direction: normalize(subtract(end, start)),
     };
   });
-}
-
-function offsetLine(
-  start: Point2D,
-  end: Point2D,
-  offset: number
-): { start: Point2D; end: Point2D } {
-  const dir = normalize(subtract(end, start));
-  if (magnitude(dir) < 0.000001) return { start: { ...start }, end: { ...end } };
-
-  const normal = { x: -dir.y, y: dir.x };
-  return {
-    start: { x: start.x + normal.x * offset, y: start.y + normal.y * offset },
-    end: { x: end.x + normal.x * offset, y: end.y + normal.y * offset },
-  };
 }
 
 function offsetPointFromEdge(midpoint: Point2D, direction: Point2D, offset: number): Point2D {
@@ -359,6 +687,25 @@ function assignRoomEdgesUniquely(
   return bestAssignment;
 }
 
+function assignmentCost(
+  assignment: Array<Wall | null>,
+  candidatesByEdge: RoomEdgeWallCandidate[][]
+): number {
+  let cost = 0;
+  for (let edgeIndex = 0; edgeIndex < assignment.length; edgeIndex += 1) {
+    const wall = assignment[edgeIndex];
+    if (!wall) {
+      return Number.POSITIVE_INFINITY;
+    }
+    const candidate = candidatesByEdge[edgeIndex].find((entry) => entry.wall.id === wall.id);
+    if (!candidate) {
+      return Number.POSITIVE_INFINITY;
+    }
+    cost += candidate.score;
+  }
+  return cost;
+}
+
 function matchRoomEdgesToWalls(room: Room, roomWalls: Wall[]): MatchedRoomEdge[] | null {
   const roomEdges = buildRoomEdges(room);
   if (roomEdges.length < 3 || roomWalls.length === 0) return null;
@@ -366,12 +713,20 @@ function matchRoomEdgesToWalls(room: Room, roomWalls: Wall[]): MatchedRoomEdge[]
   const candidatesByEdge = roomEdges.map((edge) => buildRoomEdgeCandidates(edge, roomWalls));
   if (candidatesByEdge.some((candidates) => candidates.length === 0)) return null;
 
+  const greedyAssignment = candidatesByEdge.map((candidates) => candidates[0]?.wall ?? null);
   const uniqueAssignment = roomWalls.length >= roomEdges.length
     ? assignRoomEdgesUniquely(candidatesByEdge)
     : null;
+  const greedyCost = assignmentCost(greedyAssignment, candidatesByEdge);
+  const uniqueCost = uniqueAssignment
+    ? assignmentCost(uniqueAssignment, candidatesByEdge)
+    : Number.POSITIVE_INFINITY;
 
-  const assignedWalls = uniqueAssignment ??
-    candidatesByEdge.map((candidates) => candidates[0]?.wall ?? null);
+  // If one-to-one matching distorts the geometry too much, prefer per-edge best match.
+  const useGreedy =
+    !uniqueAssignment ||
+    uniqueCost > greedyCost * 1.35;
+  const assignedWalls = useGreedy ? greedyAssignment : uniqueAssignment;
 
   if (assignedWalls.some((wall) => !wall)) return null;
 
@@ -379,6 +734,53 @@ function matchRoomEdgesToWalls(room: Room, roomWalls: Wall[]): MatchedRoomEdge[]
     edge,
     wall: assignedWalls[index] as Wall,
   }));
+}
+
+function collectRoomTraceCandidateWalls(
+  room: Room,
+  wallsById: Map<string, Wall>
+): Wall[] {
+  const explicitWalls = room.wallIds
+    .map((wallId) => wallsById.get(wallId))
+    .filter((wall): wall is Wall => Boolean(wall));
+  const candidatesById = new Map(explicitWalls.map((wall) => [wall.id, wall]));
+  const roomEdges = buildRoomEdges(room);
+  if (roomEdges.length < 3) {
+    return explicitWalls;
+  }
+
+  const allWalls = Array.from(wallsById.values());
+  for (const wall of allWalls) {
+    if (candidatesById.has(wall.id)) {
+      continue;
+    }
+
+    let bestAlignment = 0;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    let bestSpanPenalty = Number.POSITIVE_INFINITY;
+    for (const edge of roomEdges) {
+      const alignment = edgeAlignment(edge.start, edge.end, wall);
+      if (alignment < 0.8) {
+        continue;
+      }
+
+      const distance = averageEdgeDistanceToWall(edge.start, edge.end, wall);
+      const spanPenalty = edgeSpanPenalty(edge.start, edge.end, wall);
+      bestAlignment = Math.max(bestAlignment, alignment);
+      bestDistance = Math.min(bestDistance, distance);
+      bestSpanPenalty = Math.min(bestSpanPenalty, spanPenalty);
+    }
+
+    if (
+      bestAlignment >= 0.92 &&
+      bestDistance <= Math.max(140, wall.thickness * 1.4) &&
+      bestSpanPenalty <= 0.35
+    ) {
+      candidatesById.set(wall.id, wall);
+    }
+  }
+
+  return Array.from(candidatesById.values());
 }
 
 // =============================================================================
@@ -389,59 +791,93 @@ function chooseRoomEdgeOuterLine(
   room: Room,
   matchedEdge: MatchedRoomEdge
 ): { start: Point2D; end: Point2D } | null {
-  const { edge, wall } = matchedEdge;
-  if (magnitude(edge.direction) < 0.000001) return null;
-
-  const probeDistance = Math.max(1, Math.min(wall.thickness / 4, 25));
-  const leftProbe = offsetPointFromEdge(edge.midpoint, edge.direction, probeDistance);
-  const rightProbe = offsetPointFromEdge(edge.midpoint, edge.direction, -probeDistance);
-  const leftInside = GeometryEngine.pointInPolygon(leftProbe, room.vertices);
-  const rightInside = GeometryEngine.pointInPolygon(rightProbe, room.vertices);
-
-  let outsideSign = 0;
-  if (leftInside && !rightInside) {
-    outsideSign = -1;
-  } else if (!leftInside && rightInside) {
-    outsideSign = 1;
-  } else {
-    const toCentroid = subtract(room.centroid, edge.midpoint);
-    outsideSign = cross(edge.direction, toCentroid) >= 0 ? -1 : 1;
-  }
-
-  const projectedCenter = projectPointToSegment(edge.midpoint, wall.startPoint, wall.endPoint);
-  const centerOffsetMagnitude = Math.min(projectedCenter.distance, wall.thickness / 2);
-  const outerOffset = outsideSign * (centerOffsetMagnitude + wall.thickness / 2);
-
-  return offsetLine(edge.start, edge.end, outerOffset);
+  const faces = chooseRoomEdgeFaceLines(room, matchedEdge);
+  return faces?.outerLine ?? null;
 }
 
-function chooseRoomEdgeCenterLine(
+function chooseRoomEdgeInnerLine(
   room: Room,
   matchedEdge: MatchedRoomEdge
 ): { start: Point2D; end: Point2D } | null {
+  const faces = chooseRoomEdgeFaceLines(room, matchedEdge);
+  return faces?.innerLine ?? null;
+}
+
+function orientLineToDirection(
+  line: { start: Point2D; end: Point2D },
+  direction: Point2D
+): { start: Point2D; end: Point2D } {
+  const lineDirection = normalize(subtract(line.end, line.start));
+  if (dot(lineDirection, direction) >= 0) {
+    return {
+      start: { ...line.start },
+      end: { ...line.end },
+    };
+  }
+
+  return {
+    start: { ...line.end },
+    end: { ...line.start },
+  };
+}
+
+function chooseRoomEdgeFaceLines(
+  room: Room,
+  matchedEdge: MatchedRoomEdge
+): { outerLine: { start: Point2D; end: Point2D }; innerLine: { start: Point2D; end: Point2D } } | null {
   const { edge, wall } = matchedEdge;
   if (magnitude(edge.direction) < 0.000001) return null;
 
-  const probeDistance = Math.max(1, Math.min(wall.thickness / 4, 25));
+  const outsideSign = roomEdgeOutsideSign(room, edge, wall.thickness);
+  const interiorLine = orientLineToDirection(
+    { start: wall.interiorLine.start, end: wall.interiorLine.end },
+    edge.direction
+  );
+  const exteriorLine = orientLineToDirection(
+    { start: wall.exteriorLine.start, end: wall.exteriorLine.end },
+    edge.direction
+  );
+  const edgeNormal = { x: -edge.direction.y, y: edge.direction.x };
+  const interiorMid = pointOnEdge(interiorLine.start, interiorLine.end, 0.5);
+  const exteriorMid = pointOnEdge(exteriorLine.start, exteriorLine.end, 0.5);
+  const interiorOutsideScore = dot(subtract(interiorMid, edge.midpoint), edgeNormal) * outsideSign;
+  const exteriorOutsideScore = dot(subtract(exteriorMid, edge.midpoint), edgeNormal) * outsideSign;
+
+  if (interiorOutsideScore >= exteriorOutsideScore) {
+    return {
+      outerLine: interiorLine,
+      innerLine: exteriorLine,
+    };
+  }
+
+  return {
+    outerLine: exteriorLine,
+    innerLine: interiorLine,
+  };
+}
+
+function roomEdgeOutsideSign(
+  room: Room,
+  edge: RoomEdge,
+  wallThickness: number
+): number {
+  const probeDistance = Math.max(1, Math.min(wallThickness / 4, 25));
   const leftProbe = offsetPointFromEdge(edge.midpoint, edge.direction, probeDistance);
   const rightProbe = offsetPointFromEdge(edge.midpoint, edge.direction, -probeDistance);
   const leftInside = GeometryEngine.pointInPolygon(leftProbe, room.vertices);
   const rightInside = GeometryEngine.pointInPolygon(rightProbe, room.vertices);
 
-  let outsideSign = 0;
   if (leftInside && !rightInside) {
-    outsideSign = -1;
-  } else if (!leftInside && rightInside) {
-    outsideSign = 1;
-  } else {
-    const toCentroid = subtract(room.centroid, edge.midpoint);
-    outsideSign = cross(edge.direction, toCentroid) >= 0 ? -1 : 1;
+    return -1;
+  }
+  if (!leftInside && rightInside) {
+    return 1;
   }
 
-  const projectedCenter = projectPointToSegment(edge.midpoint, wall.startPoint, wall.endPoint);
-  const centerOffset = outsideSign * Math.min(projectedCenter.distance, wall.thickness / 2);
-  return offsetLine(edge.start, edge.end, centerOffset);
+  const toCentroid = subtract(room.centroid, edge.midpoint);
+  return cross(edge.direction, toCentroid) >= 0 ? -1 : 1;
 }
+
 
 /**
  * [FIX] traceOffsetRing now validates the resulting ring is not self-intersecting.
@@ -455,8 +891,46 @@ function traceOffsetRing(lines: Array<{ start: Point2D; end: Point2D }>): Point2
   for (let index = 0; index < lines.length; index += 1) {
     const previous = lines[(index - 1 + lines.length) % lines.length];
     const current = lines[index];
+    const fallbackCorner = {
+      x: (previous.end.x + current.start.x) / 2,
+      y: (previous.end.y + current.start.y) / 2,
+    };
     const intersection = lineIntersection(previous.start, previous.end, current.start, current.end);
-    ring.push(intersection ?? { ...current.start });
+    if (!intersection) {
+      ring.push(fallbackCorner);
+      continue;
+    }
+
+    // Limit acute-angle miters to prevent long spikes from protruding into the wall band.
+    const previousLength = pointDistance(previous.start, previous.end);
+    const currentLength = pointDistance(current.start, current.end);
+    const shortestLength = Math.max(1, Math.min(previousLength, currentLength));
+    const cornerGap = pointDistance(previous.end, current.start);
+    const geometricCap = shortestLength * ROOM_OFFSET_MITER_LENGTH_RATIO;
+    const localGapCap = Math.max(
+      ROOM_OFFSET_MITER_MIN_REACH_MM,
+      cornerGap * ROOM_OFFSET_MITER_GAP_FACTOR
+    );
+    const maxReach = Math.max(
+      ROOM_OFFSET_MITER_MIN_REACH_MM,
+      Math.min(geometricCap, localGapCap, ROOM_OFFSET_MITER_MAX_REACH_MM)
+    );
+    const reach = pointDistance(intersection, fallbackCorner);
+    if (!Number.isFinite(reach) || reach > maxReach) {
+      if (!Number.isFinite(reach) || reach < 0.000001) {
+        ring.push(fallbackCorner);
+        continue;
+      }
+
+      const clampRatio = maxReach / reach;
+      ring.push({
+        x: fallbackCorner.x + (intersection.x - fallbackCorner.x) * clampRatio,
+        y: fallbackCorner.y + (intersection.y - fallbackCorner.y) * clampRatio,
+      });
+      continue;
+    }
+
+    ring.push(intersection);
   }
 
   const normalized = normalizeRing(ring);
@@ -473,9 +947,7 @@ function traceOffsetRing(lines: Array<{ start: Point2D; end: Point2D }>): Point2
 function traceRoomOuterRing(room: Room, wallsById: Map<string, Wall>): Point2D[] | null {
   if (room.vertices.length < 3) return null;
 
-  const roomWalls = room.wallIds
-    .map((wallId) => wallsById.get(wallId))
-    .filter((wall): wall is Wall => Boolean(wall));
+  const roomWalls = collectRoomTraceCandidateWalls(room, wallsById);
   const matchedEdges = matchRoomEdgesToWalls(room, roomWalls);
   if (!matchedEdges) return null;
 
@@ -488,32 +960,46 @@ function traceRoomOuterRing(room: Room, wallsById: Map<string, Wall>): Point2D[]
     (line): line is { start: Point2D; end: Point2D } => Boolean(line)
   );
   const ring = traceOffsetRing(resolvedLines);
+  if (!ring) return null;
+  const nominalWallThickness = estimateRoomWallThickness(roomWalls);
+  const oriented = ensureWindingOrder(ring, true);
+  const cleaned = cleanRoomRingCornerArtifacts(oriented, nominalWallThickness);
+
+  if (cleaned.length >= 3 && !isRingSelfIntersecting(cleaned)) {
+    return ensureWindingOrder(cleaned, true);
+  }
 
   // [NEW] Ensure outer rings are CCW for correct even-odd fill
-  return ring ? ensureWindingOrder(ring, true) : null;
+  return oriented;
 }
 
-function traceRoomCenterRing(room: Room, wallsById: Map<string, Wall>): Point2D[] | null {
+function traceRoomInnerRing(room: Room, wallsById: Map<string, Wall>): Point2D[] | null {
   if (room.vertices.length < 3) return null;
 
-  const roomWalls = room.wallIds
-    .map((wallId) => wallsById.get(wallId))
-    .filter((wall): wall is Wall => Boolean(wall));
+  const roomWalls = collectRoomTraceCandidateWalls(room, wallsById);
   const matchedEdges = matchRoomEdgesToWalls(room, roomWalls);
   if (!matchedEdges) return null;
 
-  const centerLines = matchedEdges.map((matchedEdge) =>
-    chooseRoomEdgeCenterLine(room, matchedEdge)
+  const innerLines = matchedEdges.map((matchedEdge) =>
+    chooseRoomEdgeInnerLine(room, matchedEdge)
   );
-  if (centerLines.some((line) => !line)) return null;
+  if (innerLines.some((line) => !line)) return null;
 
-  const resolvedLines = centerLines.filter(
+  const resolvedLines = innerLines.filter(
     (line): line is { start: Point2D; end: Point2D } => Boolean(line)
   );
   const ring = traceOffsetRing(resolvedLines);
+  if (!ring) return null;
+  const nominalWallThickness = estimateRoomWallThickness(roomWalls);
+  const oriented = ensureWindingOrder(ring, false);
+  const cleaned = cleanRoomRingCornerArtifacts(oriented, nominalWallThickness);
 
-  // [NEW] Inner rings should be CW
-  return ring ? ensureWindingOrder(ring, false) : null;
+  if (cleaned.length >= 3 && !isRingSelfIntersecting(cleaned)) {
+    return ensureWindingOrder(cleaned, false);
+  }
+
+  // [NEW] Ensure inner rings are CW for correct even-odd fill
+  return oriented;
 }
 
 function findRoomContoursFromUnion(
@@ -535,14 +1021,21 @@ function findRoomContoursFromUnion(
         return;
       }
 
+      const orientedOuter = ensureWindingOrder(outerRing, true);
+      const prunedOuter = pruneOuterRingSpikes(orientedOuter);
+      const resolvedOuter = prunedOuter.length >= 3 && !isRingSelfIntersecting(prunedOuter)
+        ? prunedOuter
+        : orientedOuter;
+      const resolvedInner = ensureWindingOrder(innerRing, false);
+
       const containsCentroid = GeometryEngine.pointInPolygon(room.centroid, innerRing);
       const centroidDistance = pointDistance(ringCentroid(innerRing), room.centroid);
       const areaDelta = Math.abs(absoluteRingArea(innerRing) - room.area);
       const score = areaDelta + centroidDistance;
       const candidate: RoomUnionContourCandidate = {
         score,
-        outerRing: ensureWindingOrder(outerRing, true),
-        innerRing: ensureWindingOrder(innerRing, false),
+        outerRing: resolvedOuter,
+        innerRing: resolvedInner,
       };
 
       if (containsCentroid) {
@@ -564,6 +1057,46 @@ function findRoomContoursFromUnion(
     outerRing: bestMatch.outerRing,
     innerRing: bestMatch.innerRing,
   };
+}
+
+function findRoomContoursFromWallBodies(
+  room: Room,
+  roomWalls: Wall[]
+): RoomUnionContours | null {
+  const features = roomWalls
+    .map((wall) => makePolygonFeatureFromRing(computeWallBodyPolygon(wall)))
+    .filter((feature): feature is PolygonFeature => Boolean(feature));
+  if (features.length === 0) {
+    return null;
+  }
+
+  const polygons = unionFeaturesPolygons(features);
+  if (polygons.length === 0) {
+    return null;
+  }
+
+  return findRoomContoursFromUnion(room, polygons);
+}
+
+function findRoomContoursFromSelectableWalls(
+  room: Room,
+  roomWalls: Wall[],
+  joinsMap: Map<string, JoinData[]>
+): RoomUnionContours | null {
+  const features = roomWalls
+    .map((wall) => computeSelectableWallPolygon(wall, joinsMap, roomWalls))
+    .map((polygon) => makePolygonFeatureFromRing(polygon))
+    .filter((feature): feature is PolygonFeature => Boolean(feature));
+  if (features.length === 0) {
+    return null;
+  }
+
+  const polygons = unionFeaturesPolygons(features);
+  if (polygons.length === 0) {
+    return null;
+  }
+
+  return findRoomContoursFromUnion(room, polygons);
 }
 
 // =============================================================================
@@ -686,73 +1219,774 @@ function isPointInPolygon(point: Point2D, polygon: Point2D[]): boolean {
 // Public API
 // =============================================================================
 
+function buildRoomSelectionComponent(
+  room: Room,
+  roomWalls: Wall[],
+  wallsById: Map<string, Wall>
+): WallSelectionComponent | null {
+  const roomRenderData = computeWallUnionRenderData(roomWalls);
+  const roomPolygons = roomRenderData.components.flatMap((component) => component.polygons);
+  const selectableContours = findRoomContoursFromSelectableWalls(
+    room,
+    roomWalls,
+    roomRenderData.joinsMap
+  );
+  const bodyContours = findRoomContoursFromWallBodies(room, roomWalls);
+  const unionContours = findRoomContoursFromUnion(room, roomPolygons);
+  const tracedOuterRing = traceRoomOuterRing(room, wallsById);
+  const tracedInnerRing = traceRoomInnerRing(room, wallsById);
+  const thicknessValues = roomWalls
+    .map((wall) => wall.thickness)
+    .filter((thickness): thickness is number => Number.isFinite(thickness) && thickness > 0);
+  const medianThickness = median(thicknessValues);
+  const shortEdgeThreshold = Math.max(6, medianThickness * 0.45);
+  const tracedOuterCandidate = tracedOuterRing
+    ? ensureWindingOrder(cleanRingNotches(tracedOuterRing, shortEdgeThreshold), true)
+    : null;
+  const tracedInnerCandidate = tracedInnerRing
+    ? ensureWindingOrder(cleanRingNotches(tracedInnerRing, Math.max(5, shortEdgeThreshold * 0.7)), false)
+    : null;
+  const bodyOuterCandidate = bodyContours?.outerRing
+    ? ensureWindingOrder(cleanRingNotches(pruneOuterRingSpikes(bodyContours.outerRing), shortEdgeThreshold), true)
+    : null;
+  const bodyInnerCandidate = bodyContours?.innerRing
+    ? ensureWindingOrder(cleanRingNotches(bodyContours.innerRing, Math.max(5, shortEdgeThreshold * 0.7)), false)
+    : null;
+  const unionOuterCandidate = unionContours?.outerRing
+    ? ensureWindingOrder(cleanRingNotches(pruneOuterRingSpikes(unionContours.outerRing), shortEdgeThreshold), true)
+    : null;
+  const unionInnerCandidate = unionContours?.innerRing
+    ? ensureWindingOrder(cleanRingNotches(unionContours.innerRing, Math.max(5, shortEdgeThreshold * 0.7)), false)
+    : null;
+  const selectableInnerCandidate = selectableContours?.innerRing
+    ? ensureWindingOrder(cleanRingNotches(selectableContours.innerRing, Math.max(5, shortEdgeThreshold * 0.7)), false)
+    : null;
+
+  const fallbackRoomInnerRing = ensureWindingOrder(normalizeRing(room.vertices), false);
+  const canonicalInnerRing = fallbackRoomInnerRing.length >= 3
+    ? ensureWindingOrder(
+      cleanRingNotches(fallbackRoomInnerRing, Math.max(5, shortEdgeThreshold * 0.7)),
+      false
+    )
+    : null;
+
+  const outerRingCandidates: RoomOuterRingCandidate[] = [];
+  if (selectableContours) {
+    outerRingCandidates.push({
+      ring: ensureWindingOrder(
+        cleanRingNotches(pruneOuterRingSpikes(selectableContours.outerRing), shortEdgeThreshold),
+        true
+      ),
+      source: 'selectable',
+      priority: 0,
+    });
+  }
+  if (tracedOuterCandidate) {
+    outerRingCandidates.push({
+      ring: tracedOuterCandidate,
+      source: 'traced',
+      priority: 1,
+    });
+  }
+  if (bodyOuterCandidate) {
+    outerRingCandidates.push({
+      ring: bodyOuterCandidate,
+      source: 'body',
+      priority: 2,
+    });
+  }
+  if (unionOuterCandidate) {
+    outerRingCandidates.push({
+      ring: unionOuterCandidate,
+      source: 'union',
+      priority: 3,
+    });
+  }
+
+  const scoredOuterCandidates = canonicalInnerRing
+    ? outerRingCandidates
+    .map((candidate) => ({
+      candidate,
+      score: outerRingQualityScore(
+        room,
+        candidate.ring,
+        canonicalInnerRing,
+        Math.max(40, medianThickness),
+        Math.max(6, medianThickness * 0.18)
+      ),
+    }))
+    .filter((entry) => Number.isFinite(entry.score))
+    .sort((a, b) => {
+      if (Math.abs(a.score - b.score) <= 0.000001) {
+        return a.candidate.priority - b.candidate.priority;
+      }
+      return a.score - b.score;
+    })
+    : [];
+  const bestOuterCandidate = scoredOuterCandidates[0]?.candidate ?? outerRingCandidates[0] ?? null;
+
+  const wallBandOuterRing =
+    bestOuterCandidate?.ring ??
+    tracedOuterCandidate ??
+    bodyOuterCandidate ??
+    unionOuterCandidate ??
+    null;
+  const innerRingCandidates: RoomInnerRingCandidate[] = [];
+  if (tracedInnerCandidate) {
+    innerRingCandidates.push({
+      ring: tracedInnerCandidate,
+      source: 'traced',
+      priority: 0,
+    });
+  }
+  if (selectableInnerCandidate) {
+    innerRingCandidates.push({
+      ring: selectableInnerCandidate,
+      source: 'selectable',
+      priority: 1,
+    });
+  }
+  if (bodyInnerCandidate) {
+    innerRingCandidates.push({
+      ring: bodyInnerCandidate,
+      source: 'body',
+      priority: 2,
+    });
+  }
+  if (unionInnerCandidate) {
+    innerRingCandidates.push({
+      ring: unionInnerCandidate,
+      source: 'union',
+      priority: 3,
+    });
+  }
+  if (canonicalInnerRing) {
+    innerRingCandidates.push({
+      ring: canonicalInnerRing,
+      source: 'fallback',
+      priority: 4,
+    });
+  }
+
+  const scoredInnerCandidates = wallBandOuterRing
+    ? innerRingCandidates
+      .map((candidate) => ({
+        candidate,
+        score: innerRingQualityScore(
+          room,
+          candidate.ring,
+          wallBandOuterRing,
+          Math.max(40, medianThickness),
+          Math.max(6, medianThickness * 0.18)
+        ),
+      }))
+      .filter((entry) => Number.isFinite(entry.score))
+      .sort((a, b) => {
+        if (Math.abs(a.score - b.score) <= 0.000001) {
+          return a.candidate.priority - b.candidate.priority;
+        }
+        return a.score - b.score;
+      })
+    : [];
+  const bestInnerCandidate = scoredInnerCandidates[0]?.candidate ?? innerRingCandidates[0] ?? null;
+
+  const rawInnerRing = bestInnerCandidate?.ring ?? canonicalInnerRing ?? null;
+  const wallBandInnerRing = rawInnerRing && rawInnerRing.length >= 3
+    ? ensureWindingOrder(
+      cleanRingNotches(rawInnerRing, Math.max(5, shortEdgeThreshold * 0.7)),
+      false
+    )
+    : null;
+  const outlineRings: Point2D[][] = [];
+  const outlineSignatures = new Set<string>();
+  pushUniqueRing(outlineRings, wallBandOuterRing, true, outlineSignatures);
+  pushUniqueRing(outlineRings, wallBandInnerRing, false, outlineSignatures);
+  if (outlineRings.length === 0) {
+    roomRenderData.components.forEach((component) => {
+      normalizeOuterRings(component.polygons).forEach((ring) => {
+        pushUniqueRing(outlineRings, ring, true, outlineSignatures);
+      });
+      normalizeInnerRings(component.polygons).forEach((ring) => {
+        pushUniqueRing(outlineRings, ring, false, outlineSignatures);
+      });
+    });
+  }
+  const fillRingsFromUnion = roomRenderData.components.flatMap((component) =>
+    normalizeFillRings(component.polygons)
+  );
+  let fillRings: Point2D[][] = [];
+  if (wallBandOuterRing && wallBandInnerRing) {
+    fillRings = [wallBandOuterRing, wallBandInnerRing];
+  } else if (wallBandOuterRing) {
+    fillRings = [wallBandOuterRing];
+  } else if (wallBandInnerRing) {
+    fillRings = [wallBandInnerRing];
+  } else {
+    fillRings = fillRingsFromUnion;
+  }
+
+  if (outlineRings.length === 0 && fillRings.length === 0) {
+    return null;
+  }
+
+  return {
+    id: `room-selection-${room.id}`,
+    kind: 'room',
+    wallIds: [...room.wallIds],
+    outlineRings,
+    fillRings,
+  };
+}
+
+function buildComponentSelectionComponent(component: {
+  id: string;
+  wallIds: string[];
+  polygons: Point2D[][][];
+}): WallSelectionComponent | null {
+  const outlineRings = normalizeOuterRings(component.polygons);
+  const fillRings = normalizeFillRings(component.polygons);
+  if (outlineRings.length === 0 && fillRings.length === 0) {
+    return null;
+  }
+
+  return {
+    id: `component-selection-${component.id}`,
+    kind: 'component',
+    wallIds: component.wallIds,
+    outlineRings,
+    fillRings,
+  };
+}
+
+function isCrowdedSelectionEndpoint(
+  wall: Wall,
+  endpoint: 'start' | 'end',
+  componentWalls: Wall[]
+): boolean {
+  const point = endpoint === 'start' ? wall.startPoint : wall.endPoint;
+  let endpointNeighborCount = 0;
+  let segmentHostCount = 0;
+
+  for (const otherWall of componentWalls) {
+    if (otherWall.id === wall.id) {
+      continue;
+    }
+
+    const touchesOtherEndpoint =
+      pointDistance(point, otherWall.startPoint) <= SELECTION_ENDPOINT_TOLERANCE_MM ||
+      pointDistance(point, otherWall.endPoint) <= SELECTION_ENDPOINT_TOLERANCE_MM;
+    if (touchesOtherEndpoint) {
+      endpointNeighborCount += 1;
+      continue;
+    }
+
+    const projection = projectPointToSegment(point, otherWall.startPoint, otherWall.endPoint);
+    if (
+      projection.distance <= SELECTION_ENDPOINT_TOLERANCE_MM &&
+      projection.t > SELECTION_SEGMENT_T_EPSILON &&
+      projection.t < 1 - SELECTION_SEGMENT_T_EPSILON
+    ) {
+      segmentHostCount += 1;
+    }
+  }
+
+  return endpointNeighborCount >= 1 || segmentHostCount >= 1;
+}
+
+function unitDirectionFromEndpoint(
+  wall: Wall,
+  endpoint: 'start' | 'end'
+): Point2D {
+  return endpoint === 'start'
+    ? normalize(subtract(wall.endPoint, wall.startPoint))
+    : normalize(subtract(wall.startPoint, wall.endPoint));
+}
+
+function endpointTouchesWallAtEnd(
+  point: Point2D,
+  wall: Wall,
+  endpoint: 'start' | 'end',
+  toleranceMm: number
+): boolean {
+  const target = endpoint === 'start' ? wall.startPoint : wall.endPoint;
+  return pointDistance(point, target) <= toleranceMm;
+}
+
+function endpointMinJoinAngleDeg(
+  wall: Wall,
+  endpoint: 'start' | 'end',
+  componentWalls: Wall[]
+): number | null {
+  const endpointPoint = endpoint === 'start' ? wall.startPoint : wall.endPoint;
+  const directionA = unitDirectionFromEndpoint(wall, endpoint);
+  if (magnitude(directionA) < 0.000001) {
+    return null;
+  }
+
+  let minAngleDeg: number | null = null;
+  for (const otherWall of componentWalls) {
+    if (otherWall.id === wall.id) {
+      continue;
+    }
+
+    const touchesStart = endpointTouchesWallAtEnd(
+      endpointPoint,
+      otherWall,
+      'start',
+      SELECTION_ENDPOINT_TOLERANCE_MM
+    );
+    const touchesEnd = endpointTouchesWallAtEnd(
+      endpointPoint,
+      otherWall,
+      'end',
+      SELECTION_ENDPOINT_TOLERANCE_MM
+    );
+    if (!touchesStart && !touchesEnd) {
+      continue;
+    }
+
+    const directionB = touchesStart
+      ? normalize(subtract(otherWall.endPoint, otherWall.startPoint))
+      : normalize(subtract(otherWall.startPoint, otherWall.endPoint));
+    if (magnitude(directionB) < 0.000001) {
+      continue;
+    }
+
+    const dotProduct = Math.max(-1, Math.min(1, dot(directionA, directionB)));
+    const angleDeg = Math.acos(dotProduct) * (180 / Math.PI);
+    if (minAngleDeg === null || angleDeg < minAngleDeg) {
+      minAngleDeg = angleDeg;
+    }
+  }
+
+  return minAngleDeg;
+}
+
+function endpointJoinLooksSpiky(
+  wall: Wall,
+  endpoint: 'start' | 'end',
+  selectionPolygon: Point2D[],
+  componentWalls: Wall[]
+): boolean {
+  if (selectionPolygon.length !== 4) {
+    return false;
+  }
+
+  const [firstIndex, secondIndex] = endpoint === 'start' ? [0, 3] : [1, 2];
+  const firstVertex = selectionPolygon[firstIndex];
+  const secondVertex = selectionPolygon[secondIndex];
+  const endpointPoint = endpoint === 'start' ? wall.startPoint : wall.endPoint;
+
+  const reach = Math.max(
+    pointDistance(firstVertex, endpointPoint),
+    pointDistance(secondVertex, endpointPoint)
+  );
+  const maxReachAllowed = Math.max(
+    wall.thickness * SELECTION_SPIKE_MAX_REACH_FACTOR,
+    SELECTION_SPIKE_MAX_REACH_MM
+  );
+
+  const capWidth = pointDistance(firstVertex, secondVertex);
+  const minCapWidth = wall.thickness * SELECTION_SPIKE_CAP_FACTOR;
+
+  const minAngleDeg = endpointMinJoinAngleDeg(wall, endpoint, componentWalls);
+  const acuteNeighbor = minAngleDeg !== null && minAngleDeg <= SELECTION_SPIKE_ANGLE_THRESHOLD_DEG;
+
+  if (reach > maxReachAllowed) {
+    return true;
+  }
+  if (acuteNeighbor) {
+    return true;
+  }
+  if (minAngleDeg !== null && minAngleDeg <= 90 && capWidth < minCapWidth) {
+    return true;
+  }
+
+  return false;
+}
+
+function closeRing(points: Point2D[]): number[][] {
+  if (points.length === 0) return [];
+  const ring = points.map((point) => [point.x, point.y]);
+  const first = ring[0];
+  const last = ring[ring.length - 1];
+  if (!first || !last) return ring;
+  if (Math.abs(first[0] - last[0]) > 0.000001 || Math.abs(first[1] - last[1]) > 0.000001) {
+    ring.push([first[0], first[1]]);
+  }
+  return ring;
+}
+
+function openRing(ring: number[][]): Point2D[] {
+  if (ring.length === 0) return [];
+  const opened = ring.map(([x, y]) => ({ x, y }));
+  if (opened.length < 2) return opened;
+  const first = opened[0];
+  const last = opened[opened.length - 1];
+  if (Math.abs(first.x - last.x) < 0.000001 && Math.abs(first.y - last.y) < 0.000001) {
+    opened.pop();
+  }
+  return opened;
+}
+
+function makePolygonFeatureFromRing(vertices: Point2D[]): PolygonFeature | null {
+  const ring = normalizeRing(vertices);
+  if (ring.length < 3) return null;
+  try {
+    return turf.polygon([closeRing(ring)]);
+  } catch {
+    return null;
+  }
+}
+
+function extractPolygonsFromGeometry(
+  geometry: PolygonGeometry | MultiPolygonGeometry
+): Point2D[][][] {
+  if (geometry.type === 'Polygon') {
+    return [geometry.coordinates.map(openRing)];
+  }
+  return geometry.coordinates.map((polygon) => polygon.map(openRing));
+}
+
+function unionFeaturesPolygons(features: PolygonFeature[]): Point2D[][][] {
+  if (features.length === 0) {
+    return [];
+  }
+
+  if (features.length === 1) {
+    return [features[0].geometry.coordinates.map(openRing)];
+  }
+
+  try {
+    const merged = turf.union(turf.featureCollection(features));
+    if (merged && (merged.geometry.type === 'Polygon' || merged.geometry.type === 'MultiPolygon')) {
+      return extractPolygonsFromGeometry(merged.geometry);
+    }
+  } catch {
+    // Fall through to per-feature polygons.
+  }
+
+  return features.map((feature) => feature.geometry.coordinates.map(openRing));
+}
+
+function endpointHasJoin(
+  wall: Wall,
+  endpoint: 'start' | 'end',
+  joinsMap: Map<string, JoinData[]>
+): boolean {
+  const joins = joinsMap.get(wall.id) ?? [];
+  if (joins.length === 0) {
+    return false;
+  }
+
+  const endpointPoint = endpoint === 'start' ? wall.startPoint : wall.endPoint;
+  return joins.some((join) => {
+    if (join.endpoint === endpoint) {
+      return true;
+    }
+    const joinPoint = join.joinPoint;
+    return pointDistance(joinPoint, endpointPoint) <= SELECTION_JOIN_ENDPOINT_TOLERANCE_MM;
+  });
+}
+
+function angleBetweenFromVertex(vertex: Point2D, a: Point2D, b: Point2D): number {
+  const va = subtract(a, vertex);
+  const vb = subtract(b, vertex);
+  const magA = magnitude(va);
+  const magB = magnitude(vb);
+  if (magA < 0.000001 || magB < 0.000001) {
+    return 180;
+  }
+  const cosine = Math.max(-1, Math.min(1, dot(va, vb) / (magA * magB)));
+  return Math.acos(cosine) * (180 / Math.PI);
+}
+
+function pruneOuterRingSpikes(ring: Point2D[]): Point2D[] {
+  const normalized = normalizeRing(ring);
+  if (normalized.length < 4) {
+    return normalized;
+  }
+
+  let working = [...normalized];
+  let changed = true;
+  let iteration = 0;
+  const maxIterations = 2 * normalized.length;
+
+  while (changed && iteration < maxIterations && working.length >= 4) {
+    iteration += 1;
+    changed = false;
+
+    for (let i = 0; i < working.length; i += 1) {
+      const prev = working[(i - 1 + working.length) % working.length];
+      const curr = working[i];
+      const next = working[(i + 1) % working.length];
+      const lenPrev = pointDistance(prev, curr);
+      const lenNext = pointDistance(curr, next);
+      const span = pointDistance(prev, next);
+      if (
+        lenPrev < OUTER_RING_SPIKE_MIN_EDGE_MM ||
+        lenNext < OUTER_RING_SPIKE_MIN_EDGE_MM ||
+        span < OUTER_RING_SPIKE_MIN_EDGE_MM
+      ) {
+        continue;
+      }
+
+      const angleDeg = angleBetweenFromVertex(curr, prev, next);
+      const reachRatio = Math.max(lenPrev, lenNext) / Math.max(span, 1);
+      if (angleDeg <= OUTER_RING_SPIKE_ANGLE_DEG && reachRatio >= OUTER_RING_SPIKE_REACH_RATIO) {
+        const candidate = working.filter((_, idx) => idx !== i);
+        if (candidate.length < 3) {
+          continue;
+        }
+        if (isRingSelfIntersecting(candidate)) {
+          continue;
+        }
+        working = candidate;
+        changed = true;
+        break;
+      }
+    }
+  }
+
+  return working;
+}
+
+function cleanRingNotches(ring: Point2D[], shortEdgeThreshold: number): Point2D[] {
+  const normalized = normalizeRing(ring);
+  if (normalized.length < 4) {
+    return normalized;
+  }
+
+  let working = [...normalized];
+  let changed = true;
+  let iteration = 0;
+  const maxIterations = 3 * normalized.length;
+
+  while (changed && iteration < maxIterations && working.length >= 4) {
+    iteration += 1;
+    changed = false;
+
+    for (let i = 0; i < working.length; i += 1) {
+      const prev = working[(i - 1 + working.length) % working.length];
+      const curr = working[i];
+      const next = working[(i + 1) % working.length];
+      const lenPrev = pointDistance(prev, curr);
+      const lenNext = pointDistance(curr, next);
+      const angleDeg = angleBetweenFromVertex(curr, prev, next);
+      const hasShortEdge = lenPrev < shortEdgeThreshold || lenNext < shortEdgeThreshold;
+      const stronglyAsymmetric = Math.min(lenPrev, lenNext) < shortEdgeThreshold * 0.6;
+      const notchLike =
+        hasShortEdge &&
+        stronglyAsymmetric &&
+        angleDeg > 25 &&
+        angleDeg < 165;
+      const nearCollinear = angleDeg > 176;
+
+      if (!notchLike && !nearCollinear) {
+        continue;
+      }
+
+      const candidate = working.filter((_, idx) => idx !== i);
+      if (candidate.length < 3) {
+        continue;
+      }
+      if (isRingSelfIntersecting(candidate)) {
+        continue;
+      }
+      working = candidate;
+      changed = true;
+      break;
+    }
+  }
+
+  return working;
+}
+
+export function computeSelectableWallPolygon(
+  wall: Wall,
+  joinsMap: Map<string, JoinData[]>,
+  componentWalls: Wall[]
+): Point2D[] {
+  const basePolygon = computeWallBodyPolygon(wall);
+  const selectionPolygon = computeWallPolygon(wall, joinsMap.get(wall.id));
+  if (selectionPolygon.length !== 4 || isPolygonSelfIntersecting(selectionPolygon)) {
+    return basePolygon;
+  }
+
+  const adjustedPolygon = selectionPolygon.map((point) => ({ ...point }));
+  const startHasJoin = endpointHasJoin(wall, 'start', joinsMap);
+  const endHasJoin = endpointHasJoin(wall, 'end', joinsMap);
+  if (
+    startHasJoin ||
+    isCrowdedSelectionEndpoint(wall, 'start', componentWalls) ||
+    endpointJoinLooksSpiky(wall, 'start', adjustedPolygon, componentWalls)
+  ) {
+    adjustedPolygon[0] = { ...basePolygon[0] };
+    adjustedPolygon[3] = { ...basePolygon[3] };
+  }
+  if (
+    endHasJoin ||
+    isCrowdedSelectionEndpoint(wall, 'end', componentWalls) ||
+    endpointJoinLooksSpiky(wall, 'end', adjustedPolygon, componentWalls)
+  ) {
+    adjustedPolygon[1] = { ...basePolygon[1] };
+    adjustedPolygon[2] = { ...basePolygon[2] };
+  }
+
+  return isPolygonSelfIntersecting(adjustedPolygon) ? basePolygon : adjustedPolygon;
+}
+
+function buildWallSelectionComponent(
+  wall: Wall,
+  joinsMap: Map<string, JoinData[]>,
+  componentWalls: Wall[]
+): WallSelectionComponent | null {
+  const selectionPolygon = normalizeRing(
+    computeSelectableWallPolygon(wall, joinsMap, componentWalls)
+  );
+  const outlineRings = normalizeOuterRings([[selectionPolygon]]);
+  if (outlineRings.length === 0) {
+    return null;
+  }
+  const fillRings = [...outlineRings];
+
+  return {
+    id: `wall-selection-${wall.id}`,
+    kind: 'wall',
+    wallIds: [wall.id],
+    outlineRings,
+    fillRings,
+  };
+}
+
+export function resolveWallSelectionPlan(
+  walls: Wall[],
+  rooms: Room[],
+  selectedWallIds: string[]
+): WallSelectionPlan {
+  const selectedSet = new Set(selectedWallIds);
+  if (selectedSet.size === 0) {
+    return {
+      individualWallIds: [],
+      mergedComponents: [],
+    };
+  }
+
+  const wallsById = new Map(walls.map((wall) => [wall.id, wall]));
+  const mergedComponents: WallSelectionComponent[] = [];
+  const coveredWallIds = new Set<string>();
+
+  const fullRenderData = computeWallUnionRenderData(walls);
+  const componentByWallId = new Map(
+    fullRenderData.components.flatMap((component) =>
+      component.wallIds.map((wallId) => [wallId, component] as const)
+    )
+  );
+  const selectedWallIdsExisting = Array.from(selectedSet)
+    .filter((wallId) => wallsById.has(wallId));
+  const selectedWallIdSetExisting = new Set(selectedWallIdsExisting);
+  const exactRoomMatch = rooms.find((room) => {
+    const uniqueRoomWallIds = Array.from(new Set(
+      room.wallIds.filter((wallId) => wallsById.has(wallId))
+    ));
+    if (uniqueRoomWallIds.length === 0) {
+      return false;
+    }
+    if (uniqueRoomWallIds.length !== selectedWallIdSetExisting.size) {
+      return false;
+    }
+    return uniqueRoomWallIds.every((wallId) => selectedWallIdSetExisting.has(wallId));
+  });
+  if (exactRoomMatch) {
+    const roomWalls = exactRoomMatch.wallIds
+      .map((wallId) => wallsById.get(wallId))
+      .filter((wall): wall is Wall => Boolean(wall));
+    if (roomWalls.length > 0) {
+      const roomComponent = buildRoomSelectionComponent(exactRoomMatch, roomWalls, wallsById);
+      if (roomComponent) {
+        mergedComponents.push(roomComponent);
+        exactRoomMatch.wallIds.forEach((wallId) => coveredWallIds.add(wallId));
+      }
+    }
+  }
+  fullRenderData.components
+    .filter((component) =>
+      component.wallIds.length > 1 &&
+      component.wallIds.every((wallId) => selectedSet.has(wallId)) &&
+      component.wallIds.some((wallId) => !coveredWallIds.has(wallId))
+    )
+    .forEach((component) => {
+      const selectionComponent = buildComponentSelectionComponent(component);
+      if (!selectionComponent) {
+        return;
+      }
+
+      mergedComponents.push(selectionComponent);
+      component.wallIds.forEach((wallId) => coveredWallIds.add(wallId));
+    });
+
+  rooms
+    .filter(
+      (room) =>
+        room.wallIds.length > 0 &&
+        room.wallIds.every((wallId) => selectedSet.has(wallId)) &&
+        room.wallIds.some((wallId) => !coveredWallIds.has(wallId))
+    )
+    .forEach((room) => {
+      const roomWalls = room.wallIds
+        .map((wallId) => wallsById.get(wallId))
+        .filter((wall): wall is Wall => Boolean(wall));
+      if (roomWalls.length === 0) {
+        return;
+      }
+
+      const selectionComponent = buildRoomSelectionComponent(room, roomWalls, wallsById);
+      if (!selectionComponent) {
+        return;
+      }
+
+      mergedComponents.push(selectionComponent);
+      room.wallIds.forEach((wallId) => coveredWallIds.add(wallId));
+    });
+
+  const individualWallIds = Array.from(new Set(
+    selectedWallIds.filter((wallId) => wallsById.has(wallId) && !coveredWallIds.has(wallId))
+  ));
+
+  const fallbackWallIds: string[] = [];
+  individualWallIds.forEach((wallId) => {
+    const wall = wallsById.get(wallId);
+    if (!wall) {
+      return;
+    }
+
+    const component = componentByWallId.get(wallId);
+    const componentWalls = (component?.wallIds ?? [wallId])
+      .map((componentWallId) => wallsById.get(componentWallId))
+      .filter((componentWall): componentWall is Wall => Boolean(componentWall));
+    const selectionComponent = buildWallSelectionComponent(
+      wall,
+      fullRenderData.joinsMap,
+      componentWalls
+    );
+    if (!selectionComponent) {
+      fallbackWallIds.push(wallId);
+      return;
+    }
+
+    mergedComponents.push(selectionComponent);
+  });
+
+  return {
+    individualWallIds: fallbackWallIds,
+    mergedComponents,
+  };
+}
+
 export function computeWallSelectionComponents(
   walls: Wall[],
   rooms: Room[],
   selectedWallIds: string[]
 ): WallSelectionComponent[] {
-  const selectedSet = new Set(selectedWallIds);
-  if (selectedSet.size === 0) return [];
-
-  const wallsById = new Map(walls.map((wall) => [wall.id, wall]));
-  const selectionComponents: WallSelectionComponent[] = [];
-  const coveredWallIds = new Set<string>();
-
-  const touchedRooms = rooms.filter(
-    (room) => room.wallIds.length > 0 && room.wallIds.some((wallId) => selectedSet.has(wallId))
-  );
-
-  touchedRooms.forEach((room) => {
-    const roomWalls = room.wallIds
-      .map((wallId) => wallsById.get(wallId))
-      .filter((wall): wall is Wall => Boolean(wall));
-    if (roomWalls.length === 0) return;
-
-    const roomRenderData = computeWallUnionRenderData(roomWalls);
-    const unionContours = findRoomContoursFromUnion(
-      room,
-      roomRenderData.components.flatMap((component) => component.polygons)
-    );
-    const tracedOuterRing = traceRoomOuterRing(room, wallsById);
-    const tracedCenterRing = traceRoomCenterRing(room, wallsById);
-    const roomOuterRings = unionContours
-      ? [unionContours.outerRing]
-      : tracedOuterRing
-        ? [tracedOuterRing]
-        : roomRenderData.components.flatMap((component) =>
-          normalizeOuterRings(component.polygons)
-        );
-    const roomInnerRing = unionContours?.innerRing ?? tracedCenterRing ?? normalizeRing(room.vertices);
-
-    selectionComponents.push({
-      id: `room-selection-${room.id}`,
-      wallIds: [...room.wallIds],
-      outerRings: roomOuterRings,
-      innerRings: roomInnerRing.length >= 3 ? [roomInnerRing] : [],
-    });
-
-    room.wallIds.forEach((wallId) => coveredWallIds.add(wallId));
-  });
-
-  const uncoveredSelectedWalls = walls.filter(
-    (wall) => selectedSet.has(wall.id) && !coveredWallIds.has(wall.id)
-  );
-  if (uncoveredSelectedWalls.length === 0) return selectionComponents;
-
-  const uncoveredWallIds = new Set(uncoveredSelectedWalls.map((wall) => wall.id));
-  const uncoveredWalls = walls.filter((wall) => !coveredWallIds.has(wall.id));
-  const uncoveredRenderData = computeWallUnionRenderData(uncoveredWalls);
-
-  uncoveredRenderData.components.forEach((component) => {
-    if (!component.wallIds.some((wallId) => uncoveredWallIds.has(wallId))) return;
-
-    selectionComponents.push({
-      id: `component-selection-${component.id}`,
-      wallIds: component.wallIds,
-      outerRings: normalizeOuterRings(component.polygons),
-      innerRings: normalizeInnerRings(component.polygons),
-    });
-  });
-
-  return selectionComponents;
+  return resolveWallSelectionPlan(walls, rooms, selectedWallIds).mergedComponents;
 }

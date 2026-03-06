@@ -61,6 +61,16 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function polygonArea(vertices: Point2D[]): number {
+  let area = 0;
+  for (let index = 0, prevIndex = vertices.length - 1; index < vertices.length; prevIndex = index++) {
+    const current = vertices[index];
+    const previous = vertices[prevIndex];
+    area += previous.x * current.y - current.x * previous.y;
+  }
+  return Math.abs(area) / 2;
+}
+
 export class RoomRenderer {
   private canvas: fabric.Canvas;
   private roomGroups = new Map<string, RoomGroup>();
@@ -74,6 +84,22 @@ export class RoomRenderer {
 
   constructor(canvas: fabric.Canvas) {
     this.canvas = canvas;
+  }
+
+  private pointInPolygon(point: Point2D, polygon: Point2D[]): boolean {
+    let inside = false;
+    const count = polygon.length;
+    for (let index = 0, prevIndex = count - 1; index < count; prevIndex = index++) {
+      const current = polygon[index];
+      const previous = polygon[prevIndex];
+      if (
+        ((current.y > point.y) !== (previous.y > point.y)) &&
+        (point.x < (previous.x - current.x) * (point.y - current.y) / (previous.y - current.y) + current.x)
+      ) {
+        inside = !inside;
+      }
+    }
+    return inside;
   }
 
   setShowTemperatureIcons(show: boolean): void {
@@ -621,6 +647,27 @@ export class RoomRenderer {
       }
     });
     this.canvas.requestRenderAll();
+  }
+
+  getRoomIdAtPoint(point: Point2D): string | null {
+    let bestRoomId: string | null = null;
+    let bestArea = Number.POSITIVE_INFINITY;
+
+    this.roomData.forEach((room, roomId) => {
+      if (!this.pointInPolygon(point, room.vertices)) {
+        return;
+      }
+
+      const area = Number.isFinite(room.area) && room.area > 0
+        ? room.area
+        : polygonArea(room.vertices);
+      if (area < bestArea) {
+        bestArea = area;
+        bestRoomId = roomId;
+      }
+    });
+
+    return bestRoomId;
   }
 
   removeRoom(roomId: string): void {

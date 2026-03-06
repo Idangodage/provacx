@@ -27,7 +27,6 @@ export class WallPreview {
   private material: WallMaterial = 'brick';
   private queuedEndPoint: Point2D | null = null;
   private lastEndPoint: Point2D | null = null;
-  private frameHandle: number | null = null;
   private walls: Wall[] = [];
   private preferredStartWall: Wall | null = null;
 
@@ -84,7 +83,7 @@ export class WallPreview {
     this.preferredStartWall = null;
     if (this.startPoint && this.lastEndPoint) {
       this.queuedEndPoint = { ...this.lastEndPoint };
-      this.scheduleRender();
+      this.flushPreviewRender();
     }
   }
 
@@ -110,21 +109,7 @@ export class WallPreview {
   updatePreview(endPoint: Point2D): void {
     if (!this.startPoint) return;
     this.queuedEndPoint = { ...endPoint };
-    this.scheduleRender();
-  }
-
-  private scheduleRender(): void {
-    if (typeof window === 'undefined') {
-      this.flushPreviewRender();
-      return;
-    }
-
-    if (this.frameHandle !== null) return;
-
-    this.frameHandle = window.requestAnimationFrame(() => {
-      this.frameHandle = null;
-      this.flushPreviewRender();
-    });
+    this.flushPreviewRender();
   }
 
   private flushPreviewRender(): void {
@@ -166,7 +151,8 @@ export class WallPreview {
     }
 
     const materialColors = WALL_MATERIAL_COLORS[this.material];
-    const mergedPreviewPath = new fabric.Path(this.componentPathData(previewComponent), {
+    const previewPathData = this.componentPathData(previewComponent);
+    const mergedPreviewPath = new fabric.Path(previewPathData, {
       fill: materialColors.fill,
       opacity: 0.55,
       fillRule: 'evenodd',
@@ -188,6 +174,12 @@ export class WallPreview {
         selectable: false,
         evented: false,
         objectCaching: false,
+        // Clip overlay patches to the merged wall body so acute join
+        // patches cannot bleed outside the visible wall outline.
+        clipPath: new fabric.Path(previewPathData, {
+          fillRule: 'evenodd',
+          absolutePositioned: true,
+        }),
       })
       : null;
 
@@ -242,11 +234,6 @@ export class WallPreview {
    * Clear preview from canvas.
    */
   clearPreview(): void {
-    if (this.frameHandle !== null && typeof window !== 'undefined') {
-      window.cancelAnimationFrame(this.frameHandle);
-      this.frameHandle = null;
-    }
-
     this.queuedEndPoint = null;
 
     if (this.previewGroup) {

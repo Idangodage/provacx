@@ -256,7 +256,6 @@ export function DrawingCanvas({
         updateSectionLine,
         deleteSectionLine,
         generateElevationForSection,
-        regenerateElevations,
         connectWalls,
         createRoomWalls,
         moveRoom,
@@ -308,6 +307,9 @@ export function DrawingCanvas({
         () => new Map(objectDefinitions.map((definition) => [definition.id, definition])),
         [objectDefinitions]
     );
+    const wallIdSet = useMemo(() => new Set(walls.map((wall) => wall.id)), [walls]);
+    const wallById = useMemo(() => new Map(walls.map((wall) => [wall.id, wall])), [walls]);
+    const roomById = useMemo(() => new Map(rooms.map((room) => [room.id, room])), [rooms]);
     const pendingPlacementDefinition = pendingPlacementObjectId
         ? objectDefinitionsById.get(pendingPlacementObjectId) ?? null
         : null;
@@ -451,6 +453,35 @@ export function DrawingCanvas({
         const distance = Math.hypot(point.x - projected.x, point.y - projected.y);
         return { projected, t, distance };
     }, []);
+
+    const roomBoundaryDistance = useCallback((point: Point2D, vertices: Point2D[]): number => {
+        if (vertices.length < 2) return Number.POSITIVE_INFINITY;
+        let best = Number.POSITIVE_INFINITY;
+        for (let i = 0; i < vertices.length; i += 1) {
+            const start = vertices[i];
+            const end = vertices[(i + 1) % vertices.length];
+            if (!start || !end) continue;
+            const projection = projectPointToSegment(point, start, end);
+            if (projection.distance < best) {
+                best = projection.distance;
+            }
+        }
+        return best;
+    }, [projectPointToSegment]);
+
+    const perimeterWallIdsForRooms = useCallback((roomIds: string[]): string[] => {
+        const unique = new Set<string>();
+        roomIds.forEach((roomId) => {
+            const room = roomById.get(roomId);
+            if (!room) return;
+            room.wallIds.forEach((wallId) => {
+                if (wallIdSet.has(wallId)) {
+                    unique.add(wallId);
+                }
+            });
+        });
+        return Array.from(unique);
+    }, [roomById, wallIdSet]);
 
     const findWallPlacementSnap = useCallback((point: Point2D) => {
         let best: {
@@ -1081,6 +1112,7 @@ export function DrawingCanvas({
     });
     const {
         isWallHandleDraggingRef,
+        getTargetMeta,
         updateSelectionFromTarget,
         updateSelectionFromTargets,
         finalizeHandleDrag,
@@ -1390,8 +1422,14 @@ export function DrawingCanvas({
     }, [viewportZoom, panOffset, wallRenderer]);
 
     useEffect(() => {
-        wallRenderer?.setHoveredWall(hoveredElementId ?? null);
-    }, [wallRenderer, hoveredElementId]);
+        if (tool === 'select') {
+            return;
+        }
+        const hoveredWallId = hoveredElementId && wallIdSet.has(hoveredElementId)
+            ? hoveredElementId
+            : null;
+        wallRenderer?.setHoveredWall(hoveredWallId);
+    }, [wallRenderer, hoveredElementId, wallIdSet, tool]);
 
     useEffect(() => {
         if (tool !== 'dimension') {
@@ -1860,6 +1898,7 @@ export function DrawingCanvas({
                     hitTarget
                 );
                 if (hoveredObjectId) {
+                    wallRenderer?.setHoveredWall(null);
                     setHoveredElement(hoveredObjectId);
                     return;
                 }
@@ -1867,6 +1906,7 @@ export function DrawingCanvas({
                     hitTarget
                 );
                 if (hoveredSectionLineId) {
+                    wallRenderer?.setHoveredWall(null);
                     setHoveredElement(hoveredSectionLineId);
                     return;
                 }
@@ -1883,6 +1923,22 @@ export function DrawingCanvas({
                 }
                 const handled = handleSelectMouseMove(selectPoint, hitTarget);
                 if (handled) {
+                    return;
+                }
+
+                const hoveredRoomId =
+                    roomRendererRef.current?.getRoomIdAtPoint(selectPoint) ??
+                    resolveRoomIdFromTarget(hitTarget);
+                if (hoveredRoomId) {
+                    wallRenderer?.setHoveredWall(null);
+                    setHoveredElement(hoveredRoomId);
+                    return;
+                }
+
+                const hoveredWallId = wallRenderer?.getWallIdAtPoint(selectPoint) ?? null;
+                wallRenderer?.setHoveredWall(hoveredWallId);
+                if (hoveredWallId) {
+                    setHoveredElement(hoveredWallId);
                     return;
                 }
             }
@@ -1911,7 +1967,9 @@ export function DrawingCanvas({
             sectionLineDrawingState.isDrawing,
             updateSectionLinePreview,
             resolveObjectIdFromTarget,
+            resolveRoomIdFromTarget,
             resolveSectionLineIdFromTarget,
+            wallRenderer,
             setHoveredElement,
             setMarqueeSelectionMode,
         ]
@@ -2119,6 +2177,16 @@ export function DrawingCanvas({
                 setSelectedIds(Array.from(new Set(objectIds)));
                 return;
             }
+            const roomIds = targets
+                .map((target) => resolveRoomIdFromTarget(target))
+                .filter((id): id is string => Boolean(id));
+            if (roomIds.length > 0) {
+                const perimeterWallIds = perimeterWallIdsForRooms(roomIds);
+                if (perimeterWallIds.length > 0) {
+                    setSelectedIds(perimeterWallIds);
+                    return;
+                }
+            }
             updateSelectionFromTargets(targets);
         };
 
@@ -2132,6 +2200,16 @@ export function DrawingCanvas({
             if (objectIds.length > 0) {
                 setSelectedIds(Array.from(new Set(objectIds)));
                 return;
+            }
+            const roomIds = targets
+                .map((target) => resolveRoomIdFromTarget(target))
+                .filter((id): id is string => Boolean(id));
+            if (roomIds.length > 0) {
+                const perimeterWallIds = perimeterWallIdsForRooms(roomIds);
+                if (perimeterWallIds.length > 0) {
+                    setSelectedIds(perimeterWallIds);
+                    return;
+                }
             }
             updateSelectionFromTargets(targets);
         };
@@ -2203,6 +2281,76 @@ export function DrawingCanvas({
                 addToSelection
             );
             if (dimensionHandled) {
+                return;
+            }
+            const targetMeta = getTargetMeta(hitTarget);
+            const clickedWallId = wallRenderer?.getWallIdAtPoint(wallPoint) ?? null;
+            const clickedRoomId =
+                roomRendererRef.current?.getRoomIdAtPoint(wallPoint) ??
+                resolveRoomIdFromTarget(hitTarget);
+            const clickedRoom = clickedRoomId ? roomById.get(clickedRoomId) ?? null : null;
+            const roomInteriorDistance = clickedRoom
+                ? roomBoundaryDistance(wallPoint, clickedRoom.vertices)
+                : Number.POSITIVE_INFINITY;
+            const roomWallThicknesses = clickedRoom
+                ? clickedRoom.wallIds
+                    .map((wallId) => wallById.get(wallId)?.thickness)
+                    .filter((value): value is number => Number.isFinite(value))
+                : [];
+            const roomInteriorThreshold = roomWallThicknesses.length > 0
+                ? Math.max(10, Math.min(28, Math.min(...roomWallThicknesses) * 0.35))
+                : 14;
+            const isRoomAreaClick = roomInteriorDistance > roomInteriorThreshold;
+            if (
+                clickedRoomId &&
+                isRoomAreaClick &&
+                !targetMeta.isRoomControl &&
+                !targetMeta.isWallControl
+            ) {
+                const perimeterWallIds = perimeterWallIdsForRooms([clickedRoomId]);
+                if (perimeterWallIds.length > 0) {
+                    if (addToSelection) {
+                        const current = new Set(selectedIds);
+                        const alreadySelected = perimeterWallIds.every((wallId) => current.has(wallId));
+                        perimeterWallIds.forEach((wallId) => {
+                            if (alreadySelected) {
+                                current.delete(wallId);
+                            } else {
+                                current.add(wallId);
+                            }
+                        });
+                        setSelectedIds(Array.from(current));
+                    } else {
+                        setSelectedIds(perimeterWallIds);
+                    }
+                    wallRenderer?.setHoveredWall(null);
+                    setHoveredElement(null);
+                    return;
+                }
+            }
+            if (
+                targetMeta.isWallControl ||
+                targetMeta.isRoomControl ||
+                targetMeta.wallId ||
+                targetMeta.roomId
+            ) {
+                handleSelectMouseDown(hitTarget, wallPoint, addToSelection);
+                return;
+            }
+            if (clickedWallId) {
+                if (addToSelection) {
+                    const current = new Set(selectedIds);
+                    if (current.has(clickedWallId)) {
+                        current.delete(clickedWallId);
+                    } else {
+                        current.add(clickedWallId);
+                    }
+                    setSelectedIds(Array.from(current));
+                } else {
+                    setSelectedIds([clickedWallId]);
+                }
+                wallRenderer?.setHoveredWall(clickedWallId);
+                setHoveredElement(clickedWallId);
                 return;
             }
             handleSelectMouseDown(hitTarget, wallPoint, addToSelection);
@@ -2384,6 +2532,7 @@ export function DrawingCanvas({
         };
 
         const handleCanvasMouseLeave = () => {
+            wallRenderer?.setHoveredWall(null);
             setHoveredElement(null);
         };
 
@@ -2469,6 +2618,7 @@ export function DrawingCanvas({
         resolveRoomIdFromTarget,
         resolveObjectIdFromTarget,
         filterMarqueeSelectionTargets,
+        getTargetMeta,
         handleWallDoubleClick,
         handleWallToolKeyDown,
         handleWallToolKeyUp,
@@ -2485,12 +2635,18 @@ export function DrawingCanvas({
         pendingPlacementDefinition,
         onCancelObjectPlacement,
         placePendingObject,
+        perimeterWallIdsForRooms,
+        roomBoundaryDistance,
+        roomById,
         nudgeSelectedObjects,
         cancelSectionLineDrawing,
         commitSectionLine,
         sectionLineDrawingState.isDrawing,
         sectionLineDrawingState.direction,
         setSectionLineDirection,
+        wallById,
+        wallIdSet,
+        wallRenderer,
     ]);
 
     // ---------------------------------------------------------------------------

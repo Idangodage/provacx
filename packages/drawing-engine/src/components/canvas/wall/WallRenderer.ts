@@ -44,25 +44,25 @@ import {
 import { MM_TO_PX } from '../scale';
 
 import {
-  computeWallBodyPolygon,
   computeWallPolygon,
-  computeMiterJoin,
-  lineIntersection,
   wallLength as computeWallLength,
   wallCenter as computeWallCenter,
   wallBounds,
-  distance as pointDistance,
   refreshOffsetLines, // [PATCH APPLIED]
-  isPolygonSelfIntersecting, // [PATCH APPLIED]
 } from './WallGeometry';
+import {
+  computeSelectableWallPolygon,
+  resolveWallSelectionPlan,
+  type WallSelectionComponent,
+  type WallSelectionPlan,
+} from './WallSelectionGeometry';
+import type { EnhancedSnapResult } from './WallSnapping';
+import { computeWallUnionRenderData, type WallUnionComponent } from './WallUnionGeometry';
 import {
   refreshAllWalls, // [PATCH APPLIED]
   refreshAfterPointMove, // [PATCH APPLIED]
   validateWallPolygon, // [PATCH APPLIED]
 } from './WallUpdatePipeline';
-import { computeWallSelectionComponents } from './WallSelectionGeometry';
-import { computeWallUnionRenderData, type WallUnionComponent } from './WallUnionGeometry';
-import type { SnapGuideLine, EnhancedSnapResult } from './WallSnapping';
 
 // =============================================================================
 // Types
@@ -91,15 +91,14 @@ type WallControlObject = NamedObject & {
   controlType?: WallControlType;
   isControlHitTarget?: boolean;
 };
-
-interface WallJoinMatch {
-  point: Point2D;
-  endpoint: 'start' | 'end';
-  matchType: 'endpoint' | 'segment';
-  otherEndpoint?: 'start' | 'end';
-}
-
-const CORNER_MITER_LIMIT = 3;
+type SelectionComponentObject = NamedObject & {
+  selectionRole?: 'fill' | 'outline';
+};
+type SelectionOverlayStyle = {
+  fill: string;
+  stroke: string;
+  strokeWidth: number;
+};
 
 // =============================================================================
 // [NEW] Visual Configuration
@@ -123,8 +122,10 @@ export const VISUAL_CONFIG = {
   // Selection
   selectionStroke: '#2563EB',
   selectionStrokeWidth: 2, // in screen pixels, scaled to scene
+  selectionFill: 'rgba(37, 99, 235, 0.08)',
   hoverStroke: '#059669',
   hoverStrokeWidth: 1.5,
+  hoverFill: 'rgba(5, 150, 105, 0.06)',
 
   // Control handles — all sizes in screen pixels (zoom-independent)
   endpointRadius: 7,
@@ -192,8 +193,10 @@ export const VISUAL_CONFIG = {
 export class WallRenderer {
   private canvas: fabric.Canvas;
   private wallObjects: Map<string, WallGroup> = new Map();
+  private wallInteractionPolygons: Map<string, Point2D[]> = new Map();
   private componentObjects: fabric.Object[] = [];
   private selectionComponentObjects: fabric.Object[] = [];
+  private hoverComponentObjects: fabric.Object[] = [];
   private wallData: Map<string, Wall> = new Map();
   private roomWallIds: Set<string> = new Set();
   private rooms: Room[] = [];
@@ -389,6 +392,9 @@ export class WallRenderer {
     this.roomWallIds = new Set(wallIds);
     if (this.selectedWallIds.size > 0) {
       this.setSelectedWalls([...this.selectedWallIds]);
+    } else if (this.hoveredWallId) {
+      this.syncHoverPreview();
+      this.canvas.requestRenderAll();
     }
   }
 
@@ -423,7 +429,14 @@ export class WallRenderer {
 
     // Refresh merged selection component outlines
     this.selectionComponentObjects.forEach((obj) => {
-      obj.set('strokeWidth', this.toSceneSize(VISUAL_CONFIG.selectionStrokeWidth));
+      if ((obj as SelectionComponentObject).selectionRole === 'outline') {
+        obj.set('strokeWidth', this.toSceneSize(VISUAL_CONFIG.selectionStrokeWidth));
+      }
+    });
+    this.hoverComponentObjects.forEach((obj) => {
+      if ((obj as SelectionComponentObject).selectionRole === 'outline') {
+        obj.set('strokeWidth', this.toSceneSize(VISUAL_CONFIG.hoverStrokeWidth));
+      }
     });
 
     // Recreate control points at current zoom (only if there's a selection)
@@ -468,6 +481,10 @@ export class WallRenderer {
     return this.componentPolygonsPathData(component.polygons);
   }
 
+  private ringsPathData(rings: Point2D[][]): string {
+    return this.componentPolygonsPathData(rings.map((ring) => [ring]));
+  }
+
   private componentPolygonsPathData(polygons: Point2D[][][]): string {
     return polygons
       .flatMap((polygon) =>
@@ -508,6 +525,13 @@ export class WallRenderer {
 
     const overlayPathData = this.componentPolygonsPathData(component.junctionOverlays);
     if (overlayPathData) {
+      // Clip junction overlay to the main wall polygon so miter vertices
+      // that protrude beyond the wall outline are hidden.
+      const overlayClip = new fabric.Path(pathData, {
+        fillRule: 'evenodd',
+        absolutePositioned: true,
+      });
+
       const overlayPath = new fabric.Path(overlayPathData, {
         fill: this.resolveWallVisualFill(representativeWall),
         fillRule: 'evenodd',
@@ -516,6 +540,7 @@ export class WallRenderer {
         selectable: false,
         evented: false,
         objectCaching: false,
+        clipPath: overlayClip,
       });
       this.canvas.add(overlayPath);
       this.componentObjects.push(overlayPath);
@@ -532,41 +557,122 @@ export class WallRenderer {
     this.selectionComponentObjects = [];
   }
 
-  private renderSelectionComponents(selectedWallIds: string[]): void {
-    const selectionComponents = computeWallSelectionComponents(
-      Array.from(this.wallData.values()),
-      this.rooms,
-      selectedWallIds
-    );
-    selectionComponents.forEach((component) => {
-      const rings = [...component.outerRings, ...component.innerRings];
-      const pathData = this.componentPolygonsPathData([rings]);
-      if (!pathData) return;
+  private clearHoverComponents(): void {
+    this.hoverComponentObjects.forEach((object) => this.canvas.remove(object));
+    this.hoverComponentObjects = [];
+  }
 
-      const outline = new fabric.Path(pathData, {
-        fill: 'transparent',
+  private renderOverlayComponent(
+    component: WallSelectionComponent,
+    style: SelectionOverlayStyle,
+    targetObjects: fabric.Object[],
+    namePrefix: string
+  ): void {
+    const fillPathData = this.ringsPathData(component.fillRings);
+    if (fillPathData) {
+      const fillPath = new fabric.Path(fillPathData, {
+        fill: style.fill,
         fillRule: 'evenodd',
-        stroke: VISUAL_CONFIG.selectionStroke,
-        strokeWidth: this.toSceneSize(VISUAL_CONFIG.selectionStrokeWidth),
-        strokeLineJoin: 'round',
+        stroke: 'transparent',
+        strokeWidth: 0,
         selectable: false,
         evented: false,
         objectCaching: false,
       });
+      const typedFill = fillPath as SelectionComponentObject;
+      typedFill.name = `${component.kind}-${namePrefix}-fill`;
+      typedFill.selectionRole = 'fill';
+      this.canvas.add(fillPath);
+      targetObjects.push(fillPath);
+    }
 
-      this.canvas.add(outline);
-      this.selectionComponentObjects.push(outline);
+    const outlinePathData = this.ringsPathData(component.outlineRings);
+    if (!outlinePathData) return;
+
+    const outline = new fabric.Path(outlinePathData, {
+      fill: 'transparent',
+      fillRule: 'evenodd',
+      stroke: style.stroke,
+      strokeWidth: this.toSceneSize(style.strokeWidth),
+      strokeLineJoin: 'round',
+      strokeLineCap: 'round',
+      selectable: false,
+      evented: false,
+      objectCaching: false,
     });
+    const typedOutline = outline as SelectionComponentObject;
+    typedOutline.name = `${component.kind}-${namePrefix}-outline`;
+    typedOutline.selectionRole = 'outline';
+    this.canvas.add(outline);
+    targetObjects.push(outline);
+  }
+
+  private renderSelectionComponents(selectionPlan: WallSelectionPlan): void {
+    const style: SelectionOverlayStyle = {
+      fill: VISUAL_CONFIG.selectionFill,
+      stroke: VISUAL_CONFIG.selectionStroke,
+      strokeWidth: VISUAL_CONFIG.selectionStrokeWidth,
+    };
+    selectionPlan.mergedComponents.forEach((component) => {
+      this.renderOverlayComponent(component, style, this.selectionComponentObjects, 'selection');
+    });
+  }
+
+  private renderHoverComponents(selectionPlan: WallSelectionPlan): void {
+    const style: SelectionOverlayStyle = {
+      fill: VISUAL_CONFIG.hoverFill,
+      stroke: VISUAL_CONFIG.hoverStroke,
+      strokeWidth: VISUAL_CONFIG.hoverStrokeWidth,
+    };
+    selectionPlan.mergedComponents.forEach((component) => {
+      this.renderOverlayComponent(component, style, this.hoverComponentObjects, 'hover');
+    });
+  }
+
+  private syncHoverPreview(): void {
+    const hoveredWallId = this.hoveredWallId;
+    const hoverPlan = hoveredWallId && !this.selectedWallIds.has(hoveredWallId)
+      ? resolveWallSelectionPlan(
+        Array.from(this.wallData.values()),
+        this.rooms,
+        [hoveredWallId]
+      )
+      : { individualWallIds: [], mergedComponents: [] };
+    const individuallyHoveredWallIds = new Set(hoverPlan.individualWallIds);
+
+    this.wallObjects.forEach((group, currentWallId) => {
+      const hoverOutline = group.getObjects().find((obj) => (obj as NamedObject).name === 'hoverOutline');
+      if (!hoverOutline) return;
+      hoverOutline.set(
+        'visible',
+        currentWallId === hoveredWallId &&
+        individuallyHoveredWallIds.has(currentWallId) &&
+        !this.selectedWallIds.has(currentWallId)
+      );
+    });
+
+    this.clearHoverComponents();
+    this.renderHoverComponents(hoverPlan);
   }
 
   // ─── Individual Wall Rendering ──────────────────────────────────────────
 
-  renderWall(wall: Wall, joins?: JoinData[]): WallGroup {
+  renderWall(wall: Wall, joins?: JoinData[], componentWalls?: Wall[]): WallGroup {
     this.removeWall(wall.id);
     this.wallData.set(wall.id, wall);
 
-    let interactionVertices = computeWallBodyPolygon(wall);
+    let interactionVertices = componentWalls && componentWalls.length > 0
+      ? computeSelectableWallPolygon(
+        wall,
+        new Map([[wall.id, joins ?? []]]),
+        componentWalls
+      )
+      : computeWallPolygon(wall, joins);
     interactionVertices = validateWallPolygon(interactionVertices, wall); // [PATCH APPLIED]
+    this.wallInteractionPolygons.set(
+      wall.id,
+      interactionVertices.map((vertex) => ({ ...vertex }))
+    );
     const canvasVertices = interactionVertices.map((v) => this.toCanvasPoint(v));
 
     const fillPolygon = new fabric.Polygon(canvasVertices, {
@@ -583,8 +689,6 @@ export class WallRenderer {
     const interiorEnd = canvasVertices[1];
     const exteriorEnd = canvasVertices[2];
     const exteriorStart = canvasVertices[3];
-    const startJoin = (joins ?? []).find((join) => join.endpoint === 'start') ?? null;
-    const endJoin = (joins ?? []).find((join) => join.endpoint === 'end') ?? null;
 
     const interiorBoundary = new fabric.Line(
       [interiorStart.x, interiorStart.y, interiorEnd.x, interiorEnd.y],
@@ -630,7 +734,7 @@ export class WallRenderer {
     this.annotateWallTarget(centerLine, wall.id);
 
     const selectionOutline = new fabric.Polygon(canvasVertices, {
-      fill: 'transparent',
+      fill: VISUAL_CONFIG.selectionFill,
       stroke: VISUAL_CONFIG.selectionStroke,
       strokeWidth: this.toSceneSize(VISUAL_CONFIG.selectionStrokeWidth),
       strokeLineJoin: 'round',
@@ -640,7 +744,7 @@ export class WallRenderer {
     this.annotateWallTarget(selectionOutline, wall.id);
 
     const hoverOutline = new fabric.Polygon(canvasVertices, {
-      fill: 'rgba(5, 150, 105, 0.06)',
+      fill: VISUAL_CONFIG.hoverFill,
       stroke: VISUAL_CONFIG.hoverStroke,
       strokeWidth: this.toSceneSize(VISUAL_CONFIG.hoverStrokeWidth),
       strokeLineJoin: 'round',
@@ -979,7 +1083,7 @@ export class WallRenderer {
    * For a 200-wall floor plan, dragging an endpoint now triggers ~3-5
    * wall updates instead of 200 full recreations.
    */
-  updateWall(wall: Wall, joins?: JoinData[]): void {
+  updateWall(wall: Wall, _joins?: JoinData[]): void {
     this.wallData.set(wall.id, wall);
 
     // [PATCH APPLIED] CRITICAL FIX: Refresh offset lines BEFORE computing joins
@@ -1327,20 +1431,14 @@ export class WallRenderer {
     const previousSelection = this.selectedWallIds;
     this.selectedWallIds = newSelection;
 
-    const selectionComponents = computeWallSelectionComponents(
+    const selectionPlan = resolveWallSelectionPlan(
       Array.from(this.wallData.values()), this.rooms, selectedWallIds
     );
-    const combinedWallIds = new Set(
-      selectionComponents
-        .filter((c) => c.wallIds.length > 1 || c.innerRings.length > 0)
-        .flatMap((c) => c.wallIds)
-    );
+    const individuallyHighlightedWallIds = new Set(selectionPlan.individualWallIds);
 
     this.wallObjects.forEach((group, wallId) => {
       const outline = group.getObjects().find((obj) => (obj as NamedObject).name === 'selectionOutline');
-      const hoverOutline = group.getObjects().find((obj) => (obj as NamedObject).name === 'hoverOutline');
-      if (outline) outline.set('visible', newSelection.has(wallId) && !combinedWallIds.has(wallId));
-      if (hoverOutline) hoverOutline.set('visible', !newSelection.has(wallId) && this.hoveredWallId === wallId);
+      if (outline) outline.set('visible', individuallyHighlightedWallIds.has(wallId));
     });
 
     // [FIX] Only remove controls for walls that are no longer selected
@@ -1351,7 +1449,8 @@ export class WallRenderer {
     }
 
     this.clearSelectionComponents();
-    this.renderSelectionComponents(selectedWallIds);
+    this.renderSelectionComponents(selectionPlan);
+    this.syncHoverPreview();
 
     // [FIX] Only create controls for newly selected walls
     for (const wallId of newSelection) {
@@ -1369,13 +1468,7 @@ export class WallRenderer {
   setHoveredWall(wallId: string | null): void {
     if (this.hoveredWallId === wallId) return;
     this.hoveredWallId = wallId;
-
-    this.wallObjects.forEach((group, currentWallId) => {
-      const hoverOutline = group.getObjects().find((obj) => (obj as NamedObject).name === 'hoverOutline');
-      if (!hoverOutline) return;
-      hoverOutline.set('visible', currentWallId === wallId && !this.selectedWallIds.has(currentWallId));
-    });
-
+    this.syncHoverPreview();
     this.canvas.requestRenderAll();
   }
 
@@ -1388,6 +1481,7 @@ export class WallRenderer {
       this.wallObjects.delete(wallId);
     }
     this.removeControlPoints(wallId);
+    this.wallInteractionPolygons.delete(wallId);
     this.wallData.delete(wallId);
     this.selectedWallIds.delete(wallId);
     if (this.hoveredWallId === wallId) this.hoveredWallId = null;
@@ -1407,6 +1501,7 @@ export class WallRenderer {
     try {
       this.clearMergedComponents();
       this.clearSelectionComponents();
+      this.clearHoverComponents();
       this.clearDimensionLabels();
       this.wallObjects.forEach((obj) => this.canvas.remove(obj));
       this.wallObjects.clear();
@@ -1424,6 +1519,15 @@ export class WallRenderer {
 
       const renderData = computeWallUnionRenderData(walls);
       const wallsById = new Map(walls.map((wall) => [wall.id, wall]));
+      const componentWallsByWallId = new Map<string, Wall[]>();
+      renderData.components.forEach((component) => {
+        const componentWalls = component.wallIds
+          .map((wallId) => wallsById.get(wallId))
+          .filter((componentWall): componentWall is Wall => Boolean(componentWall));
+        component.wallIds.forEach((wallId) => {
+          componentWallsByWallId.set(wallId, componentWalls);
+        });
+      });
 
       for (const component of renderData.components) {
         const representativeWall = component.wallIds
@@ -1435,7 +1539,7 @@ export class WallRenderer {
 
       for (const wall of walls) {
         const joins = joinsMap.get(wall.id) || []; // [PATCH APPLIED]
-        this.renderWall(wall, joins);
+        this.renderWall(wall, joins, componentWallsByWallId.get(wall.id));
       }
 
       this.setSelectedWalls([...this.selectedWallIds]);
@@ -1458,14 +1562,76 @@ export class WallRenderer {
     return this.wallObjects.get(wallId);
   }
 
+  private pointInPolygon(point: Point2D, polygon: Point2D[]): boolean {
+    let inside = false;
+    const count = polygon.length;
+    for (let index = 0, prevIndex = count - 1; index < count; prevIndex = index++) {
+      const current = polygon[index];
+      const previous = polygon[prevIndex];
+      if (
+        ((current.y > point.y) !== (previous.y > point.y)) &&
+        (point.x < (previous.x - current.x) * (point.y - current.y) / (previous.y - current.y) + current.x)
+      ) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+
+  private pointToSegmentDistance(point: Point2D, start: Point2D, end: Point2D): number {
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const lengthSq = dx * dx + dy * dy;
+    if (lengthSq <= 0.000001) {
+      return Math.hypot(point.x - start.x, point.y - start.y);
+    }
+    let t = ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSq;
+    t = Math.max(0, Math.min(1, t));
+    const projected = {
+      x: start.x + dx * t,
+      y: start.y + dy * t,
+    };
+    return Math.hypot(point.x - projected.x, point.y - projected.y);
+  }
+
+  getWallIdAtPoint(point: Point2D): string | null {
+    let bestWallId: string | null = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    this.wallInteractionPolygons.forEach((polygon, wallId) => {
+      if (polygon.length < 3 || !this.pointInPolygon(point, polygon)) {
+        return;
+      }
+
+      const wall = this.wallData.get(wallId);
+      const distance = wall
+        ? this.pointToSegmentDistance(point, wall.startPoint, wall.endPoint)
+        : 0;
+      if (wall) {
+        const maxSelectableDistance = Math.max(6, wall.thickness * 0.65);
+        if (distance > maxSelectableDistance) {
+          return;
+        }
+      }
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestWallId = wallId;
+      }
+    });
+
+    return bestWallId;
+  }
+
   clearAllWalls(): void {
     this.clearMergedComponents();
     this.clearSelectionComponents();
+    this.clearHoverComponents();
     this.clearDimensionLabels();
     this.clearSnapIndicators();
     this.clearPreviewWall();
     this.wallObjects.forEach((obj) => this.canvas.remove(obj));
     this.wallObjects.clear();
+    this.wallInteractionPolygons.clear();
     this.wallData.clear();
     this.rooms = [];
     this.selectedWallIds.clear();

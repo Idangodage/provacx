@@ -571,6 +571,7 @@ export function IsometricViewCanvas({
   const [containerSize, setContainerSize] = useState(DEFAULT_EMPTY_SIZE);
   const [screenLabels, setScreenLabels] = useState<ScreenLabel[]>([]);
   const [isEmpty, setIsEmpty] = useState(false);
+  const [webglInitError, setWebglInitError] = useState<string | null>(null);
 
   const definitionsById = useMemo(
     () => new Map(objectDefinitions.map((definition) => [definition.id, definition])),
@@ -617,12 +618,58 @@ export function IsometricViewCanvas({
       return;
     }
 
-    const renderer = new THREE.WebGLRenderer({
-      canvas,
-      antialias: true,
-      alpha: false,
-      powerPreference: 'high-performance',
-    });
+    setWebglInitError(null);
+
+    const rendererConfigs: Array<
+      Pick<THREE.WebGLRendererParameters, 'antialias' | 'alpha' | 'powerPreference'>
+    > = [
+      { antialias: true, alpha: false, powerPreference: 'high-performance' },
+      { antialias: false, alpha: false, powerPreference: 'high-performance' },
+      { antialias: false, alpha: false, powerPreference: 'default' },
+      { antialias: false, alpha: true, powerPreference: 'default' },
+    ];
+
+    let renderer: THREE.WebGLRenderer | null = null;
+    let rendererInitError: unknown = null;
+    for (const config of rendererConfigs) {
+      try {
+        renderer = new THREE.WebGLRenderer({
+          canvas,
+          ...config,
+        });
+        break;
+      } catch (error) {
+        rendererInitError = error;
+      }
+    }
+
+    if (!renderer) {
+      console.error('Isometric renderer initialization failed:', rendererInitError);
+      sceneRef.current = null;
+      boundsRef.current = null;
+      labelAnchorsRef.current = [];
+      setScreenLabels([]);
+      setIsEmpty(true);
+      setWebglInitError(
+        'Unable to create WebGL context. Close other 3D tabs or check browser hardware acceleration settings.'
+      );
+      return;
+    }
+
+    const handleContextLost = (event: Event) => {
+      event.preventDefault();
+      setWebglInitError('WebGL context was lost. Reload the page to restore the isometric view.');
+      setScreenLabels([]);
+    };
+
+    const handleContextRestored = () => {
+      setWebglInitError(null);
+      renderRequestedRef.current = true;
+    };
+
+    canvas.addEventListener('webglcontextlost', handleContextLost, false);
+    canvas.addEventListener('webglcontextrestored', handleContextRestored, false);
+
     renderer.setPixelRatio(typeof window !== 'undefined' ? Math.min(window.devicePixelRatio || 1, 2) : 1);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -719,6 +766,8 @@ export function IsometricViewCanvas({
       controls.stopListenToKeyEvents();
       controls.dispose();
       canvas.removeEventListener('contextmenu', preventContextMenu);
+      canvas.removeEventListener('webglcontextlost', handleContextLost, false);
+      canvas.removeEventListener('webglcontextrestored', handleContextRestored, false);
       clearGroup(contentRoot);
       renderer.dispose();
       sceneRef.current = null;
@@ -971,7 +1020,15 @@ export function IsometricViewCanvas({
         >
           {viewLabel}
         </div>
-        {isEmpty && (
+        {webglInitError && (
+          <div
+            className="absolute left-1/2 top-1/2 w-[min(92%,680px)] -translate-x-1/2 -translate-y-1/2 rounded border border-rose-300/70 bg-white/90 px-4 py-3 text-center text-sm text-rose-700 shadow"
+            style={{ fontFamily: 'monospace' }}
+          >
+            {webglInitError}
+          </div>
+        )}
+        {isEmpty && !webglInitError && (
           <div
             className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sm text-slate-500"
             style={{ fontFamily: 'monospace' }}
@@ -993,7 +1050,7 @@ export function IsometricViewCanvas({
             {label.text}
           </div>
         ))}
-        {!isEmpty && (
+        {!isEmpty && !webglInitError && (
           <div
             className="absolute bottom-3 left-3 rounded border border-slate-300/55 bg-white/76 px-3 py-1.5 text-[11px] text-slate-600 shadow-sm"
             style={{ fontFamily: 'monospace' }}
@@ -1006,7 +1063,7 @@ export function IsometricViewCanvas({
         <button
           type="button"
           onClick={resetView}
-          disabled={isEmpty}
+          disabled={isEmpty || Boolean(webglInitError)}
           className="rounded border border-amber-300/80 bg-white/88 px-3 py-1.5 text-xs text-slate-700 shadow-sm transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
           style={{ fontFamily: 'monospace' }}
         >

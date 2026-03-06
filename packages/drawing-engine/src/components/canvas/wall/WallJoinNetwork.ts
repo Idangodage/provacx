@@ -84,13 +84,6 @@ function normalize(vector: Point2D): Point2D {
   };
 }
 
-function add(a: Point2D, b: Point2D): Point2D {
-  return {
-    x: a.x + b.x,
-    y: a.y + b.y,
-  };
-}
-
 function lineFromAnchor(anchor: Point2D, direction: Point2D): Point2D {
   return {
     x: anchor.x + direction.x,
@@ -108,12 +101,6 @@ function normalizeAngleDeg(angleDeg: number): number {
 
 function ccwAngleDeg(fromDeg: number, toDeg: number): number {
   return normalizeAngleDeg(toDeg - fromDeg);
-}
-
-function signedAngleDegrees(from: Point2D, to: Point2D): number {
-  const cross = from.x * to.y - from.y * to.x;
-  const dot = from.x * to.x + from.y * to.y;
-  return Math.atan2(cross, dot) * (180 / Math.PI);
 }
 
 function computeBisector(a: Point2D, b: Point2D): Point2D {
@@ -480,6 +467,98 @@ function computeButtJoinVertices(
   };
 }
 
+function segmentJoinAngleDeg(endpointRef: WallEndpointRef, hostWall: Wall): number {
+  const hostDirection = normalize({
+    x: hostWall.endPoint.x - hostWall.startPoint.x,
+    y: hostWall.endPoint.y - hostWall.startPoint.y,
+  });
+  const alignment = Math.abs(
+    endpointRef.direction.x * hostDirection.x + endpointRef.direction.y * hostDirection.y
+  );
+  return Math.acos(Math.max(-1, Math.min(1, alignment))) * (180 / Math.PI);
+}
+
+function findSegmentHostsAtPoint(
+  endpointRef: WallEndpointRef,
+  walls: Wall[],
+  excludedWallIds: Set<string>
+): Wall[] {
+  const hosts: Wall[] = [];
+
+  for (const otherWall of walls) {
+    if (excludedWallIds.has(otherWall.id) || otherWall.id === endpointRef.wall.id) {
+      continue;
+    }
+
+    const projection = projectPointToSegment(
+      endpointRef.point,
+      otherWall.startPoint,
+      otherWall.endPoint
+    );
+    if (projection.distance > SEGMENT_TOLERANCE_MM) {
+      continue;
+    }
+    if (
+      pointDistance(projection.point, otherWall.startPoint) <= NODE_TOLERANCE_MM ||
+      pointDistance(projection.point, otherWall.endPoint) <= NODE_TOLERANCE_MM
+    ) {
+      continue;
+    }
+
+    if (segmentJoinAngleDeg(endpointRef, otherWall) < MIN_SEGMENT_JOIN_ANGLE_DEG) {
+      continue;
+    }
+
+    hosts.push(otherWall);
+  }
+
+  return hosts;
+}
+
+function projectionAlongDirection(origin: Point2D, point: Point2D, direction: Point2D): number {
+  return (
+    (point.x - origin.x) * direction.x +
+    (point.y - origin.y) * direction.y
+  );
+}
+
+function chooseMoreInteriorVertex(
+  endpointRef: WallEndpointRef,
+  current: Point2D,
+  candidate: Point2D
+): Point2D {
+  const currentProjection = projectionAlongDirection(endpointRef.point, current, endpointRef.direction);
+  const candidateProjection = projectionAlongDirection(endpointRef.point, candidate, endpointRef.direction);
+  return candidateProjection > currentProjection + 0.001 ? copyPoint(candidate) : current;
+}
+
+function clipNodeJoinAgainstSegmentHosts(
+  endpointRef: WallEndpointRef,
+  join: JoinData,
+  walls: Wall[],
+  excludedWallIds: Set<string>
+): JoinData {
+  const segmentHosts = findSegmentHostsAtPoint(endpointRef, walls, excludedWallIds);
+  if (segmentHosts.length === 0) {
+    return join;
+  }
+
+  let interiorVertex = copyPoint(join.interiorVertex);
+  let exteriorVertex = copyPoint(join.exteriorVertex);
+
+  for (const hostWall of segmentHosts) {
+    const trimmed = computeButtJoinVertices(endpointRef, hostWall);
+    interiorVertex = chooseMoreInteriorVertex(endpointRef, interiorVertex, trimmed.interiorVertex);
+    exteriorVertex = chooseMoreInteriorVertex(endpointRef, exteriorVertex, trimmed.exteriorVertex);
+  }
+
+  return {
+    ...join,
+    interiorVertex,
+    exteriorVertex,
+  };
+}
+
 function findSegmentAttachment(
   endpointRef: WallEndpointRef,
   walls: Wall[],
@@ -552,8 +631,15 @@ export function computeWallJoinMap(walls: Wall[]): Map<string, JoinData[]> {
     }
 
     const resolutions = solveEndpointNode(node);
+    const nodeWallIds = new Set(node.endpoints.map((endpoint) => endpoint.wall.id));
     for (const resolution of resolutions) {
-      mergeJoin(joinsMap, buildNodeJoinData(node, resolution));
+      const join = clipNodeJoinAgainstSegmentHosts(
+        resolution.endpointRef,
+        buildNodeJoinData(node, resolution),
+        walls,
+        nodeWallIds
+      );
+      mergeJoin(joinsMap, join);
     }
   }
 
