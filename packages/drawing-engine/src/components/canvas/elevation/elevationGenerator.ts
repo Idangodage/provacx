@@ -249,11 +249,20 @@ function projectFurnitureElement(
   sectionDepthMm: number
 ): ElevationFurnitureProjection | null {
   const { instance, definition } = input;
-  if (!definition.renderType) return null;
+  const instanceProps = instance.properties ?? {};
+  const readNumber = (key: string): number | null => {
+    const value = instanceProps[key];
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  };
+  const scaleFactor = Number.isFinite(instance.scale) && instance.scale > 0 ? instance.scale : 1;
+  const widthMm = Math.max(60, (readNumber('widthMm') ?? definition.widthMm) * scaleFactor);
+  const depthMm = Math.max(40, (readNumber('depthMm') ?? definition.depthMm) * scaleFactor);
+  const heightMm = Math.max(80, (readNumber('heightMm') ?? definition.heightMm) * scaleFactor);
+  const baseElevationMm = readNumber('baseElevationMm') ?? 0;
 
   // Furniture bounding box corners in plan (position is center in mm)
-  const halfW = definition.widthMm / 2;
-  const halfD = definition.depthMm / 2;
+  const halfW = widthMm / 2;
+  const halfD = depthMm / 2;
   const cx = instance.position.x;
   const cy = instance.position.y;
   const rotRad = (instance.rotation * Math.PI) / 180;
@@ -299,14 +308,13 @@ function projectFurnitureElement(
     visibility = 'ghost';
   }
 
-  // Floor-standing items start at y=0; height from definition
-  const yBottom = 0;
-  const yTop = definition.heightMm;
+  const yBottom = baseElevationMm;
+  const yTop = baseElevationMm + heightMm;
 
   return {
     id: `furn-elev-${instance.id}`,
     instanceId: instance.id,
-    renderType: definition.renderType,
+    renderType: definition.renderType ?? `generic-${definition.category}`,
     name: definition.name,
     xStart,
     xEnd,

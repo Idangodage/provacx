@@ -49,15 +49,166 @@ function formatSize(definition: ArchitecturalObjectDefinition): string {
   return `${Math.round(definition.widthMm)} x ${Math.round(definition.depthMm)} mm`;
 }
 
-function objectPreviewPath(definition: ArchitecturalObjectDefinition): string {
-  if (definition.symbolPath) return definition.symbolPath;
+function ObjectPreviewGlyph({
+  definition,
+  className,
+}: {
+  definition: ArchitecturalObjectDefinition;
+  className?: string;
+}): React.ReactElement {
+  const wallStroke = '#111827';
+  const wallFill = '#3f3f46';
+  const symbolStroke = '#6b7280';
+  const arcStroke = '#2b160b';
+  const doorPreviewStrokeWidth = 1.2;
+  const wallY = 40;
+  const left = 28;
+  const right = 72;
+  const jambTop = 26;
+  const jambBottom = 54;
+  const stub = 18;
+  const segmentHeight = 8;
+  const hatch = '#8f8f92';
+
+  const baseWall = (
+    <g>
+      <rect
+        x={left - stub}
+        y={wallY - segmentHeight / 2}
+        width={stub}
+        height={segmentHeight}
+        fill={wallFill}
+        stroke={wallStroke}
+        strokeWidth="1.2"
+      />
+      <rect
+        x={right}
+        y={wallY - segmentHeight / 2}
+        width={stub}
+        height={segmentHeight}
+        fill={wallFill}
+        stroke={wallStroke}
+        strokeWidth="1.2"
+      />
+      <line x1={left - stub + 3} y1={wallY - segmentHeight / 2 + 1} x2={left - 3} y2={wallY + segmentHeight / 2 - 1} stroke={hatch} strokeWidth="0.8" />
+      <line x1={left - stub + 8} y1={wallY - segmentHeight / 2 + 1} x2={left - 8} y2={wallY + segmentHeight / 2 - 1} stroke={hatch} strokeWidth="0.8" />
+      <line x1={right + 3} y1={wallY - segmentHeight / 2 + 1} x2={right + stub - 3} y2={wallY + segmentHeight / 2 - 1} stroke={hatch} strokeWidth="0.8" />
+      <line x1={right + 8} y1={wallY - segmentHeight / 2 + 1} x2={right + stub - 8} y2={wallY + segmentHeight / 2 - 1} stroke={hatch} strokeWidth="0.8" />
+      <line x1={left} y1={jambTop} x2={left} y2={jambBottom} stroke={wallStroke} strokeWidth="3" />
+      <line x1={right} y1={jambTop} x2={right} y2={jambBottom} stroke={wallStroke} strokeWidth="3" />
+    </g>
+  );
+
   if (definition.category === 'doors') {
-    return 'M 10 75 L 90 75 M 10 75 L 75 10 M 10 75 C 32 50 52 28 75 10';
+    const type = definition.type;
+    if (type === 'double-swing') {
+      return (
+        <svg viewBox="0 0 100 80" className={className} aria-hidden="true">
+          {baseWall}
+          <line x1={left} y1={jambTop} x2={50} y2={jambTop} stroke={arcStroke} strokeWidth={doorPreviewStrokeWidth} />
+          <line x1={right} y1={jambTop} x2={50} y2={jambTop} stroke={arcStroke} strokeWidth={doorPreviewStrokeWidth} />
+          <path d="M 50 26 A 22 22 0 0 1 28 48" fill="none" stroke={arcStroke} strokeWidth={doorPreviewStrokeWidth} />
+          <path d="M 50 26 A 22 22 0 0 0 72 48" fill="none" stroke={arcStroke} strokeWidth={doorPreviewStrokeWidth} />
+        </svg>
+      );
+    }
+    if (type === 'sliding') {
+      return (
+        <svg viewBox="0 0 100 80" className={className} aria-hidden="true">
+          {baseWall}
+          <line x1={left + 3} y1={34} x2={right - 3} y2={34} stroke={arcStroke} strokeWidth={doorPreviewStrokeWidth} />
+          <line x1={left + 3} y1={46} x2={right - 3} y2={46} stroke={arcStroke} strokeWidth={doorPreviewStrokeWidth} />
+          <line x1={43} y1={34} x2={37} y2={40} stroke={arcStroke} strokeWidth={doorPreviewStrokeWidth} />
+          <line x1={57} y1={46} x2={63} y2={40} stroke={arcStroke} strokeWidth={doorPreviewStrokeWidth} />
+        </svg>
+      );
+    }
+    if (type === 'bi-fold') {
+      return (
+        <svg viewBox="0 0 100 80" className={className} aria-hidden="true">
+          {baseWall}
+          <path d="M 28 26 L 42 40 L 56 26 L 72 40" fill="none" stroke={arcStroke} strokeWidth={doorPreviewStrokeWidth} />
+          <line x1={50} y1={26} x2={50} y2={42} stroke={arcStroke} strokeWidth={doorPreviewStrokeWidth} strokeDasharray="3 2" />
+        </svg>
+      );
+    }
+    if (type === 'overhead') {
+      return (
+        <svg viewBox="0 0 100 80" className={className} aria-hidden="true">
+          {baseWall}
+          <rect x={28} y={26} width={44} height={18} fill="none" stroke={arcStroke} strokeWidth={doorPreviewStrokeWidth} />
+          <line x1={39} y1={26} x2={39} y2={44} stroke={arcStroke} strokeWidth={doorPreviewStrokeWidth} />
+          <line x1={50} y1={26} x2={50} y2={44} stroke={arcStroke} strokeWidth={doorPreviewStrokeWidth} />
+          <line x1={61} y1={26} x2={61} y2={44} stroke={arcStroke} strokeWidth={doorPreviewStrokeWidth} />
+        </svg>
+      );
+    }
+    return (
+      <svg viewBox="0 0 100 80" className={className} aria-hidden="true">
+        {baseWall}
+        <line x1={left} y1={jambTop} x2={right} y2={jambTop} stroke={arcStroke} strokeWidth={doorPreviewStrokeWidth} />
+        <path d="M 72 26 A 44 44 0 0 1 28 70" fill="none" stroke={arcStroke} strokeWidth={doorPreviewStrokeWidth} />
+      </svg>
+    );
   }
+
   if (definition.category === 'windows') {
-    return 'M 10 45 L 90 45 M 10 55 L 90 55 M 50 45 L 50 55';
+    const type = definition.type;
+    if (type === 'sliding') {
+      return (
+        <svg viewBox="0 0 100 80" className={className} aria-hidden="true">
+          {baseWall}
+          <line x1={left} y1={34} x2={right} y2={34} stroke={symbolStroke} strokeWidth="1.8" />
+          <line x1={left} y1={46} x2={right} y2={46} stroke={symbolStroke} strokeWidth="1.8" />
+          <line x1={44} y1={34} x2={44} y2={46} stroke={symbolStroke} strokeWidth="1" />
+          <line x1={56} y1={34} x2={56} y2={46} stroke={symbolStroke} strokeWidth="1" />
+        </svg>
+      );
+    }
+    if (type === 'fixed') {
+      return (
+        <svg viewBox="0 0 100 80" className={className} aria-hidden="true">
+          {baseWall}
+          <line x1={left} y1={34} x2={right} y2={34} stroke={symbolStroke} strokeWidth="1.8" />
+          <line x1={left} y1={46} x2={right} y2={46} stroke={symbolStroke} strokeWidth="1.8" />
+          <line x1={left} y1={34} x2={right} y2={46} stroke={arcStroke} strokeWidth="1.2" strokeDasharray="3 2" />
+          <line x1={right} y1={34} x2={left} y2={46} stroke={arcStroke} strokeWidth="1.2" strokeDasharray="3 2" />
+        </svg>
+      );
+    }
+    if (type === 'awning') {
+      return (
+        <svg viewBox="0 0 100 80" className={className} aria-hidden="true">
+          {baseWall}
+          <line x1={left} y1={34} x2={right} y2={34} stroke={symbolStroke} strokeWidth="1.8" />
+          <line x1={left} y1={46} x2={right} y2={46} stroke={symbolStroke} strokeWidth="1.8" />
+          <path d="M 36 46 Q 50 58 64 46" fill="none" stroke={arcStroke} strokeWidth="1.3" />
+        </svg>
+      );
+    }
+    return (
+      <svg viewBox="0 0 100 80" className={className} aria-hidden="true">
+        {baseWall}
+        <line x1={left} y1={34} x2={right} y2={34} stroke={symbolStroke} strokeWidth="1.8" />
+        <line x1={left} y1={46} x2={right} y2={46} stroke={symbolStroke} strokeWidth="1.8" />
+        <line x1={50} y1={34} x2={50} y2={46} stroke={symbolStroke} strokeWidth="1" />
+      </svg>
+    );
   }
-  return 'M 15 20 L 85 20 L 85 80 L 15 80 Z';
+
+  if (definition.symbolPath) {
+    return (
+      <svg viewBox="0 0 100 100" className={className} aria-hidden="true">
+        <path d={definition.symbolPath} fill="none" stroke="#111827" strokeWidth="5" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg viewBox="0 0 100 100" className={className} aria-hidden="true">
+      <rect x="14" y="20" width="72" height="60" fill="none" stroke="#111827" strokeWidth="5" />
+    </svg>
+  );
 }
 
 function FurnitureCanvasPreview({
@@ -427,10 +578,8 @@ export function ObjectLibraryPanel({
                   </div>
                 ) : (
                   <div className="flex items-start justify-between gap-1">
-                    <div className="inline-flex h-10 w-10 items-center justify-center rounded border border-amber-100 bg-[#fff7e6] overflow-hidden">
-                      <svg width="24" height="24" viewBox="0 0 100 100" className="text-slate-700">
-                        <path d={objectPreviewPath(definition)} fill="none" stroke="currentColor" strokeWidth="5" />
-                      </svg>
+                    <div className="inline-flex h-10 w-14 items-center justify-center rounded border border-amber-100 bg-[#fff7e6] overflow-hidden">
+                      <ObjectPreviewGlyph definition={definition} className="h-7 w-12" />
                     </div>
                     <button
                       type="button"
@@ -495,6 +644,11 @@ export function ObjectLibraryPanel({
                       mode={previewView}
                     />
                   )}
+                </div>
+              )}
+              {!hasRenderer(selectedDefinition.renderType) && (
+                <div className="mb-2 flex h-[110px] items-center justify-center rounded border border-amber-100 bg-[#fff7e6] p-2">
+                  <ObjectPreviewGlyph definition={selectedDefinition} className="h-16 w-28" />
                 </div>
               )}
               <div className="space-y-0.5 text-[11px] text-slate-600">

@@ -68,3 +68,10 @@ export {
   validateWallPolygon,
   refreshAllWallGeometry,
 } from './WallUpdatePipeline'; // [PATCH APPLIED]
+
+export {
+  renderOpening,
+  renderWallOpenings,
+  renderOpeningPreview,
+} from './OpeningRenderer';
+export type { OpeningRenderResult } from './OpeningRenderer';

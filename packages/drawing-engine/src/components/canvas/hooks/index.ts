@@ -22,3 +22,12 @@ export { useRoomTool, type UseRoomToolOptions, type UseRoomToolResult } from './
 
 // Dimension tool
 export { useDimensionTool, type UseDimensionToolOptions } from './useDimensionTool';
+
+// Symbol placement tool
+export {
+  useSymbolPlacementTool,
+  type UseSymbolPlacementToolOptions,
+  type UseSymbolPlacementToolResult,
+  type PlacementState,
+  type WallSnapInfo,
+} from './useSymbolPlacementTool';

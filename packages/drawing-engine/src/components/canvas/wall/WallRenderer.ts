@@ -34,7 +34,7 @@
 import * as fabric from 'fabric';
 
 import { colorFromExposure, getArchitecturalMaterial, heatColorFromUValue } from '../../../attributes';
-import type { Point2D, Room, Wall, WallColorMode, WallMaterial, JoinData } from '../../../types';
+import type { Point2D, Room, Wall, WallColorMode, WallMaterial, JoinData, SymbolInstance2D } from '../../../types';
 import { WALL_MATERIAL_COLORS } from '../../../types/wall';
 import {
   computeCornerBevelDotsForEndpoint,
@@ -43,10 +43,9 @@ import {
 } from '../../../utils/wallBevel';
 import { MM_TO_PX } from '../scale';
 
+import { renderWallOpenings } from './OpeningRenderer';
 import {
   computeWallPolygon,
-  wallLength as computeWallLength,
-  wallCenter as computeWallCenter,
   wallBounds,
   refreshOffsetLines, // [PATCH APPLIED]
 } from './WallGeometry';
@@ -73,7 +72,14 @@ export interface WallRenderOptions {
   pageHeight: number;
 }
 
-type NamedObject = fabric.Object & { name?: string; wallId?: string; id?: string };
+type NamedObject = fabric.Object & {
+  name?: string;
+  wallId?: string;
+  id?: string;
+  objectId?: string;
+  openingId?: string;
+  isDoorArc?: boolean;
+};
 type WallGroup = fabric.Group & { wallId?: string; id?: string; name?: string };
 type WallControlType =
   | 'wall-center-handle'
@@ -99,6 +105,9 @@ type SelectionOverlayStyle = {
   stroke: string;
   strokeWidth: number;
 };
+
+const OPENING_DOOR_ARC_SCREEN_STROKE_WIDTH = 1.2;
+const OPENING_DOOR_ARC_STROKE = '#2b160b';
 
 // =============================================================================
 // [NEW] Visual Configuration
@@ -209,6 +218,7 @@ export class WallRenderer {
   private wallColorMode: WallColorMode = 'material';
   private showLayerCountIndicators: boolean = false;
   private hoveredWallId: string | null = null;
+  private openingSymbolInstances: Map<string, { properties: Record<string, unknown> }> = new Map();
 
   // Track zoom for zoom-resilient control point sizing
   private lastZoom: number = 1;
@@ -407,6 +417,16 @@ export class WallRenderer {
     this.setRoomWallIds(this.rooms.flatMap((room) => room.wallIds));
   }
 
+  setOpeningSymbolInstances(symbols: SymbolInstance2D[]): void {
+    const next = new Map<string, { properties: Record<string, unknown> }>();
+    for (const symbol of symbols) {
+      next.set(symbol.id, {
+        properties: symbol.properties ?? {},
+      });
+    }
+    this.openingSymbolInstances = next;
+  }
+
   /**
    * React to zoom-level changes by refreshing all zoom-dependent visuals:
    * control point sizes, selection/hover outlines, dimension labels.
@@ -425,6 +445,15 @@ export class WallRenderer {
       const hovOutline = group.getObjects().find((obj) => (obj as NamedObject).name === 'hoverOutline');
       if (selOutline) selOutline.set('strokeWidth', this.toSceneSize(VISUAL_CONFIG.selectionStrokeWidth));
       if (hovOutline) hovOutline.set('strokeWidth', this.toSceneSize(VISUAL_CONFIG.hoverStrokeWidth));
+      group.getObjects().forEach((obj) => {
+        const typed = obj as NamedObject;
+        if (!typed.isDoorArc) return;
+        obj.set({
+          stroke: OPENING_DOOR_ARC_STROKE,
+          strokeWidth: this.toSceneSize(OPENING_DOOR_ARC_SCREEN_STROKE_WIDTH),
+          strokeUniform: true,
+        });
+      });
     });
 
     // Refresh merged selection component outlines
@@ -638,7 +667,6 @@ export class WallRenderer {
         [hoveredWallId]
       )
       : { individualWallIds: [], mergedComponents: [] };
-    const individuallyHoveredWallIds = new Set(hoverPlan.individualWallIds);
 
     this.wallObjects.forEach((group, currentWallId) => {
       const hoverOutline = group.getObjects().find((obj) => (obj as NamedObject).name === 'hoverOutline');
@@ -791,14 +819,46 @@ export class WallRenderer {
       indicators.push(layerCircle, layerText);
     }
 
+    // ─── Render architectural opening symbols (doors/windows) ────────────
+    const openingObjects: fabric.FabricObject[] = [];
+    if (wall.openings.length > 0) {
+      const { objects: openingFabricObjects } = renderWallOpenings(
+        wall,
+        this.openingSymbolInstances
+      );
+      for (const obj of openingFabricObjects) {
+        const openingObject = obj as NamedObject;
+        openingObject.name = 'wallOpening';
+        if (openingObject.openingId) {
+          openingObject.objectId = openingObject.openingId;
+          obj.set({
+            evented: true,
+            selectable: false,
+            hoverCursor: 'pointer',
+            moveCursor: 'pointer',
+          });
+        }
+        if (openingObject.isDoorArc) {
+          obj.set({
+            stroke: OPENING_DOOR_ARC_STROKE,
+            strokeWidth: this.toSceneSize(OPENING_DOOR_ARC_SCREEN_STROKE_WIDTH),
+            strokeUniform: true,
+          });
+        }
+        this.annotateWallTarget(obj, wall.id);
+        openingObjects.push(obj);
+      }
+    }
+
     const objects: fabric.FabricObject[] = [
       fillPolygon, interiorBoundary, exteriorBoundary,
       startCap, endCap, centerLine, selectionOutline, hoverOutline,
       ...indicators,
+      ...openingObjects,
     ];
 
     const group: WallGroup = new fabric.Group(objects, {
-      selectable: true, evented: true, subTargetCheck: false,
+      selectable: true, evented: true, subTargetCheck: true,
       hasControls: false, hasBorders: false,
       lockMovementX: true, lockMovementY: true,
       transparentCorners: false, objectCaching: false,

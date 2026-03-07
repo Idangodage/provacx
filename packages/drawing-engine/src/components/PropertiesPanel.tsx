@@ -39,6 +39,13 @@ import { fromMillimeters, toMillimeters } from './canvas/scale';
 
 type PropertyUnit = 'mm' | 'in' | 'ft';
 const COMPASS_DIRECTIONS: CompassDirection[] = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+const OPENING_EDGE_MARGIN_MM = 50;
+const MIN_DOOR_WIDTH_MM = 500;
+const MAX_DOOR_WIDTH_MM = 4000;
+const MIN_WINDOW_WIDTH_MM = 400;
+const MAX_WINDOW_WIDTH_MM = 4000;
+const MIN_DOOR_HEIGHT_MM = 1800;
+const MIN_WINDOW_HEIGHT_MM = 300;
 
 export interface PropertiesPanelProps {
   className?: string;
@@ -86,6 +93,38 @@ function PropertyRow({ label, children }: { label: string; children: React.React
       <div className="flex items-center gap-2">{children}</div>
     </div>
   );
+}
+
+function computeOpeningWidthLimits(
+  wall: Wall,
+  openingId: string,
+  openingPositionMm: number,
+  minWidthMm: number,
+  maxWidthMm: number
+): { min: number; max: number } {
+  const wallLength = Math.hypot(
+    wall.endPoint.x - wall.startPoint.x,
+    wall.endPoint.y - wall.startPoint.y
+  );
+  const distanceToNearestEnd = Math.min(
+    openingPositionMm - OPENING_EDGE_MARGIN_MM,
+    wallLength - openingPositionMm - OPENING_EDGE_MARGIN_MM
+  );
+  let maxWidth = Math.max(0, distanceToNearestEnd * 2);
+
+  for (const existing of wall.openings) {
+    if (existing.id === openingId) continue;
+    const centerDistance = Math.abs(existing.position - openingPositionMm);
+    const neighborLimit =
+      2 * (centerDistance - OPENING_EDGE_MARGIN_MM - existing.width / 2);
+    maxWidth = Math.min(maxWidth, neighborLimit);
+  }
+
+  const normalizedMax = Math.max(0, Math.floor(maxWidth / 10) * 10);
+  return {
+    min: minWidthMm,
+    max: Math.min(maxWidthMm, normalizedMax),
+  };
 }
 
 function TabButton({
@@ -564,7 +603,14 @@ function WallSection({ propertyUnit }: { propertyUnit: PropertyUnit }) {
 }
 
 function ObjectSection({ propertyUnit }: { propertyUnit: PropertyUnit }) {
-  const { selectedElementIds, symbols, updateSymbol } = useSmartDrawingStore();
+  const {
+    selectedElementIds,
+    symbols,
+    walls,
+    updateSymbol,
+    updateWall,
+    setProcessingStatus,
+  } = useSmartDrawingStore();
 
   const selectedObject = useMemo(() => {
     const selectedFromCanvas = symbols.find((symbol) => selectedElementIds.includes(symbol.id));
@@ -581,7 +627,50 @@ function ObjectSection({ propertyUnit }: { propertyUnit: PropertyUnit }) {
   const widthMm = propertyAsNumber(selectedObject.properties, 'widthMm', 0);
   const depthMm = propertyAsNumber(selectedObject.properties, 'depthMm', 0);
   const heightMm = propertyAsNumber(selectedObject.properties, 'heightMm', 0);
+  const sillHeightMm = propertyAsNumber(selectedObject.properties, 'sillHeightMm', 900);
   const swingDirection = propertyAsString(selectedObject.properties, 'swingDirection', 'left');
+  const hostWallId = propertyAsString(selectedObject.properties, 'hostWallId', '');
+  const positionAlongWallMm = propertyAsNumber(selectedObject.properties, 'positionAlongWallMm', NaN);
+  const isDoor = category === 'doors';
+  const isWindow = category === 'windows';
+  const isOpening = isDoor || isWindow;
+  const hostWall = hostWallId ? walls.find((wall) => wall.id === hostWallId) ?? null : null;
+  const hostOpening = hostWall?.openings.find((opening) => opening.id === selectedObject.id) ?? null;
+  const hostWallBaseElevationMm = hostWall?.properties3D.baseElevation ?? 0;
+  const openingMinWidthMm = isDoor ? MIN_DOOR_WIDTH_MM : MIN_WINDOW_WIDTH_MM;
+  const openingMaxWidthMm = isDoor ? MAX_DOOR_WIDTH_MM : MAX_WINDOW_WIDTH_MM;
+  const openingMinHeightMm = isDoor ? MIN_DOOR_HEIGHT_MM : MIN_WINDOW_HEIGHT_MM;
+  const openingWidthBaseMm = widthMm > 0
+    ? widthMm
+    : hostOpening
+      ? Math.max(1, hostOpening.width - 50)
+      : isDoor ? 900 : 1200;
+  const openingHeightBaseMm = heightMm > 0
+    ? heightMm
+    : hostOpening
+      ? Math.max(1, hostOpening.height)
+      : isDoor ? 2100 : 1200;
+  const windowSillBaseMm = hostOpening?.sillHeight ?? sillHeightMm;
+  const openingWidthLimits = (() => {
+    if (!isOpening || !hostWall) return null;
+    const openingPosition = hostOpening?.position ?? positionAlongWallMm;
+    if (!Number.isFinite(openingPosition)) return null;
+    return computeOpeningWidthLimits(
+      hostWall,
+      selectedObject.id,
+      openingPosition,
+      openingMinWidthMm,
+      openingMaxWidthMm
+    );
+  })();
+  const canResizeOpening = !openingWidthLimits || openingWidthLimits.max >= openingWidthLimits.min;
+  const effectiveOpeningWidthMm = Math.max(1, openingWidthBaseMm);
+  const sliderMin = openingWidthLimits?.min ?? openingMinWidthMm;
+  const sliderMax = Math.max(sliderMin, openingWidthLimits?.max ?? openingMaxWidthMm);
+  const sliderValue = clamp(Math.round(effectiveOpeningWidthMm), sliderMin, sliderMax);
+  const openingWidthPresets = isDoor
+    ? (type === 'double-swing' ? [1200, 1400, 1600, 1800] : [700, 800, 900, 1000, 1100])
+    : [600, 900, 1200, 1500, 1800];
 
   const updateProperty = (key: string, value: unknown) => {
     updateSymbol(selectedObject.id, {
@@ -595,6 +684,79 @@ function ObjectSection({ propertyUnit }: { propertyUnit: PropertyUnit }) {
   const updateDimensionProperty = (key: string, value: number) => {
     if (!Number.isFinite(value)) return;
     updateProperty(key, Math.max(1, value));
+  };
+
+  const updateHostedOpening = (updates: Partial<{ width: number; height: number; sillHeight: number }>) => {
+    if (!hostWall || !hostOpening) return;
+    const nextOpenings = hostWall.openings.map((opening) =>
+      opening.id === selectedObject.id
+        ? {
+          ...opening,
+          ...updates,
+        }
+        : opening
+    );
+    updateWall(hostWall.id, { openings: nextOpenings }, { source: 'ui', skipHistory: true });
+  };
+
+  const applyOpeningWidth = (requestedWidthMm: number) => {
+    if (!Number.isFinite(requestedWidthMm)) return;
+
+    let nextWidthMm = Math.max(openingMinWidthMm, Math.round(requestedWidthMm));
+    if (openingWidthLimits) {
+      if (openingWidthLimits.max < openingWidthLimits.min) {
+        setProcessingStatus(
+          `${isDoor ? 'Door' : 'Window'} cannot be resized at this position. Move it away from wall ends/openings first.`,
+          false
+        );
+        return;
+      }
+      const clampedWidthMm = clamp(nextWidthMm, openingWidthLimits.min, openingWidthLimits.max);
+      if (Math.abs(clampedWidthMm - nextWidthMm) > 0.01) {
+        setProcessingStatus(
+          `${isDoor ? 'Door' : 'Window'} width limited to ${Math.round(clampedWidthMm)} mm to keep valid clearances.`,
+          false
+        );
+      }
+      nextWidthMm = clampedWidthMm;
+    }
+
+    if (Math.abs(openingWidthBaseMm - nextWidthMm) > 0.01) {
+      updateProperty('widthMm', nextWidthMm);
+    }
+
+    if (hostOpening) {
+      const targetOpeningWidthMm = nextWidthMm + 50;
+      if (Math.abs(hostOpening.width - targetOpeningWidthMm) > 0.01) {
+        updateHostedOpening({ width: targetOpeningWidthMm });
+      }
+    }
+  };
+
+  const applyOpeningHeight = (requestedHeightMm: number) => {
+    if (!Number.isFinite(requestedHeightMm)) return;
+    const nextHeightMm = Math.max(openingMinHeightMm, Math.round(requestedHeightMm));
+    if (Math.abs(openingHeightBaseMm - nextHeightMm) > 0.01) {
+      updateProperty('heightMm', nextHeightMm);
+    }
+    if (hostOpening && Math.abs(hostOpening.height - nextHeightMm) > 0.01) {
+      updateHostedOpening({ height: nextHeightMm });
+    }
+  };
+
+  const applyWindowSillHeight = (requestedSillHeightMm: number) => {
+    if (!isWindow || !Number.isFinite(requestedSillHeightMm)) return;
+    const nextSillHeightMm = Math.max(0, Math.round(requestedSillHeightMm));
+    updateSymbol(selectedObject.id, {
+      properties: {
+        ...selectedObject.properties,
+        sillHeightMm: nextSillHeightMm,
+        baseElevationMm: hostWallBaseElevationMm + nextSillHeightMm,
+      },
+    });
+    if (hostOpening && Math.abs((hostOpening.sillHeight ?? 0) - nextSillHeightMm) > 0.01) {
+      updateHostedOpening({ sillHeight: nextSillHeightMm });
+    }
   };
 
   return (
@@ -627,17 +789,81 @@ function ObjectSection({ propertyUnit }: { propertyUnit: PropertyUnit }) {
       <PropertyRow label="Width">
         <input
           type="number"
-          min={fromMm(1, propertyUnit)}
+          min={fromMm(isOpening ? sliderMin : 1, propertyUnit)}
+          max={isOpening ? fromMm(sliderMax, propertyUnit) : undefined}
           step={propertyUnit === 'mm' ? 1 : 0.01}
-          value={fromMm(widthMm, propertyUnit).toFixed(2)}
+          value={fromMm(isOpening ? effectiveOpeningWidthMm : widthMm, propertyUnit).toFixed(2)}
           onChange={(e) => {
             const parsed = Number.parseFloat(e.target.value);
             if (!Number.isFinite(parsed)) return;
-            updateDimensionProperty('widthMm', toMm(parsed, propertyUnit));
+            const nextWidthMm = toMm(parsed, propertyUnit);
+            if (isOpening) {
+              applyOpeningWidth(nextWidthMm);
+              return;
+            }
+            updateDimensionProperty('widthMm', nextWidthMm);
           }}
           className="w-24 px-2 py-1 text-sm border border-amber-200/80 rounded focus:outline-none focus:ring-1 focus:ring-amber-400 bg-white"
         />
       </PropertyRow>
+      {isOpening && (
+        <div className="rounded border border-amber-200/70 bg-amber-50/50 p-2 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+              Smart {isDoor ? 'Door' : 'Window'} Width
+            </span>
+            <span className="text-xs text-slate-700">{Math.round(effectiveOpeningWidthMm)} mm</span>
+          </div>
+          <input
+            type="range"
+            min={sliderMin}
+            max={sliderMax}
+            step={10}
+            value={sliderValue}
+            disabled={!canResizeOpening}
+            onChange={(e) => {
+              const parsed = Number.parseFloat(e.target.value);
+              if (!Number.isFinite(parsed)) return;
+              applyOpeningWidth(parsed);
+            }}
+            className="w-full accent-amber-700 disabled:opacity-50"
+          />
+          <div className="flex flex-wrap gap-1">
+            {openingWidthPresets.map((preset) => (
+              <button
+                key={preset}
+                type="button"
+                disabled={!canResizeOpening}
+                onClick={() => applyOpeningWidth(preset)}
+                className={`rounded border px-2 py-1 text-[11px] ${
+                  Math.abs(openingWidthBaseMm - preset) < 0.5
+                    ? 'border-amber-500 bg-amber-200 text-amber-900'
+                    : 'border-amber-200 bg-white text-slate-700 hover:bg-amber-100'
+                } disabled:cursor-not-allowed disabled:opacity-50`}
+              >
+                {preset}
+              </button>
+            ))}
+            {openingWidthLimits && (
+              <button
+                type="button"
+                disabled={!canResizeOpening}
+                onClick={() => applyOpeningWidth(openingWidthLimits.max)}
+                className="rounded border border-amber-300 bg-white px-2 py-1 text-[11px] text-amber-900 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Fit Max
+              </button>
+            )}
+          </div>
+          <p className="text-[11px] text-slate-500">
+            {openingWidthLimits
+              ? canResizeOpening
+                ? `Allowed width: ${openingWidthLimits.min}-${openingWidthLimits.max} mm (auto-clamped for edges/openings)`
+                : `No valid ${isDoor ? 'door' : 'window'} width at this position. Move it before resizing.`
+              : `${isDoor ? 'Door' : 'Window'} is not currently hosted on a wall. Width updates the symbol only.`}
+          </p>
+        </div>
+      )}
       <PropertyRow label="Depth">
         <input
           type="number"
@@ -655,17 +881,38 @@ function ObjectSection({ propertyUnit }: { propertyUnit: PropertyUnit }) {
       <PropertyRow label="Height">
         <input
           type="number"
-          min={fromMm(1, propertyUnit)}
+          min={fromMm(isOpening ? openingMinHeightMm : 1, propertyUnit)}
           step={propertyUnit === 'mm' ? 1 : 0.01}
-          value={fromMm(heightMm, propertyUnit).toFixed(2)}
+          value={fromMm(isOpening ? openingHeightBaseMm : heightMm, propertyUnit).toFixed(2)}
           onChange={(e) => {
             const parsed = Number.parseFloat(e.target.value);
             if (!Number.isFinite(parsed)) return;
-            updateDimensionProperty('heightMm', toMm(parsed, propertyUnit));
+            const nextHeightMm = toMm(parsed, propertyUnit);
+            if (isOpening) {
+              applyOpeningHeight(nextHeightMm);
+              return;
+            }
+            updateDimensionProperty('heightMm', nextHeightMm);
           }}
           className="w-24 px-2 py-1 text-sm border border-amber-200/80 rounded focus:outline-none focus:ring-1 focus:ring-amber-400 bg-white"
         />
       </PropertyRow>
+      {isWindow && (
+        <PropertyRow label="Sill">
+          <input
+            type="number"
+            min={fromMm(0, propertyUnit)}
+            step={propertyUnit === 'mm' ? 1 : 0.01}
+            value={fromMm(windowSillBaseMm, propertyUnit).toFixed(2)}
+            onChange={(e) => {
+              const parsed = Number.parseFloat(e.target.value);
+              if (!Number.isFinite(parsed)) return;
+              applyWindowSillHeight(toMm(parsed, propertyUnit));
+            }}
+            className="w-24 px-2 py-1 text-sm border border-amber-200/80 rounded focus:outline-none focus:ring-1 focus:ring-amber-400 bg-white"
+          />
+        </PropertyRow>
+      )}
       <PropertyRow label="Rotation">
         <input
           type="number"

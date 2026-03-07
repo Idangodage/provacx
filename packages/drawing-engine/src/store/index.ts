@@ -88,13 +88,13 @@ import {
 } from '../types/wall';
 import { generateId } from '../utils/geometry';
 import { GeometryEngine } from '../utils/geometry-engine';
+import { DEFAULT_SPLINE_SETTINGS } from '../utils/spline';
 import {
   clampBevelOffset,
   computeCornerBevelDotsForEndpoint,
   withUpdatedBevel,
   type CornerEnd,
 } from '../utils/wallBevel';
-import { DEFAULT_SPLINE_SETTINGS } from '../utils/spline';
 
 // Import from extracted modules
 import {
@@ -170,16 +170,39 @@ function scheduleRoomDetection(runDetection: () => void): void {
 // Build a lookup map for architectural object definitions by id
 const objectDefMap = new Map(DEFAULT_ARCHITECTURAL_OBJECT_LIBRARY.map((d) => [d.id, d]));
 
-/** Build furniture projection inputs from placed symbols that have a renderType */
+/** Build elevation projection inputs from placed non-opening symbols. */
 function buildFurnitureInputs(symbols: SymbolInstance2D[]): FurnitureProjectionInput[] {
   const result: FurnitureProjectionInput[] = [];
   for (const instance of symbols) {
     const definition = objectDefMap.get(instance.symbolId);
-    if (definition?.renderType) {
+    if (!definition) continue;
+    // Doors/windows are projected via wall openings, not standalone furniture projections.
+    if (definition.category === 'doors' || definition.category === 'windows') continue;
+    if (
+      definition.category === 'furniture' ||
+      definition.category === 'fixtures' ||
+      definition.category === 'symbols' ||
+      definition.category === 'my-library'
+    ) {
       result.push({ instance, definition });
     }
   }
   return result;
+}
+
+function removeOpeningsLinkedToSymbols(
+  walls: Wall[],
+  symbolIds: Set<string>
+): Wall[] {
+  if (symbolIds.size === 0) return walls;
+  return walls.map((wall) => {
+    const filteredOpenings = wall.openings.filter((opening) => !symbolIds.has(opening.id));
+    if (filteredOpenings.length === wall.openings.length) return wall;
+    return {
+      ...wall,
+      openings: filteredOpenings,
+    };
+  });
 }
 
 function clampValue(value: number, min: number, max: number): number {
@@ -1007,7 +1030,7 @@ export interface DrawingState {
 
   // Actions - Symbols
   addSymbol: (symbol: Omit<SymbolInstance2D, 'id'>) => string;
-  updateSymbol: (id: string, data: Partial<SymbolInstance2D>) => void;
+  updateSymbol: (id: string, data: Partial<SymbolInstance2D>, options?: { skipHistory?: boolean }) => void;
   deleteSymbol: (id: string) => void;
 
   // Actions - Walls
@@ -1425,19 +1448,27 @@ export const useDrawingStore = create<DrawingState>()(
       addSymbol: (symbol) => {
         const id = generateId();
         set((state) => ({ symbols: [...state.symbols, { ...symbol, id }] }));
+        get().regenerateElevations({ debounce: true });
         get().saveToHistory('Add symbol');
         return id;
       },
 
-      updateSymbol: (id, data) => {
+      updateSymbol: (id, data, options) => {
         set((state) => ({
           symbols: state.symbols.map((s) => s.id === id ? { ...s, ...data } : s)
         }));
-        get().saveToHistory('Update symbol');
+        get().regenerateElevations({ debounce: true });
+        if (!options?.skipHistory) {
+          get().saveToHistory('Update symbol');
+        }
       },
 
       deleteSymbol: (id) => {
-        set((state) => ({ symbols: state.symbols.filter((s) => s.id !== id) }));
+        set((state) => ({
+          symbols: state.symbols.filter((s) => s.id !== id),
+          walls: removeOpeningsLinkedToSymbols(state.walls, new Set([id])),
+        }));
+        get().regenerateElevations({ debounce: true });
         get().saveToHistory('Delete symbol');
       },
 
@@ -2650,6 +2681,9 @@ export const useDrawingStore = create<DrawingState>()(
         const selectedSet = new Set(selectedElementIds);
         const selectedRoomCount = rooms.filter((room) => selectedSet.has(room.id)).length;
         const selectedWallCount = walls.filter((wall) => selectedSet.has(wall.id)).length;
+        const removedSymbolIds = new Set(
+          symbols.filter((symbol) => selectedSet.has(symbol.id)).map((symbol) => symbol.id)
+        );
         const roomsAtRisk = rooms.filter((room) =>
           room.wallIds.some((wallId) => selectedSet.has(wallId))
         );
@@ -2669,17 +2703,22 @@ export const useDrawingStore = create<DrawingState>()(
           activeElevationViewId && nextElevationViews.some((view) => view.id === activeElevationViewId)
             ? activeElevationViewId
             : nextElevationViews[0]?.id ?? null;
-        set({
-          dimensions: dimensions.filter((d) => !selectedSet.has(d.id)),
-          annotations: annotations.filter((a) => !selectedSet.has(a.id)),
-          sketches: sketches.filter((s) => !selectedSet.has(s.id)),
-          symbols: symbols.filter((s) => !selectedSet.has(s.id)),
-          walls: walls
+        const nextWalls = removeOpeningsLinkedToSymbols(
+          walls
             .filter((w) => !selectedSet.has(w.id))
             .map((wall) => ({
               ...wall,
               connectedWalls: wall.connectedWalls.filter((cid) => !selectedSet.has(cid)),
             })),
+          removedSymbolIds
+        );
+
+        set({
+          dimensions: dimensions.filter((d) => !selectedSet.has(d.id)),
+          annotations: annotations.filter((a) => !selectedSet.has(a.id)),
+          sketches: sketches.filter((s) => !selectedSet.has(s.id)),
+          symbols: symbols.filter((s) => !selectedSet.has(s.id)),
+          walls: nextWalls,
           rooms: rooms
             .filter((room) => !selectedSet.has(room.id))
             .map((room) => ({

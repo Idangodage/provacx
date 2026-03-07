@@ -131,7 +131,7 @@ export interface AnnotationActions {
     removeGuide: (id: string) => void;
     clearGuides: () => void;
     addSymbol: (symbol: Omit<SymbolInstance2D, 'id'>) => string;
-    updateSymbol: (id: string, data: Partial<SymbolInstance2D>) => void;
+    updateSymbol: (id: string, data: Partial<SymbolInstance2D>, options?: { skipHistory?: boolean }) => void;
     deleteSymbol: (id: string) => void;
 }
 

@@ -108,9 +108,34 @@ interface ObjectContextMenuState {
     y: number;
 }
 
+interface OpeningResizeHandleHit {
+    openingId: string;
+    wallId: string;
+    side: 'start' | 'end';
+}
+
+interface OpeningPointerInteraction {
+    openingId: string;
+    mode: 'move' | 'resize-start' | 'resize-end';
+    wallId?: string;
+    anchorEdgeAlongWall?: number;
+    grabOffsetAlongWallMm?: number;
+    changed: boolean;
+}
+
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 10;
 const WHEEL_ZOOM_SENSITIVITY = 0.0015;
+const MIN_OPENING_EDGE_MARGIN_MM = 50;
+const MIN_OPENING_GEOMETRY_WIDTH_MM = 120;
+const OPENING_HIT_PADDING_MM = 20;
+const OPENING_RESIZE_HANDLE_SIZE_PX = 16;
+const OPENING_RESIZE_HANDLE_COLOR = '#7a2e0a';
+
+const clampValue = (value: number, min: number, max: number): number => {
+    if (min > max) return value;
+    return Math.min(max, Math.max(min, value));
+};
 
 // =============================================================================
 // Component
@@ -177,6 +202,8 @@ export function DrawingCanvas({
         drawingPoints: [],
     });
     const wallClipboardRef = useRef<Wall[] | null>(null);
+    const openingResizeHandlesRef = useRef<fabric.Object[]>([]);
+    const openingPointerInteractionRef = useRef<OpeningPointerInteraction | null>(null);
 
     // State
     const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
@@ -189,12 +216,24 @@ export function DrawingCanvas({
     const [objectContextMenu, setObjectContextMenu] = useState<ObjectContextMenuState | null>(null);
     const [placementRotationDeg, setPlacementRotationDeg] = useState(0);
     const [placementValid, setPlacementValid] = useState(true);
+    const [openingInteractionActive, setOpeningInteractionActive] = useState(false);
     const [canvasState, setCanvasState] = useState<CanvasState>({
         isPanning: false,
         lastPanPoint: null,
         isDrawing: false,
         drawingPoints: [],
     });
+
+    const setViewportSizeIfChanged = useCallback((width: number, height: number) => {
+        const nextWidth = Math.max(1, Math.floor(width));
+        const nextHeight = Math.max(1, Math.floor(height));
+        setViewportSize((prev) => {
+            if (prev.width === nextWidth && prev.height === nextHeight) {
+                return prev;
+            }
+            return { width: nextWidth, height: nextHeight };
+        });
+    }, []);
 
     // Store
     const {
@@ -320,6 +359,98 @@ export function DrawingCanvas({
         ? objectDefinitionsById.get(contextObjectInstance.symbolId) ?? null
         : null;
     const isContextDoorObject = contextObjectDefinition?.category === 'doors';
+    const doorWindowSymbolsSignature = useMemo(() => {
+        return symbols
+            .map((instance) => {
+                const definition = objectDefinitionsById.get(instance.symbolId);
+                if (!definition) return null;
+                if (definition.category !== 'doors' && definition.category !== 'windows') return null;
+                return [
+                    instance.id,
+                    definition.type,
+                    instance.rotation.toFixed(2),
+                    String(instance.properties?.swingDirection ?? ''),
+                    String(instance.properties?.type ?? ''),
+                    String(instance.properties?.widthMm ?? ''),
+                    String(instance.properties?.heightMm ?? ''),
+                    String(instance.properties?.hostWallId ?? ''),
+                ].join(':');
+            })
+            .filter((entry): entry is string => Boolean(entry))
+            .sort()
+            .join('|');
+    }, [symbols, objectDefinitionsById]);
+
+    const resolveOpeningWidthMm = useCallback(
+        (
+            definition: ArchitecturalObjectDefinition,
+            properties?: Record<string, unknown>
+        ): number => {
+            const fromProperties =
+                typeof properties?.widthMm === 'number' && Number.isFinite(properties.widthMm)
+                    ? properties.widthMm
+                    : null;
+            return Math.max(1, fromProperties ?? definition.openingWidthMm ?? definition.widthMm);
+        },
+        []
+    );
+
+    const resolveOpeningHeightMm = useCallback(
+        (
+            definition: ArchitecturalObjectDefinition,
+            properties?: Record<string, unknown>
+        ): number => {
+            const fromProperties =
+                typeof properties?.heightMm === 'number' && Number.isFinite(properties.heightMm)
+                    ? properties.heightMm
+                    : null;
+            return Math.max(1, fromProperties ?? definition.heightMm);
+        },
+        []
+    );
+
+    const resolveOpeningSillHeightMm = useCallback(
+        (
+            definition: ArchitecturalObjectDefinition,
+            properties?: Record<string, unknown>
+        ): number => {
+            if (definition.category !== 'windows') return 0;
+            const fromProperties =
+                typeof properties?.sillHeightMm === 'number' && Number.isFinite(properties.sillHeightMm)
+                    ? properties.sillHeightMm
+                    : null;
+            return Math.max(0, fromProperties ?? definition.sillHeightMm ?? 900);
+        },
+        []
+    );
+
+    const fitOpeningToWall = useCallback(
+        (wall: Wall, opening: { position: number; width: number }): { position: number; width: number } => {
+            const wallLength = Math.hypot(
+                wall.endPoint.x - wall.startPoint.x,
+                wall.endPoint.y - wall.startPoint.y
+            );
+            if (!Number.isFinite(wallLength) || wallLength <= 0.001) {
+                return { position: 0, width: Math.max(120, opening.width) };
+            }
+
+            const maxWidth = Math.max(120, wallLength - MIN_OPENING_EDGE_MARGIN_MM * 2);
+            const fittedWidth = Math.max(120, Math.min(opening.width, maxWidth));
+            const halfWidth = fittedWidth / 2;
+            const minPosition = MIN_OPENING_EDGE_MARGIN_MM + halfWidth;
+            const maxPosition = wallLength - MIN_OPENING_EDGE_MARGIN_MM - halfWidth;
+            const fittedPosition =
+                minPosition <= maxPosition
+                    ? Math.min(Math.max(opening.position, minPosition), maxPosition)
+                    : wallLength / 2;
+
+            return {
+                position: fittedPosition,
+                width: fittedWidth,
+            };
+        },
+        []
+    );
 
     void MM_TO_PX;
 
@@ -484,6 +615,7 @@ export function DrawingCanvas({
     }, [roomById, wallIdSet]);
 
     const findWallPlacementSnap = useCallback((point: Point2D) => {
+        const maxSnapDistanceMm = Math.max(100, 72 / Math.max(viewportZoom, 0.01) / MM_TO_PX);
         let best: {
             wall: Wall;
             point: Point2D;
@@ -491,11 +623,12 @@ export function DrawingCanvas({
             distance: number;
             angleDeg: number;
             normal: Point2D;
+            wallLength: number;
         } | null = null;
 
         for (const wall of walls) {
             const projection = projectPointToSegment(point, wall.startPoint, wall.endPoint);
-            if (projection.distance > 100) continue;
+            if (projection.distance > maxSnapDistanceMm) continue;
             const angleDeg = (Math.atan2(
                 wall.endPoint.y - wall.startPoint.y,
                 wall.endPoint.x - wall.startPoint.x
@@ -517,10 +650,53 @@ export function DrawingCanvas({
                     distance: projection.distance,
                     angleDeg,
                     normal,
+                    wallLength,
                 };
             }
         }
         return best;
+    }, [walls, projectPointToSegment, viewportZoom]);
+
+    const findOpeningAtPoint = useCallback((point: Point2D): { openingId: string; wallId: string } | null => {
+        let best: { openingId: string; wallId: string; score: number } | null = null;
+        for (const wall of walls) {
+            if (wall.openings.length === 0) continue;
+            const wallLength = Math.hypot(
+                wall.endPoint.x - wall.startPoint.x,
+                wall.endPoint.y - wall.startPoint.y
+            );
+            if (!Number.isFinite(wallLength) || wallLength <= 0.001) continue;
+
+            const projection = projectPointToSegment(point, wall.startPoint, wall.endPoint);
+            const alongWall = projection.t * wallLength;
+            for (const opening of wall.openings) {
+                const maxPerpendicularDistance = Math.max(
+                    wall.thickness / 2 + OPENING_HIT_PADDING_MM,
+                    opening.width + OPENING_HIT_PADDING_MM
+                );
+                if (projection.distance > maxPerpendicularDistance) continue;
+                const halfWidth = opening.width / 2;
+                const minAlong = opening.position - halfWidth - OPENING_HIT_PADDING_MM;
+                const maxAlong = opening.position + halfWidth + OPENING_HIT_PADDING_MM;
+                if (alongWall < minAlong || alongWall > maxAlong) continue;
+
+                const edgeDistance = Math.abs(alongWall - opening.position) / Math.max(1, halfWidth);
+                const score = projection.distance + edgeDistance * 30;
+                if (!best || score < best.score) {
+                    best = {
+                        openingId: opening.id,
+                        wallId: wall.id,
+                        score,
+                    };
+                }
+            }
+        }
+
+        if (!best) return null;
+        return {
+            openingId: best.openingId,
+            wallId: best.wallId,
+        };
     }, [walls, projectPointToSegment]);
 
     const collisionBounds = useCallback((
@@ -576,17 +752,58 @@ export function DrawingCanvas({
     );
 
     const computePlacement = useCallback(
-        (point: Point2D, definition: ArchitecturalObjectDefinition) => {
+        (
+            point: Point2D,
+            definition: ArchitecturalObjectDefinition,
+            options?: { ignoreSymbolId?: string; ignoreOpeningId?: string; openingWidthMm?: number }
+        ) => {
             let placementPoint = { ...point };
             let rotationDeg = placementRotationDeg;
-            let snappedWall: ReturnType<typeof findWallPlacementSnap> | null = null;
+            let snappedWall: (ReturnType<typeof findWallPlacementSnap> & { positionAlongWall: number }) | null = null;
             let alignmentPoint: Point2D | null = null;
+            let openingPlacementValid = true;
 
             if (definition.category === 'doors' || definition.category === 'windows') {
-                snappedWall = findWallPlacementSnap(point);
-                if (snappedWall) {
-                    placementPoint = { ...snappedWall.point };
-                    rotationDeg = snappedWall.angleDeg;
+                const wallSnap = findWallPlacementSnap(point);
+                if (wallSnap) {
+                    const openingWidth =
+                        typeof options?.openingWidthMm === 'number' && Number.isFinite(options.openingWidthMm)
+                            ? Math.max(1, options.openingWidthMm)
+                            : definition.openingWidthMm ?? definition.widthMm;
+                    const edgeClearance = openingWidth / 2 + MIN_OPENING_EDGE_MARGIN_MM;
+                    const unclampedPositionAlongWall = wallSnap.t * wallSnap.wallLength;
+                    const clampedPositionAlongWall = Math.min(
+                        Math.max(unclampedPositionAlongWall, edgeClearance),
+                        wallSnap.wallLength - edgeClearance
+                    );
+                    const clampedT = wallSnap.wallLength > 0
+                        ? clampedPositionAlongWall / wallSnap.wallLength
+                        : 0.5;
+                    placementPoint = {
+                        x: wallSnap.wall.startPoint.x + (wallSnap.wall.endPoint.x - wallSnap.wall.startPoint.x) * clampedT,
+                        y: wallSnap.wall.startPoint.y + (wallSnap.wall.endPoint.y - wallSnap.wall.startPoint.y) * clampedT,
+                    };
+                    rotationDeg = wallSnap.angleDeg;
+
+                    const overlapsExistingOpening = wallSnap.wall.openings.some((existing) => {
+                        if (options?.ignoreOpeningId && existing.id === options.ignoreOpeningId) {
+                            return false;
+                        }
+                        const requiredGap =
+                            existing.width / 2 + openingWidth / 2 + MIN_OPENING_EDGE_MARGIN_MM;
+                        return Math.abs(existing.position - clampedPositionAlongWall) < requiredGap;
+                    });
+                    const fitsSegment =
+                        wallSnap.wallLength >= openingWidth + MIN_OPENING_EDGE_MARGIN_MM * 2;
+                    openingPlacementValid = fitsSegment && !overlapsExistingOpening;
+
+                    snappedWall = {
+                        ...wallSnap,
+                        t: clampedT,
+                        positionAlongWall: clampedPositionAlongWall,
+                    };
+                } else {
+                    openingPlacementValid = false;
                 }
             } else if (definition.category === 'furniture' || definition.category === 'fixtures') {
                 const nearestRoom = rooms.reduce(
@@ -647,8 +864,12 @@ export function DrawingCanvas({
                 };
             }
 
-            const collision = hasFurnitureCollision(placementPoint, definition);
-            const valid = !collision;
+            const collision = hasFurnitureCollision(
+                placementPoint,
+                definition,
+                options?.ignoreSymbolId ? { ignoreSymbolId: options.ignoreSymbolId } : undefined
+            );
+            const valid = !collision && openingPlacementValid;
 
             return {
                 point: placementPoint,
@@ -670,12 +891,91 @@ export function DrawingCanvas({
         ]
     );
 
+    const syncOpeningForSymbol = useCallback(
+        (
+            symbolId: string,
+            definition: ArchitecturalObjectDefinition,
+            snappedWall: { wall: Wall; positionAlongWall: number },
+            overrides?: { openingWidthMm?: number; openingHeightMm?: number; sillHeightMm?: number }
+        ) => {
+            if (definition.category !== 'doors' && definition.category !== 'windows') {
+                return;
+            }
+
+            const openingWidth =
+                typeof overrides?.openingWidthMm === 'number' && Number.isFinite(overrides.openingWidthMm)
+                    ? Math.max(1, overrides.openingWidthMm)
+                    : definition.openingWidthMm ?? definition.widthMm;
+            const openingHeight =
+                typeof overrides?.openingHeightMm === 'number' && Number.isFinite(overrides.openingHeightMm)
+                    ? Math.max(1, overrides.openingHeightMm)
+                    : definition.heightMm;
+            const sillHeight =
+                definition.category === 'windows'
+                    ? (typeof overrides?.sillHeightMm === 'number' && Number.isFinite(overrides.sillHeightMm)
+                        ? Math.max(0, overrides.sillHeightMm)
+                        : definition.sillHeightMm ?? 900)
+                    : 0;
+            const targetWallId = snappedWall.wall.id;
+            const nextOpening = {
+                id: symbolId,
+                type: (definition.category === 'doors' ? 'door' : 'window') as 'door' | 'window',
+                position: snappedWall.positionAlongWall,
+                width: openingWidth + 50,
+                height: openingHeight,
+                sillHeight,
+            };
+
+            for (const wall of walls) {
+                const hasSymbolOpening = wall.openings.some((opening) => opening.id === symbolId);
+                const isTargetWall = wall.id === targetWallId;
+                if (!hasSymbolOpening && !isTargetWall) continue;
+
+                const filtered = wall.openings.filter((opening) => opening.id !== symbolId);
+                const nextOpenings = isTargetWall
+                    ? [...filtered, nextOpening].sort((a, b) => a.position - b.position)
+                    : filtered;
+
+                const unchanged =
+                    nextOpenings.length === wall.openings.length &&
+                    nextOpenings.every((opening, index) => {
+                        const existing = wall.openings[index];
+                        return (
+                            !!existing &&
+                            opening.id === existing.id &&
+                            opening.type === existing.type &&
+                            Math.abs(opening.position - existing.position) < 0.001 &&
+                            Math.abs(opening.width - existing.width) < 0.001 &&
+                            Math.abs(opening.height - existing.height) < 0.001 &&
+                            (opening.sillHeight ?? 0) === (existing.sillHeight ?? 0)
+                        );
+                    });
+
+                if (unchanged) continue;
+                updateWall(
+                    wall.id,
+                    { openings: nextOpenings },
+                    { skipHistory: true, source: 'ui' }
+                );
+            }
+        },
+        [walls, updateWall]
+    );
+
     const placePendingObject = useCallback((point: Point2D): boolean => {
         if (!pendingPlacementDefinition) return false;
         const placement = computePlacement(point, pendingPlacementDefinition);
         setPlacementValid(placement.valid);
         if (!placement.valid) {
-            setProcessingStatus('Placement blocked: furniture overlap detected.', false);
+            const isOpening =
+                pendingPlacementDefinition.category === 'doors' ||
+                pendingPlacementDefinition.category === 'windows';
+            setProcessingStatus(
+                isOpening
+                    ? 'Placement blocked: opening does not fit or overlaps an existing opening.'
+                    : 'Placement blocked: furniture overlap detected.',
+                false
+            );
             return true;
         }
 
@@ -689,52 +989,45 @@ export function DrawingCanvas({
                 definitionId: pendingPlacementDefinition.id,
                 category: pendingPlacementDefinition.category,
                 type: pendingPlacementDefinition.type,
-                widthMm: pendingPlacementDefinition.widthMm,
-                depthMm: pendingPlacementDefinition.depthMm,
+                widthMm:
+                    (pendingPlacementDefinition.category === 'doors' || pendingPlacementDefinition.category === 'windows') &&
+                        placement.snappedWall
+                        ? (pendingPlacementDefinition.openingWidthMm ?? pendingPlacementDefinition.widthMm)
+                        : pendingPlacementDefinition.widthMm,
+                depthMm:
+                    (pendingPlacementDefinition.category === 'doors' || pendingPlacementDefinition.category === 'windows') &&
+                        placement.snappedWall
+                        ? placement.snappedWall.wall.thickness
+                        : pendingPlacementDefinition.depthMm,
                 heightMm: pendingPlacementDefinition.heightMm,
+                baseElevationMm:
+                    pendingPlacementDefinition.category === 'windows'
+                        ? ((placement.snappedWall?.wall.properties3D.baseElevation ?? 0) +
+                            (pendingPlacementDefinition.sillHeightMm ?? 900))
+                        : (placement.snappedWall?.wall.properties3D.baseElevation ?? 0),
                 material: pendingPlacementDefinition.material,
                 swingDirection: 'left',
+                hostWallId: placement.snappedWall?.wall.id,
+                hostWallThicknessMm: placement.snappedWall?.wall.thickness,
+                positionAlongWallMm: placement.snappedWall?.positionAlongWall,
                 placedAt: new Date().toISOString(),
             },
         };
         const symbolId = addSymbol(symbolPayload);
         const placedInstance: SymbolInstance2D = { ...symbolPayload, id: symbolId };
-        setSelectedIds([symbolId]);
+        const placedIsOpening =
+            pendingPlacementDefinition.category === 'doors' ||
+            pendingPlacementDefinition.category === 'windows';
+        setSelectedIds(placedIsOpening ? [] : [symbolId]);
 
         if (
             placement.snappedWall &&
             (pendingPlacementDefinition.category === 'doors' || pendingPlacementDefinition.category === 'windows')
         ) {
-            const wall = placement.snappedWall.wall;
-            const wallLength = Math.hypot(
-                wall.endPoint.x - wall.startPoint.x,
-                wall.endPoint.y - wall.startPoint.y
-            ) || 1;
-            const openingWidth = (pendingPlacementDefinition.openingWidthMm ?? pendingPlacementDefinition.widthMm) + 50;
-            const halfOpening = openingWidth / 2;
-            const openingPosition = Math.min(
-                Math.max(halfOpening, wallLength * placement.snappedWall.t),
-                wallLength - halfOpening
-            );
-            updateWall(
-                wall.id,
-                {
-                    openings: [
-                        ...wall.openings,
-                        {
-                            id: generateId(),
-                            type: pendingPlacementDefinition.category === 'doors' ? 'door' : 'window',
-                            position: openingPosition,
-                            width: openingWidth,
-                            height: pendingPlacementDefinition.heightMm,
-                            sillHeight: pendingPlacementDefinition.category === 'windows'
-                                ? pendingPlacementDefinition.sillHeightMm ?? 900
-                                : 0,
-                        },
-                    ],
-                },
-                { skipHistory: true, source: 'ui' }
-            );
+            syncOpeningForSymbol(symbolId, pendingPlacementDefinition, {
+                wall: placement.snappedWall.wall,
+                positionAlongWall: placement.snappedWall.positionAlongWall,
+            });
         }
 
         onObjectPlaced?.(pendingPlacementDefinition.id, placedInstance);
@@ -745,7 +1038,7 @@ export function DrawingCanvas({
         computePlacement,
         addSymbol,
         setSelectedIds,
-        updateWall,
+        syncOpeningForSymbol,
         onObjectPlaced,
         setProcessingStatus,
     ]);
@@ -849,21 +1142,426 @@ export function DrawingCanvas({
             const typedTarget = target as fabric.Object & {
                 id?: string;
                 objectId?: string;
+                openingId?: string;
                 name?: string;
-                group?: fabric.Group & { id?: string; objectId?: string; name?: string };
+                group?: fabric.Group & { id?: string; objectId?: string; openingId?: string; name?: string };
             };
 
             if (typedTarget.objectId) return typedTarget.objectId;
+            if (typedTarget.openingId) return typedTarget.openingId;
             if (typedTarget.id && typedTarget.name?.startsWith('object-')) return typedTarget.id;
 
             const parent = typedTarget.group;
             if (parent?.objectId) return parent.objectId;
+            if (parent?.openingId) return parent.openingId;
             if (parent?.id && parent?.name?.startsWith('object-')) return parent.id;
 
             return null;
         },
         []
     );
+
+    const resolveOpeningIdFromTarget = useCallback(
+        (target: fabric.Object | undefined | null): string | null => {
+            if (!target) return null;
+
+            const typedTarget = target as fabric.Object & {
+                openingId?: string;
+                group?: fabric.Group & { openingId?: string };
+            };
+
+            if (typedTarget.openingId) return typedTarget.openingId;
+            if (typedTarget.group?.openingId) return typedTarget.group.openingId;
+            return null;
+        },
+        []
+    );
+
+    const resolveOpeningResizeHandleFromTarget = useCallback(
+        (target: fabric.Object | undefined | null): OpeningResizeHandleHit | null => {
+            if (!target) return null;
+
+            const typedTarget = target as fabric.Object & {
+                openingId?: string;
+                wallId?: string;
+                openingResizeSide?: 'start' | 'end';
+                isOpeningResizeHandle?: boolean;
+                group?: fabric.Group & {
+                    openingId?: string;
+                    wallId?: string;
+                    openingResizeSide?: 'start' | 'end';
+                    isOpeningResizeHandle?: boolean;
+                };
+            };
+
+            const fromTarget = typedTarget.isOpeningResizeHandle
+                ? {
+                    openingId: typedTarget.openingId,
+                    wallId: typedTarget.wallId,
+                    side: typedTarget.openingResizeSide,
+                }
+                : null;
+            const fromParent = typedTarget.group?.isOpeningResizeHandle
+                ? {
+                    openingId: typedTarget.group.openingId,
+                    wallId: typedTarget.group.wallId,
+                    side: typedTarget.group.openingResizeSide,
+                }
+                : null;
+            const resolved = fromTarget ?? fromParent;
+            if (!resolved?.openingId || !resolved.wallId || !resolved.side) return null;
+            return {
+                openingId: resolved.openingId,
+                wallId: resolved.wallId,
+                side: resolved.side,
+            };
+        },
+        []
+    );
+
+    const clearOpeningResizeHandles = useCallback(() => {
+        const canvas = fabricRef.current;
+        if (!canvas) return;
+        if (openingResizeHandlesRef.current.length === 0) return;
+        openingResizeHandlesRef.current.forEach((handle) => canvas.remove(handle));
+        openingResizeHandlesRef.current = [];
+        canvas.requestRenderAll();
+    }, []);
+
+    const applyOpeningSymbolPlacement = useCallback(
+        (
+            instance: SymbolInstance2D,
+            definition: ArchitecturalObjectDefinition,
+            wall: Wall,
+            positionAlongWallMm: number,
+            openingWidthMm: number,
+            openingHeightMm: number,
+            openingSillHeightMm: number,
+            options?: { skipHistory?: boolean }
+        ) => {
+            const dx = wall.endPoint.x - wall.startPoint.x;
+            const dy = wall.endPoint.y - wall.startPoint.y;
+            const wallLength = Math.hypot(dx, dy) || 1;
+            const t = positionAlongWallMm / wallLength;
+            const nextPosition = {
+                x: wall.startPoint.x + dx * t,
+                y: wall.startPoint.y + dy * t,
+            };
+            const nextRotation = (Math.atan2(dy, dx) * 180) / Math.PI;
+            const nextBaseElevationMm =
+                definition.category === 'windows'
+                    ? (wall.properties3D.baseElevation ?? 0) + openingSillHeightMm
+                    : (wall.properties3D.baseElevation ?? 0);
+            const nextProperties: Record<string, unknown> = {
+                ...instance.properties,
+                widthMm: openingWidthMm,
+                depthMm: wall.thickness,
+                heightMm: openingHeightMm,
+                hostWallId: wall.id,
+                hostWallThicknessMm: wall.thickness,
+                positionAlongWallMm: positionAlongWallMm,
+                baseElevationMm: nextBaseElevationMm,
+            };
+            if (definition.category === 'windows') {
+                nextProperties.sillHeightMm = openingSillHeightMm;
+            }
+            updateSymbol(
+                instance.id,
+                {
+                    position: nextPosition,
+                    rotation: nextRotation,
+                    properties: nextProperties,
+                },
+                options
+            );
+        },
+        [updateSymbol]
+    );
+
+    const updateOpeningPointerInteraction = useCallback(
+        (pointerMm: Point2D): boolean => {
+            const interaction = openingPointerInteractionRef.current;
+            if (!interaction) return false;
+
+            const hostWall = walls.find((wall) => wall.id === interaction.wallId)
+                ?? walls.find((wall) => wall.openings.some((entry) => entry.id === interaction.openingId));
+            const hostOpening = hostWall?.openings.find((entry) => entry.id === interaction.openingId);
+            const instance = symbols.find((entry) => entry.id === interaction.openingId);
+            const definition = instance
+                ? objectDefinitionsById.get(instance.symbolId)
+                : undefined;
+            const hasLinkedSymbol = Boolean(
+                instance &&
+                definition &&
+                (definition.category === 'doors' || definition.category === 'windows')
+            );
+            const openingWidthMm = hasLinkedSymbol
+                ? resolveOpeningWidthMm(definition as ArchitecturalObjectDefinition, instance?.properties)
+                : Math.max(1, (hostOpening?.width ?? MIN_OPENING_GEOMETRY_WIDTH_MM) - 50);
+            const openingHeightMm = hasLinkedSymbol
+                ? resolveOpeningHeightMm(definition as ArchitecturalObjectDefinition, instance?.properties)
+                : Math.max(1, hostOpening?.height ?? 2100);
+            const openingSillHeightMm = hasLinkedSymbol
+                ? resolveOpeningSillHeightMm(definition as ArchitecturalObjectDefinition, instance?.properties)
+                : Math.max(0, hostOpening?.sillHeight ?? 0);
+
+            if (interaction.mode === 'move') {
+                const sourceWall = hostWall ?? null;
+                const snappedAnchorWall = findWallPlacementSnap(pointerMm)?.wall ?? sourceWall;
+                let placementSeedPoint = pointerMm;
+
+                if (snappedAnchorWall) {
+                    const wallDx = snappedAnchorWall.endPoint.x - snappedAnchorWall.startPoint.x;
+                    const wallDy = snappedAnchorWall.endPoint.y - snappedAnchorWall.startPoint.y;
+                    const wallLength = Math.hypot(wallDx, wallDy);
+                    if (Number.isFinite(wallLength) && wallLength > 0.001) {
+                        const pointerProjection = projectPointToSegment(
+                            pointerMm,
+                            snappedAnchorWall.startPoint,
+                            snappedAnchorWall.endPoint
+                        );
+                        const pointerAlongWall = pointerProjection.t * wallLength;
+                        const grabOffset = interaction.grabOffsetAlongWallMm ?? 0;
+                        const desiredCenterAlongWall = clampValue(
+                            pointerAlongWall - grabOffset,
+                            0,
+                            wallLength
+                        );
+                        const t = desiredCenterAlongWall / wallLength;
+                        placementSeedPoint = {
+                            x: snappedAnchorWall.startPoint.x + wallDx * t,
+                            y: snappedAnchorWall.startPoint.y + wallDy * t,
+                        };
+                    }
+                }
+
+                if (!hasLinkedSymbol) {
+                    if (!hostWall || !hostOpening) return true;
+                    const wallDx = hostWall.endPoint.x - hostWall.startPoint.x;
+                    const wallDy = hostWall.endPoint.y - hostWall.startPoint.y;
+                    const wallLength = Math.hypot(wallDx, wallDy);
+                    if (!Number.isFinite(wallLength) || wallLength <= 0.001) return true;
+
+                    const projected = projectPointToSegment(
+                        placementSeedPoint,
+                        hostWall.startPoint,
+                        hostWall.endPoint
+                    );
+                    const projectedAlongWall = projected.t * wallLength;
+                    const grabOffset = interaction.grabOffsetAlongWallMm ?? 0;
+                    const desiredCenterAlongWall = projectedAlongWall - grabOffset;
+                    const halfWidth = hostOpening.width / 2;
+
+                    let minPosition = MIN_OPENING_EDGE_MARGIN_MM + halfWidth;
+                    let maxPosition = wallLength - MIN_OPENING_EDGE_MARGIN_MM - halfWidth;
+                    const neighbours = hostWall.openings.filter((entry) => entry.id !== interaction.openingId);
+                    neighbours.forEach((entry) => {
+                        const requiredGap = entry.width / 2 + halfWidth + MIN_OPENING_EDGE_MARGIN_MM;
+                        if (entry.position < hostOpening.position) {
+                            minPosition = Math.max(minPosition, entry.position + requiredGap);
+                        } else {
+                            maxPosition = Math.min(maxPosition, entry.position - requiredGap);
+                        }
+                    });
+                    if (maxPosition < minPosition) return true;
+                    const nextPosition = clampValue(desiredCenterAlongWall, minPosition, maxPosition);
+                    if (Math.abs(nextPosition - hostOpening.position) > 0.01) {
+                        updateWall(
+                            hostWall.id,
+                            {
+                                openings: hostWall.openings.map((entry) =>
+                                    entry.id === interaction.openingId
+                                        ? { ...entry, position: nextPosition }
+                                        : entry
+                                ),
+                            },
+                            { skipHistory: true, source: 'ui' }
+                        );
+                        interaction.changed = true;
+                    }
+                    return true;
+                }
+
+                const placement = computePlacement(
+                    placementSeedPoint,
+                    definition as ArchitecturalObjectDefinition,
+                    {
+                        ignoreOpeningId: interaction.openingId,
+                        ignoreSymbolId: interaction.openingId,
+                        openingWidthMm,
+                    }
+                );
+                if (!placement.valid || !placement.snappedWall || !instance || !definition) {
+                    return true;
+                }
+
+                const snappedWall = placement.snappedWall.wall;
+                const positionAlongWall = placement.snappedWall.positionAlongWall;
+                syncOpeningForSymbol(
+                    interaction.openingId,
+                    definition,
+                    { wall: snappedWall, positionAlongWall },
+                    {
+                        openingWidthMm,
+                        openingHeightMm,
+                        sillHeightMm: openingSillHeightMm,
+                    }
+                );
+                applyOpeningSymbolPlacement(
+                    instance,
+                    definition,
+                    snappedWall,
+                    positionAlongWall,
+                    openingWidthMm,
+                    openingHeightMm,
+                    openingSillHeightMm,
+                    { skipHistory: true }
+                );
+                interaction.changed = true;
+                return true;
+            }
+
+            if (!hostWall) return true;
+            if (!hostOpening) return true;
+
+            const wallDx = hostWall.endPoint.x - hostWall.startPoint.x;
+            const wallDy = hostWall.endPoint.y - hostWall.startPoint.y;
+            const wallLength = Math.hypot(wallDx, wallDy);
+            if (!Number.isFinite(wallLength) || wallLength <= 0.001) return true;
+
+            const projected = projectPointToSegment(pointerMm, hostWall.startPoint, hostWall.endPoint);
+            const projectedAlongWall = projected.t * wallLength;
+            const defaultAnchor = interaction.mode === 'resize-start'
+                ? hostOpening.position + hostOpening.width / 2
+                : hostOpening.position - hostOpening.width / 2;
+            const anchorEdge = interaction.anchorEdgeAlongWall ?? defaultAnchor;
+            if (!Number.isFinite(interaction.anchorEdgeAlongWall ?? Number.NaN)) {
+                interaction.anchorEdgeAlongWall = anchorEdge;
+            }
+
+            const neighbours = hostWall.openings.filter((entry) => entry.id !== interaction.openingId);
+            let startEdge = hostOpening.position - hostOpening.width / 2;
+            let endEdge = hostOpening.position + hostOpening.width / 2;
+
+            if (interaction.mode === 'resize-start') {
+                let minStartEdge = MIN_OPENING_EDGE_MARGIN_MM;
+                neighbours
+                    .filter((entry) => entry.position < hostOpening.position)
+                    .forEach((entry) => {
+                        const neighbourRightEdge =
+                            entry.position + entry.width / 2 + MIN_OPENING_EDGE_MARGIN_MM;
+                        minStartEdge = Math.max(minStartEdge, neighbourRightEdge);
+                    });
+                const maxStartEdge = Math.min(
+                    wallLength - MIN_OPENING_EDGE_MARGIN_MM,
+                    anchorEdge - MIN_OPENING_GEOMETRY_WIDTH_MM
+                );
+                if (maxStartEdge < minStartEdge) return true;
+                startEdge = clampValue(projectedAlongWall, minStartEdge, maxStartEdge);
+                endEdge = anchorEdge;
+            } else {
+                let maxEndEdge = wallLength - MIN_OPENING_EDGE_MARGIN_MM;
+                neighbours
+                    .filter((entry) => entry.position > hostOpening.position)
+                    .forEach((entry) => {
+                        const neighbourLeftEdge =
+                            entry.position - entry.width / 2 - MIN_OPENING_EDGE_MARGIN_MM;
+                        maxEndEdge = Math.min(maxEndEdge, neighbourLeftEdge);
+                    });
+                const minEndEdge = Math.max(
+                    MIN_OPENING_EDGE_MARGIN_MM,
+                    anchorEdge + MIN_OPENING_GEOMETRY_WIDTH_MM
+                );
+                if (maxEndEdge < minEndEdge) return true;
+                startEdge = anchorEdge;
+                endEdge = clampValue(projectedAlongWall, minEndEdge, maxEndEdge);
+            }
+
+            const openingWidthWithClearanceMm = Math.max(
+                MIN_OPENING_GEOMETRY_WIDTH_MM,
+                endEdge - startEdge
+            );
+            const nextPositionAlongWall = (startEdge + endEdge) / 2;
+            if (hasLinkedSymbol && instance && definition) {
+                const nextOpeningWidthMm = Math.max(1, openingWidthWithClearanceMm - 50);
+                syncOpeningForSymbol(
+                    interaction.openingId,
+                    definition,
+                    { wall: hostWall, positionAlongWall: nextPositionAlongWall },
+                    {
+                        openingWidthMm: nextOpeningWidthMm,
+                        openingHeightMm,
+                        sillHeightMm: openingSillHeightMm,
+                    }
+                );
+                applyOpeningSymbolPlacement(
+                    instance,
+                    definition,
+                    hostWall,
+                    nextPositionAlongWall,
+                    nextOpeningWidthMm,
+                    openingHeightMm,
+                    openingSillHeightMm,
+                    { skipHistory: true }
+                );
+            } else {
+                updateWall(
+                    hostWall.id,
+                    {
+                        openings: hostWall.openings.map((entry) =>
+                            entry.id === interaction.openingId
+                                ? {
+                                    ...entry,
+                                    position: nextPositionAlongWall,
+                                    width: openingWidthWithClearanceMm,
+                                    height: openingHeightMm,
+                                    sillHeight: openingSillHeightMm,
+                                }
+                                : entry
+                        ),
+                    },
+                    { skipHistory: true, source: 'ui' }
+                );
+            }
+            interaction.changed = true;
+            return true;
+        },
+        [
+            symbols,
+            objectDefinitionsById,
+            walls,
+            resolveOpeningWidthMm,
+            resolveOpeningHeightMm,
+            resolveOpeningSillHeightMm,
+            findWallPlacementSnap,
+            computePlacement,
+            syncOpeningForSymbol,
+            applyOpeningSymbolPlacement,
+            projectPointToSegment,
+            updateWall,
+        ]
+    );
+
+    const beginOpeningPointerInteraction = useCallback((interaction: OpeningPointerInteraction) => {
+        openingPointerInteractionRef.current = interaction;
+        setOpeningInteractionActive(true);
+        const canvas = fabricRef.current;
+        if (!canvas) return;
+        canvas.selection = false;
+        canvas.discardActiveObject();
+        canvas.requestRenderAll();
+    }, []);
+
+    const finishOpeningPointerInteraction = useCallback((): boolean => {
+        const interaction = openingPointerInteractionRef.current;
+        if (!interaction) return false;
+        openingPointerInteractionRef.current = null;
+        setOpeningInteractionActive(false);
+        if (interaction.changed) {
+            saveToHistory(interaction.mode === 'move' ? 'Move opening' : 'Resize opening');
+        }
+        return true;
+    }, [saveToHistory]);
 
     const closeWallContextMenu = useCallback(() => {
         setWallContextMenu(null);
@@ -1031,6 +1729,51 @@ export function DrawingCanvas({
                 x: instance.position.x + dxMm,
                 y: instance.position.y + dyMm,
             };
+            if (definition.category === 'doors' || definition.category === 'windows') {
+                const openingWidthMm = resolveOpeningWidthMm(definition, instance.properties);
+                const openingHeightMm = resolveOpeningHeightMm(definition, instance.properties);
+                const openingSillHeightMm = resolveOpeningSillHeightMm(definition, instance.properties);
+                const placement = computePlacement(candidatePosition, definition, {
+                    ignoreSymbolId: instance.id,
+                    ignoreOpeningId: instance.id,
+                    openingWidthMm,
+                });
+                if (!placement.valid || !placement.snappedWall) {
+                    setProcessingStatus('Movement blocked: opening must remain on a valid wall segment.', false);
+                    continue;
+                }
+
+                const snappedWall = placement.snappedWall.wall;
+                const nextProperties = {
+                    ...instance.properties,
+                    widthMm: openingWidthMm,
+                    depthMm: snappedWall.thickness,
+                    heightMm: openingHeightMm,
+                    baseElevationMm:
+                        definition.category === 'windows'
+                            ? ((snappedWall.properties3D.baseElevation ?? 0) +
+                                openingSillHeightMm)
+                            : (snappedWall.properties3D.baseElevation ?? 0),
+                    hostWallId: snappedWall.id,
+                    hostWallThicknessMm: snappedWall.thickness,
+                    positionAlongWallMm: placement.snappedWall.positionAlongWall,
+                };
+
+                syncOpeningForSymbol(instance.id, definition, {
+                    wall: snappedWall,
+                    positionAlongWall: placement.snappedWall.positionAlongWall,
+                }, {
+                    openingWidthMm,
+                    openingHeightMm,
+                    sillHeightMm: openingSillHeightMm,
+                });
+                updateSymbol(instance.id, {
+                    position: placement.point,
+                    rotation: placement.rotationDeg,
+                    properties: nextProperties,
+                });
+                continue;
+            }
             const collides = hasFurnitureCollision(candidatePosition, definition, {
                 ignoreSymbolId: instance.id,
             });
@@ -1045,6 +1788,11 @@ export function DrawingCanvas({
         selectedIds,
         symbols,
         objectDefinitionsById,
+        computePlacement,
+        syncOpeningForSymbol,
+        resolveOpeningWidthMm,
+        resolveOpeningHeightMm,
+        resolveOpeningSillHeightMm,
         hasFurnitureCollision,
         setProcessingStatus,
         updateSymbol,
@@ -1368,7 +2116,7 @@ export function DrawingCanvas({
 
         setFabricCanvas(canvas);
         onCanvasReady?.(canvas);
-        setViewportSize({ width: outer.clientWidth, height: outer.clientHeight });
+        setViewportSizeIfChanged(outer.clientWidth, outer.clientHeight);
 
         // [SNAP WIRE] Size overlay canvas to match fabric canvas
         if (snapOverlayRef.current) {
@@ -1380,16 +2128,21 @@ export function DrawingCanvas({
             for (const entry of entries) {
                 const { width, height } = entry.contentRect;
                 if (entry.target === host) {
-                    canvas.setDimensions({ width, height });
+                    const nextWidth = Math.max(1, Math.floor(width));
+                    const nextHeight = Math.max(1, Math.floor(height));
+                    if (nextWidth <= 2 || nextHeight <= 2) {
+                        continue;
+                    }
+                    canvas.setDimensions({ width: nextWidth, height: nextHeight });
                     canvas.renderAll();
                     // [SNAP WIRE] Keep overlay in sync
                     if (snapOverlayRef.current) {
-                        snapOverlayRef.current.width = width;
-                        snapOverlayRef.current.height = height;
+                        snapOverlayRef.current.width = nextWidth;
+                        snapOverlayRef.current.height = nextHeight;
                     }
                 }
                 if (entry.target === outer) {
-                    setViewportSize({ width, height });
+                    setViewportSizeIfChanged(width, height);
                 }
             }
         });
@@ -1412,7 +2165,54 @@ export function DrawingCanvas({
             fabricRef.current = null;
             setFabricCanvas(null);
         };
-    }, [onCanvasReady]);
+    }, [onCanvasReady, setViewportSizeIfChanged]);
+
+    // Recover from transient layout glitches (tab restore/focus/resize) that can
+    // leave Fabric canvas dimensions stale after heavy frame drops.
+    useEffect(() => {
+        const canvas = fabricRef.current;
+        const outer = outerRef.current;
+        if (!canvas || !outer) return;
+
+        const syncCanvasDimensions = () => {
+            const outerWidth = Math.max(1, Math.floor(outer.clientWidth));
+            const outerHeight = Math.max(1, Math.floor(outer.clientHeight));
+            setViewportSizeIfChanged(outerWidth, outerHeight);
+
+            const targetWidth = Math.max(1, outerWidth - originOffset.x);
+            const targetHeight = Math.max(1, outerHeight - originOffset.y);
+            if (targetWidth <= 2 || targetHeight <= 2) {
+                return;
+            }
+
+            const currentWidth = Math.round(canvas.getWidth());
+            const currentHeight = Math.round(canvas.getHeight());
+            if (Math.abs(currentWidth - targetWidth) > 1 || Math.abs(currentHeight - targetHeight) > 1) {
+                canvas.setDimensions({ width: targetWidth, height: targetHeight });
+                if (snapOverlayRef.current) {
+                    snapOverlayRef.current.width = targetWidth;
+                    snapOverlayRef.current.height = targetHeight;
+                }
+                canvas.requestRenderAll();
+            }
+        };
+
+        const handleVisibilityChange = () => {
+            if (document.hidden) return;
+            window.requestAnimationFrame(syncCanvasDimensions);
+        };
+
+        syncCanvasDimensions();
+        window.addEventListener('resize', syncCanvasDimensions);
+        window.addEventListener('focus', syncCanvasDimensions);
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+
+        return () => {
+            window.removeEventListener('resize', syncCanvasDimensions);
+            window.removeEventListener('focus', syncCanvasDimensions);
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
+        };
+    }, [fabricCanvas, originOffset.x, originOffset.y, setViewportSizeIfChanged]);
 
     useEffect(() => {
         const canvas = fabricRef.current;
@@ -1510,6 +2310,139 @@ export function DrawingCanvas({
     }, [symbols, objectDefinitions, fabricCanvas]);
 
     useEffect(() => {
+        if (!wallRenderer) return;
+        const openingSymbols = symbols.filter((instance) => {
+            const definition = objectDefinitionsById.get(instance.symbolId);
+            return definition?.category === 'doors' || definition?.category === 'windows';
+        });
+        wallRenderer.setOpeningSymbolInstances(openingSymbols);
+        wallRenderer.renderAllWalls(walls);
+    }, [wallRenderer, walls, doorWindowSymbolsSignature, objectDefinitionsById]);
+
+    useEffect(() => {
+        if (walls.length === 0 || symbols.length === 0) return;
+
+        let adjustedAnyWall = false;
+        for (const wall of walls) {
+            if (wall.openings.length === 0) continue;
+            let hasWallChange = false;
+            const nextOpenings = wall.openings.map((opening) => {
+                const fitted = fitOpeningToWall(wall, opening);
+                if (
+                    Math.abs(fitted.position - opening.position) > 0.01 ||
+                    Math.abs(fitted.width - opening.width) > 0.01
+                ) {
+                    hasWallChange = true;
+                    return {
+                        ...opening,
+                        position: fitted.position,
+                        width: fitted.width,
+                    };
+                }
+                return opening;
+            });
+
+            if (hasWallChange) {
+                adjustedAnyWall = true;
+                updateWall(
+                    wall.id,
+                    { openings: nextOpenings },
+                    { skipHistory: true, source: 'drag' }
+                );
+            }
+        }
+
+        if (adjustedAnyWall) {
+            return;
+        }
+
+        const openingLookup = new Map<string, { wall: Wall; opening: Wall['openings'][number] }>();
+        for (const wall of walls) {
+            for (const opening of wall.openings) {
+                openingLookup.set(opening.id, { wall, opening });
+            }
+        }
+
+        for (const instance of symbols) {
+            const definition = objectDefinitionsById.get(instance.symbolId);
+            if (!definition) continue;
+            if (definition.category !== 'doors' && definition.category !== 'windows') continue;
+
+            const linked = openingLookup.get(instance.id);
+            if (!linked) continue;
+
+            const { wall, opening } = linked;
+            const dx = wall.endPoint.x - wall.startPoint.x;
+            const dy = wall.endPoint.y - wall.startPoint.y;
+            const wallLength = Math.hypot(dx, dy) || 1;
+            const t = opening.position / wallLength;
+            const nextPosition = {
+                x: wall.startPoint.x + dx * t,
+                y: wall.startPoint.y + dy * t,
+            };
+            const nextRotation = (Math.atan2(dy, dx) * 180) / Math.PI;
+            const nextWidthMm = Math.max(1, opening.width - 50);
+            const nextHeightMm = Math.max(1, opening.height);
+            const nextSillHeightMm =
+                definition.category === 'windows'
+                    ? Math.max(0, opening.sillHeight ?? resolveOpeningSillHeightMm(definition, instance.properties))
+                    : 0;
+            const nextBaseElevationMm =
+                definition.category === 'windows'
+                    ? (wall.properties3D.baseElevation ?? 0) + nextSillHeightMm
+                    : (wall.properties3D.baseElevation ?? 0);
+
+            const nextProperties: Record<string, unknown> = {
+                ...instance.properties,
+                widthMm: nextWidthMm,
+                depthMm: wall.thickness,
+                heightMm: nextHeightMm,
+                hostWallId: wall.id,
+                hostWallThicknessMm: wall.thickness,
+                positionAlongWallMm: opening.position,
+                baseElevationMm: nextBaseElevationMm,
+            };
+            if (definition.category === 'windows') {
+                nextProperties.sillHeightMm = nextSillHeightMm;
+            }
+
+            const properties = instance.properties ?? {};
+            const changed =
+                Math.abs(instance.position.x - nextPosition.x) > 0.01 ||
+                Math.abs(instance.position.y - nextPosition.y) > 0.01 ||
+                Math.abs(instance.rotation - nextRotation) > 0.01 ||
+                Math.abs(Number(properties.widthMm ?? 0) - nextWidthMm) > 0.01 ||
+                Math.abs(Number(properties.depthMm ?? 0) - wall.thickness) > 0.01 ||
+                Math.abs(Number(properties.heightMm ?? 0) - nextHeightMm) > 0.01 ||
+                Math.abs(Number(properties.positionAlongWallMm ?? 0) - opening.position) > 0.01 ||
+                String(properties.hostWallId ?? '') !== wall.id ||
+                Math.abs(Number(properties.baseElevationMm ?? 0) - nextBaseElevationMm) > 0.01 ||
+                (definition.category === 'windows' &&
+                    Math.abs(Number(properties.sillHeightMm ?? 0) - nextSillHeightMm) > 0.01);
+
+            if (!changed) continue;
+
+            updateSymbol(
+                instance.id,
+                {
+                    position: nextPosition,
+                    rotation: nextRotation,
+                    properties: nextProperties,
+                },
+                { skipHistory: true }
+            );
+        }
+    }, [
+        walls,
+        symbols,
+        objectDefinitionsById,
+        fitOpeningToWall,
+        resolveOpeningSillHeightMm,
+        updateWall,
+        updateSymbol,
+    ]);
+
+    useEffect(() => {
         const symbolIdSet = new Set(symbols.map((symbol) => symbol.id));
         const selectedSymbolIds = selectedIds.filter((id) => symbolIdSet.has(id));
         objectRendererRef.current?.setSelectedObjects(selectedSymbolIds);
@@ -1522,6 +2455,97 @@ export function DrawingCanvas({
             : null;
         objectRendererRef.current?.setHoveredObject(hoveredSymbolId);
     }, [symbols, hoveredElementId]);
+
+    useEffect(() => {
+        const canvas = fabricRef.current;
+        if (!canvas) return;
+
+        clearOpeningResizeHandles();
+        if (tool !== 'select' || selectedIds.length === 0) return;
+
+        const selectedId = selectedIds.find((id) =>
+            walls.some((wall) => wall.openings.some((opening) => opening.id === id))
+        );
+        if (!selectedId) return;
+        const hostWall = walls.find((wall) => wall.openings.some((opening) => opening.id === selectedId));
+        if (!hostWall) return;
+        const hostOpening = hostWall.openings.find((opening) => opening.id === selectedId);
+        if (!hostOpening) return;
+
+        const dx = hostWall.endPoint.x - hostWall.startPoint.x;
+        const dy = hostWall.endPoint.y - hostWall.startPoint.y;
+        const wallLength = Math.hypot(dx, dy);
+        if (!Number.isFinite(wallLength) || wallLength <= 0.001) return;
+
+        const angleDeg = (Math.atan2(dy, dx) * 180) / Math.PI;
+        const direction = { x: dx / wallLength, y: dy / wallLength };
+        const startEdge = hostOpening.position - hostOpening.width / 2;
+        const endEdge = hostOpening.position + hostOpening.width / 2;
+        const handleSizePx = OPENING_RESIZE_HANDLE_SIZE_PX / Math.max(viewportZoom, 0.01);
+
+        const createHandle = (side: 'start' | 'end', edgeAlongWallMm: number) => {
+            const pointMm = {
+                x: hostWall.startPoint.x + direction.x * edgeAlongWallMm,
+                y: hostWall.startPoint.y + direction.y * edgeAlongWallMm,
+            };
+            const angle = side === 'start' ? angleDeg + 270 : angleDeg + 90;
+            const handle = new fabric.Triangle({
+                left: pointMm.x * MM_TO_PX,
+                top: pointMm.y * MM_TO_PX,
+                width: handleSizePx,
+                height: handleSizePx,
+                angle,
+                fill: OPENING_RESIZE_HANDLE_COLOR,
+                stroke: '#ffffff',
+                strokeWidth: 2 / Math.max(viewportZoom, 0.01),
+                originX: 'center',
+                originY: 'center',
+                selectable: false,
+                evented: true,
+                hasControls: false,
+                hasBorders: false,
+                objectCaching: false,
+                hoverCursor: 'ew-resize',
+                moveCursor: 'ew-resize',
+            });
+            const typedHandle = handle as fabric.Object & {
+                id?: string;
+                name?: string;
+                openingId?: string;
+                wallId?: string;
+                openingResizeSide?: 'start' | 'end';
+                isOpeningResizeHandle?: boolean;
+            };
+            typedHandle.id = `${selectedId}-resize-${side}`;
+            typedHandle.name = `opening-resize-${side}`;
+            typedHandle.openingId = selectedId;
+            typedHandle.wallId = hostWall.id;
+            typedHandle.openingResizeSide = side;
+            typedHandle.isOpeningResizeHandle = true;
+            canvas.add(handle);
+            canvas.bringObjectToFront(handle);
+            openingResizeHandlesRef.current.push(handle);
+        };
+
+        createHandle('start', startEdge);
+        createHandle('end', endEdge);
+        canvas.requestRenderAll();
+    }, [
+        tool,
+        selectedIds,
+        symbols,
+        walls,
+        objectDefinitionsById,
+        viewportZoom,
+        clearOpeningResizeHandles,
+    ]);
+
+    useEffect(() => {
+        if (tool !== 'select') {
+            openingPointerInteractionRef.current = null;
+            setOpeningInteractionActive(false);
+        }
+    }, [tool]);
 
     useEffect(() => {
         if (!sectionLineRendererRef.current) return;
@@ -1577,7 +2601,26 @@ export function DrawingCanvas({
             return;
         }
         setPlacementRotationDeg(pendingPlacementDefinition.defaultRotationDeg ?? 0);
-    }, [pendingPlacementDefinition?.id]);
+        if (!placementCursorRef.current) {
+            const seedPoint = {
+                x: mousePositionRef.current.x / MM_TO_PX,
+                y: mousePositionRef.current.y / MM_TO_PX,
+            };
+            placementCursorRef.current = seedPoint;
+            const placement = computePlacement(seedPoint, pendingPlacementDefinition);
+            setPlacementValid(placement.valid);
+            objectRendererRef.current?.renderPlacementPreview(
+                pendingPlacementDefinition,
+                placement.point,
+                placement.rotationDeg,
+                placement.valid,
+                placement.snappedWall ? {
+                    wall: placement.snappedWall.wall,
+                    positionAlongWall: placement.snappedWall.positionAlongWall,
+                } : null,
+            );
+        }
+    }, [pendingPlacementDefinition, computePlacement]);
 
     useEffect(() => {
         if (!pendingPlacementDefinition || !placementCursorRef.current) return;
@@ -1587,7 +2630,11 @@ export function DrawingCanvas({
             pendingPlacementDefinition,
             placement.point,
             placement.rotationDeg,
-            placement.valid
+            placement.valid,
+            placement.snappedWall ? {
+                wall: placement.snappedWall.wall,
+                positionAlongWall: placement.snappedWall.positionAlongWall,
+            } : null,
         );
     }, [pendingPlacementDefinition, placementRotationDeg, computePlacement]);
 
@@ -1602,8 +2649,15 @@ export function DrawingCanvas({
         if (!canvas) return;
 
         const effectiveTool = isSpacePressed ? 'pan' : tool;
-        const allowSelection = effectiveTool === 'select';
-        const pointerCursor = canvasState.isPanning ? 'grabbing' : getToolCursor(effectiveTool);
+        const allowSelection =
+            effectiveTool === 'select' &&
+            !pendingPlacementDefinition &&
+            !openingInteractionActive;
+        const pointerCursor = canvasState.isPanning
+            ? 'grabbing'
+            : pendingPlacementDefinition
+                ? 'crosshair'
+                : getToolCursor(effectiveTool);
 
         canvas.selection = allowSelection;
         (canvas as fabric.Canvas & { selectionFullyContained?: boolean }).selectionFullyContained = allowSelection;
@@ -1624,6 +2678,7 @@ export function DrawingCanvas({
                 isDimensionControl?: boolean;
                 isDimensionControlDecoration?: boolean;
                 sectionLineId?: string;
+                isOpeningResizeHandle?: boolean;
             };
             if (typed.isWallControlDecoration) {
                 obj.selectable = false;
@@ -1660,11 +2715,16 @@ export function DrawingCanvas({
                 obj.evented = allowSelection;
                 return;
             }
+            if (typed.isOpeningResizeHandle) {
+                obj.selectable = false;
+                obj.evented = allowSelection;
+                return;
+            }
             obj.selectable = allowSelection;
             obj.evented = allowSelection;
         });
         canvas.renderAll();
-    }, [tool, isSpacePressed, canvasState.isPanning]);
+    }, [tool, isSpacePressed, canvasState.isPanning, pendingPlacementDefinition, openingInteractionActive]);
 
     // ---------------------------------------------------------------------------
     // Mouse Event Handlers
@@ -1705,7 +2765,12 @@ export function DrawingCanvas({
             }
 
             if (tool === 'select') {
-                if (!e.target) {
+                const pointerMm = {
+                    x: rawPoint.x / MM_TO_PX,
+                    y: rawPoint.y / MM_TO_PX,
+                };
+                const inferredOpening = findOpeningAtPoint(pointerMm);
+                if (!e.target && !inferredOpening) {
                     const start = {
                         x: rawPoint.x / MM_TO_PX,
                         y: rawPoint.y / MM_TO_PX,
@@ -1722,7 +2787,9 @@ export function DrawingCanvas({
                     setMarqueeSelectionMode('window');
                 } else {
                     marqueeSelectionRef.current = { active: false, start: null, current: null, mode: 'window' };
+                    lastMarqueeSelectionRef.current = { active: false, start: null, current: null, mode: 'window' };
                     applyMarqueeFilterRef.current = false;
+                    setMarqueeSelectionMode('window');
                 }
             }
 
@@ -1806,6 +2873,7 @@ export function DrawingCanvas({
             handleWallMouseDown,
             isRoomDrawing,
             handleRoomMouseDown,
+            findOpeningAtPoint,
             handleDimensionPlacementMouseDown,
             setMarqueeSelectionMode,
             sectionLineDrawingState.isDrawing,
@@ -1844,6 +2912,17 @@ export function DrawingCanvas({
                 return;
             }
 
+            if (tool === 'select' && openingPointerInteractionRef.current) {
+                const pointerMm = {
+                    x: rawPoint.x / MM_TO_PX,
+                    y: rawPoint.y / MM_TO_PX,
+                };
+                const handled = updateOpeningPointerInteraction(pointerMm);
+                if (handled) {
+                    return;
+                }
+            }
+
             if (tool === 'select' && marqueeSelectionRef.current.active && marqueeSelectionRef.current.start) {
                 const current = {
                     x: rawPoint.x / MM_TO_PX,
@@ -1876,7 +2955,11 @@ export function DrawingCanvas({
                     pendingPlacementDefinition,
                     placement.point,
                     placement.rotationDeg,
-                    placement.valid
+                    placement.valid,
+                    placement.snappedWall ? {
+                        wall: placement.snappedWall.wall,
+                        positionAlongWall: placement.snappedWall.positionAlongWall,
+                    } : null,
                 );
                 return;
             }
@@ -1948,26 +3031,35 @@ export function DrawingCanvas({
                 const hitTarget = ((e.target as fabric.Object | null | undefined) ??
                     canvas.findTarget(e.e as unknown as fabric.TPointerEvent) ??
                     null);
-                const hoveredObjectId = resolveObjectIdFromTarget(
-                    hitTarget
-                );
-                if (hoveredObjectId) {
+                const subTargets = (e as fabric.TPointerEventInfo<fabric.TPointerEvent> & { subTargets?: fabric.Object[] })
+                    .subTargets ?? [];
+                const candidateTargets = [...subTargets, ...(hitTarget ? [hitTarget] : [])];
+                const selectPoint = {
+                    x: rawPoint.x / MM_TO_PX,
+                    y: rawPoint.y / MM_TO_PX,
+                };
+                const hoveredObjectId =
+                    candidateTargets
+                        .map((target) => resolveObjectIdFromTarget(target))
+                        .find((entry): entry is string => Boolean(entry)) ??
+                    resolveObjectIdFromTarget(hitTarget);
+                const inferredOpening = findOpeningAtPoint(selectPoint);
+                const openingHoverId = hoveredObjectId ?? inferredOpening?.openingId ?? null;
+                if (openingHoverId) {
                     wallRenderer?.setHoveredWall(null);
-                    setHoveredElement(hoveredObjectId);
+                    setHoveredElement(openingHoverId);
                     return;
                 }
-                const hoveredSectionLineId = resolveSectionLineIdFromTarget(
-                    hitTarget
-                );
+                const hoveredSectionLineId =
+                    candidateTargets
+                        .map((target) => resolveSectionLineIdFromTarget(target))
+                        .find((entry): entry is string => Boolean(entry)) ??
+                    resolveSectionLineIdFromTarget(hitTarget);
                 if (hoveredSectionLineId) {
                     wallRenderer?.setHoveredWall(null);
                     setHoveredElement(hoveredSectionLineId);
                     return;
                 }
-                const selectPoint = {
-                    x: rawPoint.x / MM_TO_PX,
-                    y: rawPoint.y / MM_TO_PX,
-                };
                 const dimensionHandled = handleDimensionSelectMouseMove(
                     selectPoint,
                     hitTarget
@@ -2026,11 +3118,13 @@ export function DrawingCanvas({
             resolveObjectIdFromTarget,
             resolveRoomIdFromTarget,
             resolveSectionLineIdFromTarget,
+            findOpeningAtPoint,
             wallRenderer,
             wallSettings.gridSize,
             wallSettings.defaultThickness,
             setHoveredElement,
             setMarqueeSelectionMode,
+            updateOpeningPointerInteraction,
         ]
     );
 
@@ -2044,6 +3138,13 @@ export function DrawingCanvas({
             canvasStateRef.current = nextState;
             setCanvasState(nextState);
             return;
+        }
+
+        if (tool === 'select') {
+            const handledOpeningInteraction = finishOpeningPointerInteraction();
+            if (handledOpeningInteraction) {
+                return;
+            }
         }
 
         if (tool === 'select' && marqueeSelectionRef.current.active) {
@@ -2086,7 +3187,14 @@ export function DrawingCanvas({
         const nextState: CanvasState = { ...currentState, isDrawing: false, drawingPoints: [] };
         canvasStateRef.current = nextState;
         setCanvasState(nextState);
-    }, [tool, addSketch, handleDimensionSelectMouseUp, handleSelectMouseUp, getSelectionRect]);
+    }, [
+        tool,
+        addSketch,
+        handleDimensionSelectMouseUp,
+        handleSelectMouseUp,
+        getSelectionRect,
+        finishOpeningPointerInteraction,
+    ]);
 
     const handleWheel = useCallback(
         (e: fabric.TPointerEventInfo<WheelEvent>) => {
@@ -2227,6 +3335,11 @@ export function DrawingCanvas({
 
         const handleSelectionCreated = (event: fabric.CanvasEvents['selection:created']) => {
             if (tool !== 'select') return;
+            const openingInteraction = openingPointerInteractionRef.current;
+            if (openingInteraction) {
+                setSelectedIds([openingInteraction.openingId]);
+                return;
+            }
             const targets = filterMarqueeSelectionTargets(event.selected ?? []);
             applyMarqueeFilterRef.current = false;
             const objectIds = targets
@@ -2251,6 +3364,11 @@ export function DrawingCanvas({
 
         const handleSelectionUpdated = (event: fabric.CanvasEvents['selection:updated']) => {
             if (tool !== 'select') return;
+            const openingInteraction = openingPointerInteractionRef.current;
+            if (openingInteraction) {
+                setSelectedIds([openingInteraction.openingId]);
+                return;
+            }
             const targets = filterMarqueeSelectionTargets(event.selected ?? []);
             applyMarqueeFilterRef.current = false;
             const objectIds = targets
@@ -2275,6 +3393,11 @@ export function DrawingCanvas({
 
         const handleSelectionCleared = () => {
             applyMarqueeFilterRef.current = false;
+            const openingInteraction = openingPointerInteractionRef.current;
+            if (openingInteraction) {
+                setSelectedIds([openingInteraction.openingId]);
+                return;
+            }
             if (!isWallHandleDraggingRef.current) {
                 setSelectedIds([]);
             }
@@ -2290,8 +3413,126 @@ export function DrawingCanvas({
             const hitTarget = ((event.target as fabric.Object | null | undefined) ??
                 (event.e ? canvas.findTarget(event.e as unknown as fabric.TPointerEvent) : null) ??
                 null);
+            const subTargets = (event as fabric.CanvasEvents['mouse:down'] & { subTargets?: fabric.Object[] })
+                .subTargets ?? [];
+            const candidateTargets = [...subTargets, ...(hitTarget ? [hitTarget] : [])];
             const addToSelection = Boolean(event.e?.shiftKey);
-            const sectionLineId = resolveSectionLineIdFromTarget(hitTarget);
+            const scenePoint = event.e ? canvas.getScenePoint(event.e) : null;
+            const wallPoint = scenePoint
+                ? {
+                    x: scenePoint.x / MM_TO_PX,
+                    y: scenePoint.y / MM_TO_PX,
+                }
+                : null;
+            openingPointerInteractionRef.current = null;
+            setOpeningInteractionActive(false);
+            const openingResizeHandle =
+                candidateTargets
+                    .map((target) => resolveOpeningResizeHandleFromTarget(target))
+                    .find((entry): entry is OpeningResizeHandleHit => Boolean(entry)) ??
+                null;
+            if (openingResizeHandle) {
+                marqueeSelectionRef.current = { active: false, start: null, current: null, mode: 'window' };
+                lastMarqueeSelectionRef.current = { active: false, start: null, current: null, mode: 'window' };
+                applyMarqueeFilterRef.current = false;
+                setMarqueeSelectionMode('window');
+                setSelectedIds([openingResizeHandle.openingId]);
+                setHoveredElement(openingResizeHandle.openingId);
+                const hostWall = walls.find((wall) => wall.id === openingResizeHandle.wallId)
+                    ?? walls.find((wall) =>
+                        wall.openings.some((opening) => opening.id === openingResizeHandle.openingId)
+                    );
+                const hostOpening = hostWall?.openings.find(
+                    (opening) => opening.id === openingResizeHandle.openingId
+                );
+                if (hostWall && hostOpening) {
+                    const anchorEdgeAlongWall = openingResizeHandle.side === 'start'
+                        ? hostOpening.position + hostOpening.width / 2
+                        : hostOpening.position - hostOpening.width / 2;
+                    beginOpeningPointerInteraction({
+                        openingId: openingResizeHandle.openingId,
+                        mode: openingResizeHandle.side === 'start' ? 'resize-start' : 'resize-end',
+                        wallId: hostWall.id,
+                        anchorEdgeAlongWall,
+                        changed: false,
+                    });
+                }
+                return;
+            }
+
+            const inferredOpening = wallPoint ? findOpeningAtPoint(wallPoint) : null;
+            const openingVisualId =
+                candidateTargets
+                    .map((target) => resolveOpeningIdFromTarget(target))
+                    .find((entry): entry is string => Boolean(entry)) ??
+                resolveOpeningIdFromTarget(hitTarget)
+                ?? inferredOpening?.openingId
+                ?? null;
+            if (openingVisualId) {
+                marqueeSelectionRef.current = { active: false, start: null, current: null, mode: 'window' };
+                lastMarqueeSelectionRef.current = { active: false, start: null, current: null, mode: 'window' };
+                applyMarqueeFilterRef.current = false;
+                setMarqueeSelectionMode('window');
+                if (addToSelection) {
+                    const current = new Set(selectedIds);
+                    if (current.has(openingVisualId)) {
+                        current.delete(openingVisualId);
+                    } else {
+                        current.add(openingVisualId);
+                    }
+                    setSelectedIds(Array.from(current));
+                } else {
+                    setSelectedIds([openingVisualId]);
+                }
+                setHoveredElement(openingVisualId);
+                if (!addToSelection) {
+                    const hostWall = inferredOpening?.openingId === openingVisualId
+                        ? walls.find((wall) => wall.id === inferredOpening.wallId)
+                        : undefined;
+                    const fallbackWall = walls.find((wall) =>
+                        wall.openings.some((opening) => opening.id === openingVisualId)
+                    );
+                    const linkedWall = hostWall ?? fallbackWall;
+                    const linkedOpening = linkedWall?.openings.find((opening) => opening.id === openingVisualId);
+                    let grabOffsetAlongWallMm = 0;
+
+                    if (linkedWall && linkedOpening && wallPoint) {
+                        const wallLength = Math.hypot(
+                            linkedWall.endPoint.x - linkedWall.startPoint.x,
+                            linkedWall.endPoint.y - linkedWall.startPoint.y
+                        );
+                        if (Number.isFinite(wallLength) && wallLength > 0.001) {
+                            const projection = projectPointToSegment(
+                                wallPoint,
+                                linkedWall.startPoint,
+                                linkedWall.endPoint
+                            );
+                            const pointerAlongWall = projection.t * wallLength;
+                            const rawOffset = pointerAlongWall - linkedOpening.position;
+                            grabOffsetAlongWallMm = clampValue(
+                                rawOffset,
+                                -linkedOpening.width / 2,
+                                linkedOpening.width / 2
+                            );
+                        }
+                    }
+
+                    beginOpeningPointerInteraction({
+                        openingId: openingVisualId,
+                        mode: 'move',
+                        wallId: linkedWall?.id,
+                        grabOffsetAlongWallMm,
+                        changed: false,
+                    });
+                }
+                return;
+            }
+
+            const sectionLineId =
+                candidateTargets
+                    .map((target) => resolveSectionLineIdFromTarget(target))
+                    .find((entry): entry is string => Boolean(entry)) ??
+                resolveSectionLineIdFromTarget(hitTarget);
             if (sectionLineId) {
                 if (addToSelection) {
                     const current = new Set(selectedIds);
@@ -2308,7 +3549,11 @@ export function DrawingCanvas({
                 return;
             }
 
-            const objectId = resolveObjectIdFromTarget(hitTarget);
+            const objectId =
+                candidateTargets
+                    .map((target) => resolveObjectIdFromTarget(target))
+                    .find((entry): entry is string => Boolean(entry)) ??
+                resolveObjectIdFromTarget(hitTarget);
             if (objectId) {
                 if (addToSelection) {
                     const current = new Set(selectedIds);
@@ -2325,31 +3570,30 @@ export function DrawingCanvas({
                 return;
             }
 
-            const scenePoint = event.e ? canvas.getScenePoint(event.e) : null;
             if (!scenePoint) {
                 updateSelectionFromTarget(hitTarget);
                 return;
             }
-            const wallPoint = {
+            const wallPointMm = {
                 x: scenePoint.x / MM_TO_PX,
                 y: scenePoint.y / MM_TO_PX,
             };
             const dimensionHandled = handleDimensionSelectMouseDown(
                 hitTarget,
-                wallPoint,
+                wallPointMm,
                 addToSelection
             );
             if (dimensionHandled) {
                 return;
             }
             const targetMeta = getTargetMeta(hitTarget);
-            const clickedWallId = wallRenderer?.getWallIdAtPoint(wallPoint) ?? null;
+            const clickedWallId = wallRenderer?.getWallIdAtPoint(wallPointMm) ?? null;
             const clickedRoomId =
-                roomRendererRef.current?.getRoomIdAtPoint(wallPoint) ??
+                roomRendererRef.current?.getRoomIdAtPoint(wallPointMm) ??
                 resolveRoomIdFromTarget(hitTarget);
             const clickedRoom = clickedRoomId ? roomById.get(clickedRoomId) ?? null : null;
             const roomInteriorDistance = clickedRoom
-                ? roomBoundaryDistance(wallPoint, clickedRoom.vertices)
+                ? roomBoundaryDistance(wallPointMm, clickedRoom.vertices)
                 : Number.POSITIVE_INFINITY;
             const roomWallThicknesses = clickedRoom
                 ? clickedRoom.wallIds
@@ -2395,7 +3639,7 @@ export function DrawingCanvas({
                 targetMeta.wallId ||
                 targetMeta.roomId
             ) {
-                handleSelectMouseDown(hitTarget, wallPoint, addToSelection);
+                handleSelectMouseDown(hitTarget, wallPointMm, addToSelection);
                 return;
             }
             if (clickedWallId) {
@@ -2414,7 +3658,7 @@ export function DrawingCanvas({
                 setHoveredElement(clickedWallId);
                 return;
             }
-            handleSelectMouseDown(hitTarget, wallPoint, addToSelection);
+            handleSelectMouseDown(hitTarget, wallPointMm, addToSelection);
         };
 
         const handleCanvasContextMenu = (event: MouseEvent) => {
@@ -2523,6 +3767,33 @@ export function DrawingCanvas({
                     ? objectDefinitionsById.get(instance.symbolId)
                     : undefined;
                 if (instance && definition) {
+                    const isOpening =
+                        definition.category === 'doors' || definition.category === 'windows';
+                    if (isOpening) {
+                        const openingWidthMm = resolveOpeningWidthMm(definition, instance.properties);
+                        const snappedPlacement = computePlacement(movedPositionMm, definition, {
+                            ignoreOpeningId: objectId,
+                            ignoreSymbolId: objectId,
+                            openingWidthMm,
+                        });
+
+                        if (!snappedPlacement.valid || !snappedPlacement.snappedWall) {
+                            target.set({
+                                left: instance.position.x * MM_TO_PX,
+                                top: instance.position.y * MM_TO_PX,
+                                angle: instance.rotation,
+                            });
+                            return;
+                        }
+
+                        target.set({
+                            left: snappedPlacement.point.x * MM_TO_PX,
+                            top: snappedPlacement.point.y * MM_TO_PX,
+                            angle: snappedPlacement.rotationDeg,
+                        });
+                        return;
+                    }
+
                     const collides = hasFurnitureCollision(movedPositionMm, definition, {
                         ignoreSymbolId: objectId,
                     });
@@ -2552,6 +3823,98 @@ export function DrawingCanvas({
                 };
                 const rotation = target.angle ?? 0;
                 const existing = symbols.find((entry) => entry.id === objectId);
+                if (existing) {
+                    const definition = objectDefinitionsById.get(existing.symbolId);
+                    if (
+                        definition &&
+                        (definition.category === 'doors' || definition.category === 'windows')
+                    ) {
+                        const openingWidthMm = resolveOpeningWidthMm(definition, existing.properties);
+                        const openingHeightMm = resolveOpeningHeightMm(definition, existing.properties);
+                        const openingSillHeightMm = resolveOpeningSillHeightMm(definition, existing.properties);
+                        const placement = computePlacement(position, definition, {
+                            ignoreOpeningId: objectId,
+                            ignoreSymbolId: objectId,
+                            openingWidthMm,
+                        });
+
+                        if (!placement.valid || !placement.snappedWall) {
+                            target.set({
+                                left: existing.position.x * MM_TO_PX,
+                                top: existing.position.y * MM_TO_PX,
+                                angle: existing.rotation,
+                            });
+                            fabricRef.current?.requestRenderAll();
+                            setProcessingStatus(
+                                'Move blocked: opening must remain on a valid wall segment.',
+                                false
+                            );
+                            return;
+                        }
+
+                        const snappedWall = placement.snappedWall.wall;
+                        const nextRotation = placement.rotationDeg;
+                        const nextPosition = placement.point;
+                        const nextProperties = {
+                            ...existing.properties,
+                            widthMm: openingWidthMm,
+                            depthMm: snappedWall.thickness,
+                            heightMm: openingHeightMm,
+                            baseElevationMm:
+                                definition.category === 'windows'
+                                    ? ((snappedWall.properties3D.baseElevation ?? 0) +
+                                        openingSillHeightMm)
+                                    : (snappedWall.properties3D.baseElevation ?? 0),
+                            hostWallId: snappedWall.id,
+                            hostWallThicknessMm: snappedWall.thickness,
+                            positionAlongWallMm: placement.snappedWall.positionAlongWall,
+                        };
+
+                        syncOpeningForSymbol(objectId, definition, {
+                            wall: snappedWall,
+                            positionAlongWall: placement.snappedWall.positionAlongWall,
+                        }, {
+                            openingWidthMm,
+                            openingHeightMm,
+                            sillHeightMm: openingSillHeightMm,
+                        });
+
+                        const changed =
+                            Math.abs(existing.position.x - nextPosition.x) > 0.01 ||
+                            Math.abs(existing.position.y - nextPosition.y) > 0.01 ||
+                            Math.abs(existing.rotation - nextRotation) > 0.01 ||
+                            existing.properties?.hostWallId !== nextProperties.hostWallId ||
+                            Math.abs(
+                                Number(existing.properties?.widthMm ?? 0) -
+                                Number(nextProperties.widthMm ?? 0)
+                            ) > 0.01 ||
+                            Math.abs(
+                                Number(existing.properties?.heightMm ?? 0) -
+                                Number(nextProperties.heightMm ?? 0)
+                            ) > 0.01 ||
+                            Math.abs(
+                                Number(existing.properties?.positionAlongWallMm ?? 0) -
+                                Number(nextProperties.positionAlongWallMm ?? 0)
+                            ) > 0.01;
+
+                        if (changed) {
+                            updateSymbol(objectId, {
+                                position: nextPosition,
+                                rotation: nextRotation,
+                                properties: nextProperties,
+                            });
+                        }
+
+                        target.set({
+                            left: nextPosition.x * MM_TO_PX,
+                            top: nextPosition.y * MM_TO_PX,
+                            angle: nextRotation,
+                        });
+                        fabricRef.current?.requestRenderAll();
+                        return;
+                    }
+                }
+
                 if (
                     existing &&
                     (Math.abs(existing.position.x - position.x) > 0.01 ||
@@ -2579,6 +3942,7 @@ export function DrawingCanvas({
         const handleWindowBlur = () => {
             stopMiddlePan();
             finalizeHandleDrag();
+            finishOpeningPointerInteraction();
         };
 
         const handleSelectDragMouseMove = (event: MouseEvent) => {
@@ -2678,6 +4042,9 @@ export function DrawingCanvas({
         resolveSectionLineIdFromTarget,
         resolveRoomIdFromTarget,
         resolveObjectIdFromTarget,
+        resolveOpeningIdFromTarget,
+        resolveOpeningResizeHandleFromTarget,
+        findOpeningAtPoint,
         filterMarqueeSelectionTargets,
         getTargetMeta,
         handleWallDoubleClick,
@@ -2689,6 +4056,11 @@ export function DrawingCanvas({
         symbols,
         objectDefinitionsById,
         hasFurnitureCollision,
+        computePlacement,
+        syncOpeningForSymbol,
+        resolveOpeningWidthMm,
+        resolveOpeningHeightMm,
+        resolveOpeningSillHeightMm,
         resolvedSnapToGrid,
         effectiveSnapGridSize,
         updateSymbol,
@@ -2705,9 +4077,13 @@ export function DrawingCanvas({
         sectionLineDrawingState.isDrawing,
         sectionLineDrawingState.direction,
         setSectionLineDirection,
+        projectPointToSegment,
         wallById,
+        walls,
         wallIdSet,
         wallRenderer,
+        beginOpeningPointerInteraction,
+        finishOpeningPointerInteraction,
     ]);
 
     // ---------------------------------------------------------------------------
@@ -2879,7 +4255,9 @@ export function DrawingCanvas({
 
             {pendingPlacementDefinition && !placementValid && (
                 <div className="absolute left-4 top-4 z-[25] rounded border border-rose-200 bg-rose-50 px-3 py-1 text-xs text-rose-700">
-                    Placement blocked: furniture overlap detected.
+                    {pendingPlacementDefinition.category === 'doors' || pendingPlacementDefinition.category === 'windows'
+                        ? 'Placement blocked: opening does not fit or overlaps an existing opening.'
+                        : 'Placement blocked: furniture overlap detected.'}
                 </div>
             )}
 
