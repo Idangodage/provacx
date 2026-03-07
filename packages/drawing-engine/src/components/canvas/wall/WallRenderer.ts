@@ -141,7 +141,7 @@ export const VISUAL_CONFIG = {
 
   thicknessRadius: 5,
   thicknessFill: '#F0FDFA',
-  thicknessStroke: '#0F766E',
+  thicknessStroke: '#1D4ED8',
 
   centerHandleRadius: 10,
   centerHandleFill: '#EFF6FF',
@@ -1112,10 +1112,7 @@ export class WallRenderer {
     const endpointStroke = this.toSceneSize(VISUAL_CONFIG.endpointStroke);
     const bevelRadius = this.toSceneSize(VISUAL_CONFIG.bevelRadius);
     const bevelStroke = this.toSceneSize(VISUAL_CONFIG.bevelStroke);
-    const thicknessRadius = this.toSceneSize(VISUAL_CONFIG.thicknessRadius);
-    const centerRadius = this.toSceneSize(VISUAL_CONFIG.centerHandleRadius);
     const rotationRadius = this.toSceneSize(VISUAL_CONFIG.rotationRadius);
-    const crossHalf = this.toSceneSize(VISUAL_CONFIG.crossHalf);
     const crossStroke = this.toSceneSize(VISUAL_CONFIG.crossStrokeWidth);
     const stemStroke = this.toSceneSize(VISUAL_CONFIG.rotationStemStroke);
     const showAdvancedControls = this.selectedWallIds.size === 1;
@@ -1242,68 +1239,195 @@ export class WallRenderer {
     const endOuterBevel = showEndBevel && endCorner ? createBevelDot(endCorner, 'end', 'outer') : null;
     const endInnerBevel = showEndBevel && endCorner ? createBevelDot(endCorner, 'end', 'inner') : null;
 
-    // Thickness handles
-    const interiorThicknessHandle = new fabric.Circle({
-      left: interiorMid.x * MM_TO_PX, top: this.toCanvasY(interiorMid.y),
-      radius: thicknessRadius,
-      fill: VISUAL_CONFIG.thicknessFill, stroke: VISUAL_CONFIG.thicknessStroke,
-      strokeWidth: endpointStroke,
-      originX: 'center', originY: 'center',
-      hoverCursor: 'ew-resize',
-      lockMovementX: true, lockMovementY: true,
-      selectable: false, evented: false,
-    });
-    this.annotateControlTarget(interiorThicknessHandle, wallId, 'wall-thickness-interior');
-    const interiorThicknessHit = this.createControlHitTarget(
-      interiorMid, wallId, 'wall-thickness-interior', 'ew-resize', VISUAL_CONFIG.thicknessHitRadius
-    );
+    // Thickness handles: small solid directional arrows for independent face resize.
+    const createThicknessArrow = (
+      point: Point2D,
+      direction: Point2D,
+      controlType: 'wall-thickness-interior' | 'wall-thickness-exterior'
+    ): { visuals: fabric.FabricObject[]; hit: fabric.Circle } => {
+      const center = this.toCanvasPoint(point);
+      const directionLength = Math.hypot(direction.x, direction.y) || 1;
+      const ux = direction.x / directionLength;
+      const uy = direction.y / directionLength;
+      const px = -uy;
+      const py = ux;
+      const badgeRadius = this.toSceneSize(6);
+      const shaftHalf = this.toSceneSize(3.1);
+      const headLength = this.toSceneSize(3.6);
+      const headHalfWidth = this.toSceneSize(2.2);
 
-    const exteriorThicknessHandle = new fabric.Circle({
-      left: exteriorMid.x * MM_TO_PX, top: this.toCanvasY(exteriorMid.y),
-      radius: thicknessRadius,
-      fill: VISUAL_CONFIG.thicknessFill, stroke: VISUAL_CONFIG.thicknessStroke,
-      strokeWidth: endpointStroke,
-      originX: 'center', originY: 'center',
-      hoverCursor: 'ew-resize',
-      lockMovementX: true, lockMovementY: true,
-      selectable: false, evented: false,
-    });
-    this.annotateControlTarget(exteriorThicknessHandle, wallId, 'wall-thickness-exterior');
-    const exteriorThicknessHit = this.createControlHitTarget(
-      exteriorMid, wallId, 'wall-thickness-exterior', 'ew-resize', VISUAL_CONFIG.thicknessHitRadius
-    );
+      const badge = new fabric.Circle({
+        left: center.x,
+        top: center.y,
+        radius: badgeRadius,
+        fill: '#FFFFFF',
+        stroke: VISUAL_CONFIG.thicknessStroke,
+        strokeWidth: this.toSceneSize(1.5),
+        originX: 'center',
+        originY: 'center',
+        hoverCursor: 'ew-resize',
+        selectable: false,
+        evented: false,
+        lockMovementX: true,
+        lockMovementY: true,
+        shadow: new fabric.Shadow({
+          color: 'rgba(29, 78, 216, 0.35)',
+          blur: this.toSceneSize(6),
+          offsetX: 0,
+          offsetY: this.toSceneSize(1),
+        }),
+      });
+      this.annotateControlTarget(badge, wallId, controlType);
 
-    // Center handle
-    const centerHandle = new fabric.Circle({
-      left: mp.x * MM_TO_PX, top: this.toCanvasY(mp.y),
-      radius: centerRadius,
-      fill: VISUAL_CONFIG.centerHandleFill, stroke: VISUAL_CONFIG.centerHandleStroke,
+      const shaft = new fabric.Line(
+        [
+          center.x - ux * shaftHalf,
+          center.y - uy * shaftHalf,
+          center.x + ux * shaftHalf,
+          center.y + uy * shaftHalf,
+        ],
+        {
+          stroke: VISUAL_CONFIG.thicknessStroke,
+          strokeWidth: this.toSceneSize(1.4),
+          strokeLineCap: 'round',
+          selectable: false,
+          evented: false,
+        }
+      );
+      const headBase = {
+        x: center.x + ux * shaftHalf,
+        y: center.y + uy * shaftHalf,
+      };
+      const headTip = {
+        x: headBase.x + ux * headLength,
+        y: headBase.y + uy * headLength,
+      };
+      const headLeft = {
+        x: headBase.x + px * headHalfWidth,
+        y: headBase.y + py * headHalfWidth,
+      };
+      const headRight = {
+        x: headBase.x - px * headHalfWidth,
+        y: headBase.y - py * headHalfWidth,
+      };
+      const head = new fabric.Polygon([headTip, headLeft, headRight], {
+        fill: VISUAL_CONFIG.thicknessStroke,
+        stroke: VISUAL_CONFIG.thicknessStroke,
+        strokeWidth: this.toSceneSize(0.8),
+        selectable: false,
+        evented: false,
+      });
+
+      const hit = this.createControlHitTarget(
+        point,
+        wallId,
+        controlType,
+        'ew-resize',
+        VISUAL_CONFIG.thicknessHitRadius
+      );
+      return { visuals: [badge, shaft, head], hit };
+    };
+
+    const wallNormalVector = { x: -unitDir.y, y: unitDir.x };
+    const interiorThickness = createThicknessArrow(
+      interiorMid,
+      wallNormalVector,
+      'wall-thickness-interior'
+    );
+    const exteriorThickness = createThicknessArrow(
+      exteriorMid,
+      { x: -wallNormalVector.x, y: -wallNormalVector.y },
+      'wall-thickness-exterior'
+    );
+    const interiorThicknessVisuals = interiorThickness.visuals;
+    const interiorThicknessHit = interiorThickness.hit;
+    const exteriorThicknessVisuals = exteriorThickness.visuals;
+    const exteriorThicknessHit = exteriorThickness.hit;
+
+    // Mid-thickness move handle
+    const centerX = mp.x * MM_TO_PX;
+    const centerY = this.toCanvasY(mp.y);
+    const moveHandleSize = this.toSceneSize(14);
+    const centerHandle = new fabric.Rect({
+      left: centerX,
+      top: centerY,
+      width: moveHandleSize,
+      height: moveHandleSize,
+      rx: this.toSceneSize(3),
+      ry: this.toSceneSize(3),
+      fill: VISUAL_CONFIG.centerHandleFill,
+      stroke: VISUAL_CONFIG.centerHandleStroke,
       strokeWidth: endpointStroke,
-      originX: 'center', originY: 'center',
+      originX: 'center',
+      originY: 'center',
       hoverCursor: 'move',
-      lockMovementX: true, lockMovementY: true,
-      selectable: false, evented: false,
+      lockMovementX: true,
+      lockMovementY: true,
+      selectable: false,
+      evented: false,
       shadow: new fabric.Shadow({
         color: 'rgba(37, 99, 235, 0.25)',
         blur: this.toSceneSize(8),
-        offsetX: 0, offsetY: this.toSceneSize(1),
+        offsetX: 0,
+        offsetY: this.toSceneSize(1),
       }),
     });
     this.annotateControlTarget(centerHandle, wallId, 'wall-center-handle');
     const centerHandleHit = this.createControlHitTarget(
       mp, wallId, 'wall-center-handle', 'move', VISUAL_CONFIG.centerHitRadius
     );
+    const moveAxisHalf = this.toSceneSize(2.9);
+    const moveHeadLength = this.toSceneSize(2.2);
+    const moveHeadHalfWidth = this.toSceneSize(1.4);
+    const moveGlyphH = new fabric.Line(
+      [centerX - moveAxisHalf, centerY, centerX + moveAxisHalf, centerY],
+      {
+        stroke: VISUAL_CONFIG.crossStroke,
+        strokeWidth: crossStroke,
+        selectable: false,
+        evented: false,
+      }
+    );
+    const moveGlyphV = new fabric.Line(
+      [centerX, centerY - moveAxisHalf, centerX, centerY + moveAxisHalf],
+      {
+        stroke: VISUAL_CONFIG.crossStroke,
+        strokeWidth: crossStroke,
+        selectable: false,
+        evented: false,
+      }
+    );
 
-    const centerCrossH = new fabric.Line(
-      [mp.x * MM_TO_PX - crossHalf, this.toCanvasY(mp.y),
-       mp.x * MM_TO_PX + crossHalf, this.toCanvasY(mp.y)],
-      { stroke: VISUAL_CONFIG.crossStroke, strokeWidth: crossStroke, selectable: false, evented: false }
-    );
-    const centerCrossV = new fabric.Line(
-      [mp.x * MM_TO_PX, this.toCanvasY(mp.y) - crossHalf,
-       mp.x * MM_TO_PX, this.toCanvasY(mp.y) + crossHalf],
-      { stroke: VISUAL_CONFIG.crossStroke, strokeWidth: crossStroke, selectable: false, evented: false }
-    );
+    const createMoveHead = (dx: number, dy: number): fabric.Polygon => {
+      const tip = {
+        x: centerX + dx * (moveAxisHalf + moveHeadLength),
+        y: centerY + dy * (moveAxisHalf + moveHeadLength),
+      };
+      const base = {
+        x: centerX + dx * moveAxisHalf,
+        y: centerY + dy * moveAxisHalf,
+      };
+      const perp = { x: -dy, y: dx };
+      const left = {
+        x: base.x + perp.x * moveHeadHalfWidth,
+        y: base.y + perp.y * moveHeadHalfWidth,
+      };
+      const right = {
+        x: base.x - perp.x * moveHeadHalfWidth,
+        y: base.y - perp.y * moveHeadHalfWidth,
+      };
+      return new fabric.Polygon([tip, left, right], {
+        fill: VISUAL_CONFIG.crossStroke,
+        stroke: VISUAL_CONFIG.crossStroke,
+        strokeWidth: this.toSceneSize(0.8),
+        selectable: false,
+        evented: false,
+      });
+    };
+    const moveHeadRight = createMoveHead(1, 0);
+    const moveHeadLeft = createMoveHead(-1, 0);
+    const moveHeadDown = createMoveHead(0, 1);
+    const moveHeadUp = createMoveHead(0, -1);
 
     // Rotation handle
     const rotationStem = new fabric.Line(
@@ -1347,8 +1471,22 @@ export class WallRenderer {
       ...(startInnerBevel ? [startInnerBevel.hit, startInnerBevel.visual] : []),
       ...(endOuterBevel ? [endOuterBevel.hit, endOuterBevel.visual] : []),
       ...(endInnerBevel ? [endInnerBevel.hit, endInnerBevel.visual] : []),
-      centerHandleHit, centerHandle, centerCrossH, centerCrossV,
-      ...(showAdvancedControls ? [interiorThicknessHit, interiorThicknessHandle, exteriorThicknessHit, exteriorThicknessHandle] : []),
+      centerHandleHit,
+      centerHandle,
+      moveGlyphH,
+      moveGlyphV,
+      moveHeadRight,
+      moveHeadLeft,
+      moveHeadDown,
+      moveHeadUp,
+      ...(showAdvancedControls
+        ? [
+          interiorThicknessHit,
+          ...interiorThicknessVisuals,
+          exteriorThicknessHit,
+          ...exteriorThicknessVisuals,
+        ]
+        : []),
       ...(showRotation ? [rotationStem, rotationHandleHit, rotationHandle, rotationLabel] : []),
     ];
 

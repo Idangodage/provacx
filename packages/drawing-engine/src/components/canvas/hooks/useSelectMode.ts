@@ -143,6 +143,7 @@ interface ThicknessDragState {
   startPointer: Point2D;
   baselineWall: Wall;
   normal: Point2D;
+  endpointConstraints: MoveEndpointConstraint[];
 }
 
 interface MoveDragState {
@@ -503,6 +504,7 @@ export function useSelectMode({
 }: UseSelectModeOptions) {
   const isWallHandleDraggingRef = useRef(false);
   const dragStateRef = useRef<DragState>({ mode: 'idle' });
+  const dragChangedRef = useRef(false);
   const pendingPointRef = useRef<Point2D | null>(null);
   const frameRef = useRef<number | null>(null);
   const dimensionLabelRef = useRef<fabric.Text | null>(null);
@@ -1186,6 +1188,7 @@ export function useSelectMode({
 
   const resetDragDynamics = useCallback((point: Point2D) => {
     smoothedPointerRef.current = { ...point };
+    dragChangedRef.current = false;
     endpointSnapMemoryRef.current = null;
     wallUpdateCacheRef.current.clear();
     wallBevelUpdateCacheRef.current.clear();
@@ -1340,6 +1343,34 @@ export function useSelectMode({
     }
 
     if (meta.controlType === 'wall-thickness-exterior' || meta.controlType === 'wall-thickness-interior') {
+      const endpointConstraints: MoveEndpointConstraint[] = [];
+      const startConstraints = buildEndpointConstraints(
+        wall,
+        'start',
+        new Set([wall.id])
+      );
+      if (startConstraints.connectedEndpoints.length > 0 || startConstraints.segmentConstraints.length > 0) {
+        endpointConstraints.push({
+          wallId: wall.id,
+          endpoint: 'start',
+          connectedEndpoints: startConstraints.connectedEndpoints,
+          segmentConstraints: startConstraints.segmentConstraints,
+        });
+      }
+      const endConstraints = buildEndpointConstraints(
+        wall,
+        'end',
+        new Set([wall.id])
+      );
+      if (endConstraints.connectedEndpoints.length > 0 || endConstraints.segmentConstraints.length > 0) {
+        endpointConstraints.push({
+          wallId: wall.id,
+          endpoint: 'end',
+          connectedEndpoints: endConstraints.connectedEndpoints,
+          segmentConstraints: endConstraints.segmentConstraints,
+        });
+      }
+
       dragStateRef.current = {
         mode: 'thickness',
         wallId: wall.id,
@@ -1347,6 +1378,7 @@ export function useSelectMode({
         startPointer: { ...point },
         baselineWall: { ...wall },
         normal: wallNormal(wall),
+        endpointConstraints,
       };
       return true;
     }
@@ -1521,40 +1553,107 @@ export function useSelectMode({
       const baseline = state.baselineWall;
       const normal = state.normal;
       const enableThicknessPresetSnap = modifierKeysRef.current.shift;
-      const center = midpoint(baseline.startPoint, baseline.endPoint);
-      const centerOffset = dot(center, normal);
-      const pointerOffset = dot(point, normal);
+      const sideSign = state.side === 'interior' ? 1 : -1;
+      const pointerDelta = subtract(point, state.startPointer);
+      const projectedDelta = dot(pointerDelta, normal);
 
-      // Compute thickness as 2× the perpendicular distance from the centerline to
-      // the pointer. Keeping startPoint/endPoint fixed preserves endpoint connections
-      // to neighboring walls, ensuring uniform and consistent thickness appearance.
-      const rawThickness = 2 * Math.abs(pointerOffset - centerOffset);
+      // Independent face resize:
+      // - Dragging interior/exterior moves only that face.
+      // - Opposite face remains anchored by shifting centerline half of delta.
+      const rawThickness = baseline.thickness + sideSign * projectedDelta;
       const nextThickness = clamp(
         enableThicknessPresetSnap ? snapThickness(rawThickness) : rawThickness,
         MIN_WALL_THICKNESS,
         MAX_WALL_THICKNESS
       );
+      const appliedFaceDelta = nextThickness - baseline.thickness;
+      const centerlineShift = sideSign * (appliedFaceDelta / 2);
 
-      // Only update thickness; centerline (startPoint/endPoint) stays fixed.
-      updateWallIfChanged(
-        baseline.id,
-        { thickness: nextThickness },
-        { skipHistory: true, source: 'drag' }
-      );
+      let nextStart = add(baseline.startPoint, scale(normal, centerlineShift));
+      let nextEnd = add(baseline.endPoint, scale(normal, centerlineShift));
+
+      // Keep T-junction endpoints bonded when a face resize shifts wall centerline.
+      for (const endpointConstraint of state.endpointConstraints) {
+        let constrainedPoint = endpointConstraint.endpoint === 'start'
+          ? { ...nextStart }
+          : { ...nextEnd };
+
+        if (endpointConstraint.segmentConstraints.length > 0) {
+          let bestProjection = projectPointToSegment(
+            constrainedPoint,
+            endpointConstraint.segmentConstraints[0].startPoint,
+            endpointConstraint.segmentConstraints[0].endPoint
+          );
+          let bestConstraint = endpointConstraint.segmentConstraints[0];
+          for (let i = 1; i < endpointConstraint.segmentConstraints.length; i += 1) {
+            const projection = projectPointToSegment(
+              constrainedPoint,
+              endpointConstraint.segmentConstraints[i].startPoint,
+              endpointConstraint.segmentConstraints[i].endPoint
+            );
+            if (projection.distance < bestProjection.distance) {
+              bestProjection = projection;
+              bestConstraint = endpointConstraint.segmentConstraints[i];
+            }
+          }
+          constrainedPoint = bestProjection.point;
+          connectWallsIfNeeded(state.wallId, bestConstraint.wallId);
+        }
+
+        if (endpointConstraint.endpoint === 'start') {
+          nextStart = constrainedPoint;
+        } else {
+          nextEnd = constrainedPoint;
+        }
+      }
+
+      const followerUpdates = new Map<string, Partial<Wall>>();
+      for (const endpointConstraint of state.endpointConstraints) {
+        const movedPoint = endpointConstraint.endpoint === 'start' ? nextStart : nextEnd;
+        for (const connected of endpointConstraint.connectedEndpoints) {
+          const pending = followerUpdates.get(connected.wallId) ?? {};
+          if (connected.endpoint === 'start') {
+            pending.startPoint = movedPoint;
+          } else {
+            pending.endPoint = movedPoint;
+          }
+          followerUpdates.set(connected.wallId, pending);
+          connectWallsIfNeeded(state.wallId, connected.wallId);
+        }
+      }
+
+      const thicknessUpdates: Array<{ id: string; updates: Partial<Wall> }> = [
+        {
+          id: baseline.id,
+          updates: {
+            startPoint: nextStart,
+            endPoint: nextEnd,
+            thickness: nextThickness,
+          },
+        },
+      ];
+      followerUpdates.forEach((updates, wallId) => {
+        thicknessUpdates.push({ id: wallId, updates });
+      });
+      updateWallsIfChanged(thicknessUpdates, { skipHistory: true, source: 'drag' });
 
       const updatedWall: Wall = {
         ...baseline,
+        startPoint: nextStart,
+        endPoint: nextEnd,
         thickness: nextThickness,
       };
       setStatusFromWall(updatedWall);
 
+      const updatedNormal = wallNormal(updatedWall);
+      const updatedCenter = midpoint(updatedWall.startPoint, updatedWall.endPoint);
       const handlePoint = add(
-        center,
-        scale(normal, state.side === 'interior' ? nextThickness / 2 : -nextThickness / 2)
+        updatedCenter,
+        scale(updatedNormal, sideSign * nextThickness / 2)
       );
 
       return {
-        label: `Thickness ${Math.round(nextThickness)} mm`,
+        label: `${state.side === 'interior' ? 'Inner' : 'Outer'} ${Math.round(nextThickness)} mm`,
         point: handlePoint,
       };
     }
@@ -2155,6 +2254,7 @@ export function useSelectMode({
 
     const result = applyDrag(point);
     if (!result) return;
+    dragChangedRef.current = true;
     setDimensionLabel(result.label, result.point);
   }, [applyDrag, setDimensionLabel]);
 
@@ -2209,12 +2309,13 @@ export function useSelectMode({
       pendingPointRef.current = null;
       const result = applyDrag(point);
       if (result) {
+        dragChangedRef.current = true;
         setDimensionLabel(result.label, result.point);
       }
     }
 
     const mode = dragStateRef.current.mode;
-    if (mode !== 'idle') {
+    if (mode !== 'idle' && dragChangedRef.current) {
       const action =
         mode === 'thickness'
           ? 'Adjust wall thickness'
@@ -2237,6 +2338,7 @@ export function useSelectMode({
 
     dragStateRef.current = { mode: 'idle' };
     isWallHandleDraggingRef.current = false;
+    dragChangedRef.current = false;
     smoothedPointerRef.current = null;
     endpointSnapMemoryRef.current = null;
     wallUpdateCacheRef.current.clear();
@@ -2297,6 +2399,26 @@ export function useSelectMode({
         if (selectedPrimaryId && !optionsRef.current.selectedIds.includes(selectedPrimaryId)) {
           optionsRef.current.setSelectedIds([selectedPrimaryId]);
         }
+        return;
+      }
+
+      // Professional UX: dragging the body of an already-selected wall moves it directly.
+      if (
+        meta.wallId &&
+        !meta.isWallControl &&
+        !meta.isRoomControl &&
+        !addToSelection &&
+        optionsRef.current.selectedIds.includes(meta.wallId) &&
+        beginControlDrag(
+          {
+            wallId: meta.wallId,
+            controlType: 'wall-center-handle',
+            isWallControl: true,
+          },
+          scenePoint
+        )
+      ) {
+        optionsRef.current.setHoveredElement(meta.wallId);
         return;
       }
 
