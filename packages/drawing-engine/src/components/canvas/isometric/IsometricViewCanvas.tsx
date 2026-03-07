@@ -7,6 +7,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import type { ArchitecturalObjectDefinition } from '../../../data';
 import type { HvacElement, Point2D, Room, SymbolInstance2D, Wall } from '../../../types';
 import { computeWallUnionRenderData } from '../wall/WallUnionGeometry';
+import { createWallOpenings3D } from './Opening3DRenderer';
 
 const VIEW_MARGIN = 1.14;
 const EPSILON = 0.001;
@@ -17,6 +18,7 @@ const MIN_POLAR_ANGLE = THREE.MathUtils.degToRad(20);
 const MAX_POLAR_ANGLE = THREE.MathUtils.degToRad(88);
 const MIN_CAMERA_DISTANCE = 250;
 const MAX_CAMERA_DISTANCE = 160000;
+const OPENING_SURFACE_INSET_MM = 2;
 
 type WallPalette = {
   top: string;
@@ -34,6 +36,14 @@ type WallAssembly = {
   baseElevation: number;
   height: number;
   palette: WallPalette;
+};
+
+type OpeningSpan = {
+  id: string;
+  start: number;
+  end: number;
+  bottom: number;
+  top: number;
 };
 
 type LabelAnchor = {
@@ -411,6 +421,244 @@ function buildWallAssemblies(walls: Wall[]): WallAssembly[] {
   return assemblies;
 }
 
+function wallPlanRing(wall: Wall): Point2D[] {
+  const dx = wall.endPoint.x - wall.startPoint.x;
+  const dy = wall.endPoint.y - wall.startPoint.y;
+  const len = Math.hypot(dx, dy);
+  if (len <= EPSILON) {
+    return [];
+  }
+
+  const ux = dx / len;
+  const uy = dy / len;
+  const halfT = Math.max(1, wall.thickness) / 2;
+  const px = -uy * halfT;
+  const py = ux * halfT;
+
+  return [
+    { x: wall.startPoint.x + px, y: wall.startPoint.y + py },
+    { x: wall.endPoint.x + px, y: wall.endPoint.y + py },
+    { x: wall.endPoint.x - px, y: wall.endPoint.y - py },
+    { x: wall.startPoint.x - px, y: wall.startPoint.y - py },
+  ];
+}
+
+function createWallSegmentMesh(
+  segmentLength: number,
+  wallThickness: number,
+  bottomZ: number,
+  topZ: number,
+  centerX: number,
+  palette: WallPalette,
+  options: { showTopOutline?: boolean } = {}
+): THREE.Group | null {
+  const length = Math.max(0, segmentLength);
+  const height = topZ - bottomZ;
+  if (length <= EPSILON || height <= EPSILON) {
+    return null;
+  }
+
+  const group = new THREE.Group();
+  const wallBody = new THREE.Mesh(
+    new THREE.BoxGeometry(length, wallThickness, height),
+    new THREE.MeshStandardMaterial({
+      color: palette.side,
+      roughness: 0.98,
+      metalness: 0,
+      polygonOffset: true,
+      polygonOffsetFactor: -0.5,
+      polygonOffsetUnits: -0.5,
+    })
+  );
+  wallBody.position.set(centerX, 0, bottomZ + height / 2);
+  group.add(wallBody);
+
+  const topCap = new THREE.Mesh(
+    new THREE.PlaneGeometry(length, wallThickness),
+    new THREE.MeshStandardMaterial({
+      color: palette.top,
+      roughness: 0.95,
+      metalness: 0.01,
+      side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    })
+  );
+  topCap.position.set(centerX, 0, topZ + 0.4);
+  group.add(topCap);
+
+  if (options.showTopOutline) {
+    const capOutline = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(centerX - length / 2, -wallThickness / 2, topZ + 1.2),
+        new THREE.Vector3(centerX + length / 2, -wallThickness / 2, topZ + 1.2),
+        new THREE.Vector3(centerX + length / 2, wallThickness / 2, topZ + 1.2),
+        new THREE.Vector3(centerX - length / 2, wallThickness / 2, topZ + 1.2),
+        new THREE.Vector3(centerX - length / 2, -wallThickness / 2, topZ + 1.2),
+      ]),
+      new THREE.LineBasicMaterial({
+        color: palette.outline,
+        transparent: true,
+        opacity: 0.4,
+        depthWrite: false,
+        depthTest: true,
+        toneMapped: false,
+      })
+    );
+    group.add(capOutline);
+  }
+
+  return group;
+}
+
+function openingSpansForWall(wall: Wall): OpeningSpan[] {
+  const dx = wall.endPoint.x - wall.startPoint.x;
+  const dy = wall.endPoint.y - wall.startPoint.y;
+  const wallLength = Math.hypot(dx, dy);
+  if (wallLength <= EPSILON) {
+    return [];
+  }
+
+  const wallBase = wall.properties3D.baseElevation ?? 0;
+  const wallTop = wallBase + Math.max(1, wall.properties3D.height ?? 2700);
+
+  const spans = wall.openings
+    .map((opening) => {
+      const halfWidth = Math.max(10, opening.width / 2);
+      const start = THREE.MathUtils.clamp(opening.position - halfWidth, 0, wallLength);
+      const end = THREE.MathUtils.clamp(opening.position + halfWidth, 0, wallLength);
+      const bottom = opening.type === 'window'
+        ? wallBase + (opening.sillHeight ?? 900)
+        : wallBase;
+      const top = Math.min(
+        wallTop,
+        bottom + Math.max(100, opening.height || (opening.type === 'door' ? 2100 : 1200))
+      );
+      if (end - start <= EPSILON || top - bottom <= EPSILON) {
+        return null;
+      }
+      return {
+        id: opening.id,
+        start,
+        end,
+        bottom,
+        top,
+      } as OpeningSpan;
+    })
+    .filter((span): span is OpeningSpan => span !== null)
+    .sort((left, right) => left.start - right.start);
+
+  return spans;
+}
+
+function createWallMeshWithOpenings(
+  wall: Wall,
+  palette: WallPalette
+): THREE.Group | null {
+  const dx = wall.endPoint.x - wall.startPoint.x;
+  const dy = wall.endPoint.y - wall.startPoint.y;
+  const wallLength = Math.hypot(dx, dy);
+  if (wallLength <= EPSILON) {
+    return null;
+  }
+
+  const spans = openingSpansForWall(wall);
+  if (spans.length === 0) {
+    return null;
+  }
+
+  const group = new THREE.Group();
+  const wallBase = wall.properties3D.baseElevation ?? 0;
+  const wallTop = wallBase + Math.max(1, wall.properties3D.height ?? 2700);
+  const wallThickness = Math.max(1, wall.thickness);
+
+  // Horizontal gaps with full-height wall body (left/right of openings)
+  const occupiedRanges: Array<{ start: number; end: number }> = [];
+  spans.forEach((span) => {
+    if (occupiedRanges.length === 0) {
+      occupiedRanges.push({ start: span.start, end: span.end });
+      return;
+    }
+    const previous = occupiedRanges[occupiedRanges.length - 1];
+    if (span.start <= previous.end + EPSILON) {
+      previous.end = Math.max(previous.end, span.end);
+      return;
+    }
+    occupiedRanges.push({ start: span.start, end: span.end });
+  });
+
+  let cursor = 0;
+  occupiedRanges.forEach((range) => {
+    if (range.start > cursor + EPSILON) {
+      const segment = createWallSegmentMesh(
+        range.start - cursor,
+        wallThickness,
+        wallBase,
+        wallTop,
+        (cursor + range.start) / 2,
+        palette,
+        { showTopOutline: true }
+      );
+      if (segment) {
+        group.add(segment);
+      }
+    }
+    cursor = Math.max(cursor, range.end);
+  });
+  if (cursor < wallLength - EPSILON) {
+    const segment = createWallSegmentMesh(
+      wallLength - cursor,
+      wallThickness,
+      wallBase,
+      wallTop,
+      (cursor + wallLength) / 2,
+      palette,
+      { showTopOutline: true }
+    );
+    if (segment) {
+      group.add(segment);
+    }
+  }
+
+  // Lintel and sill segments inside opening widths.
+  spans.forEach((span) => {
+    if (span.bottom > wallBase + EPSILON) {
+      const sillSegment = createWallSegmentMesh(
+        span.end - span.start,
+        wallThickness,
+        wallBase,
+        span.bottom,
+        (span.start + span.end) / 2,
+        palette,
+        { showTopOutline: false }
+      );
+      if (sillSegment) {
+        group.add(sillSegment);
+      }
+    }
+    if (span.top < wallTop - EPSILON) {
+      const lintelSegment = createWallSegmentMesh(
+        span.end - span.start,
+        wallThickness,
+        span.top,
+        wallTop,
+        (span.start + span.end) / 2,
+        palette,
+        { showTopOutline: true }
+      );
+      if (lintelSegment) {
+        group.add(lintelSegment);
+      }
+    }
+  });
+
+  group.position.set(wall.startPoint.x, wall.startPoint.y, 0);
+  group.rotation.z = Math.atan2(dy, dx);
+  group.name = `wall-with-openings-${wall.id}`;
+  return group;
+}
+
 function createWallMesh(
   polygon: Point2D[][],
   baseElevation: number,
@@ -451,7 +699,7 @@ function createWallMesh(
       return;
     }
 
-    const outlinePoints = points.map((point) => new THREE.Vector3(point.x, point.y, baseElevation + height + 1));
+    const outlinePoints = points.map((point) => new THREE.Vector3(point.x, point.y, baseElevation + height + 4));
     outlinePoints.push(outlinePoints[0].clone());
 
     const outlineGeometry = new THREE.BufferGeometry().setFromPoints(outlinePoints);
@@ -460,6 +708,8 @@ function createWallMesh(
       transparent: true,
       opacity: ringIndex === 0 ? 0.6 : 0.42,
       depthWrite: false,
+      depthTest: true,
+      toneMapped: false,
     });
     group.add(new THREE.Line(outlineGeometry, outlineMaterial));
   });
@@ -481,6 +731,9 @@ function createRoomFloor(room: Room): THREE.Mesh | null {
     roughness: 1,
     metalness: 0,
     side: THREE.DoubleSide,
+    polygonOffset: true,
+    polygonOffsetFactor: 1,
+    polygonOffsetUnits: 1,
   });
   const mesh = new THREE.Mesh(geometry, material);
   mesh.position.z = (room.properties3D.floorElevation ?? 0) + 2;
@@ -495,6 +748,7 @@ function createBoxMesh(
   palette: SolidPalette,
   rotationDeg: number
 ): THREE.Mesh {
+  const isTransparent = palette.opacity !== undefined && palette.opacity < 1;
   const geometry = new THREE.BoxGeometry(width, depth, height);
   const material = new THREE.MeshStandardMaterial({
     color: palette.color,
@@ -502,10 +756,18 @@ function createBoxMesh(
     opacity: palette.opacity ?? 1,
     roughness: 0.92,
     metalness: 0.03,
+    depthWrite: true,
+    depthTest: true,
+    side: THREE.FrontSide,
+    polygonOffset: true,
+    polygonOffsetFactor: isTransparent ? -2 : -1,
+    polygonOffsetUnits: isTransparent ? -2 : -1,
+    alphaToCoverage: isTransparent,
   });
   const mesh = new THREE.Mesh(geometry, material);
   mesh.position.copy(center);
   mesh.rotation.z = THREE.MathUtils.degToRad(rotationDeg);
+  mesh.renderOrder = isTransparent ? 24 : 12;
   return mesh;
 }
 
@@ -525,14 +787,20 @@ function createPlanGrid(points: Point2D[], elevation: number): THREE.GridHelper 
   if (Array.isArray(material)) {
     material.forEach((entry) => {
       entry.transparent = true;
-      entry.opacity = 0.28;
+      entry.opacity = 0.18;
       entry.depthWrite = false;
+      entry.depthTest = true;
+      entry.toneMapped = false;
     });
   } else {
     material.transparent = true;
-    material.opacity = 0.28;
+    material.opacity = 0.18;
     material.depthWrite = false;
+    material.depthTest = true;
+    material.toneMapped = false;
   }
+  // Keep grid behind scene geometry; do not overlay it through walls/objects.
+  grid.renderOrder = -10;
 
   return grid;
 }
@@ -577,7 +845,16 @@ export function IsometricViewCanvas({
     () => new Map(objectDefinitions.map((definition) => [definition.id, definition])),
     [objectDefinitions]
   );
-  const wallAssemblies = useMemo(() => buildWallAssemblies(walls), [walls]);
+  const wallsById = useMemo(() => new Map(walls.map((wall) => [wall.id, wall])), [walls]);
+  const wallsWithoutOpenings = useMemo(
+    () => walls.filter((wall) => wall.openings.length === 0),
+    [walls]
+  );
+  const wallsWithOpenings = useMemo(
+    () => walls.filter((wall) => wall.openings.length > 0),
+    [walls]
+  );
+  const wallAssemblies = useMemo(() => buildWallAssemblies(wallsWithoutOpenings), [wallsWithoutOpenings]);
 
   const renderViewport = useCallback(() => {
     const sceneState = sceneRef.current;
@@ -621,12 +898,12 @@ export function IsometricViewCanvas({
     setWebglInitError(null);
 
     const rendererConfigs: Array<
-      Pick<THREE.WebGLRendererParameters, 'antialias' | 'alpha' | 'powerPreference'>
+      Pick<THREE.WebGLRendererParameters, 'antialias' | 'alpha' | 'powerPreference' | 'logarithmicDepthBuffer'>
     > = [
-      { antialias: true, alpha: false, powerPreference: 'high-performance' },
-      { antialias: false, alpha: false, powerPreference: 'high-performance' },
-      { antialias: false, alpha: false, powerPreference: 'default' },
-      { antialias: false, alpha: true, powerPreference: 'default' },
+      { antialias: true, alpha: false, powerPreference: 'high-performance', logarithmicDepthBuffer: true },
+      { antialias: false, alpha: false, powerPreference: 'high-performance', logarithmicDepthBuffer: true },
+      { antialias: false, alpha: false, powerPreference: 'default', logarithmicDepthBuffer: true },
+      { antialias: false, alpha: true, powerPreference: 'default', logarithmicDepthBuffer: false },
     ];
 
     let renderer: THREE.WebGLRenderer | null = null;
@@ -748,11 +1025,8 @@ export function IsometricViewCanvas({
     };
 
     let frameId = 0;
-    let previousTime = performance.now();
-    const animate = (time: number) => {
-      const deltaSeconds = (time - previousTime) / 1000;
-      previousTime = time;
-      const changed = controls.update(deltaSeconds);
+    const animate = () => {
+      const changed = controls.update();
       if (changed || renderRequestedRef.current) {
         renderRequestedRef.current = false;
         renderViewport();
@@ -875,6 +1149,35 @@ export function IsometricViewCanvas({
       });
     });
 
+    wallsWithOpenings.forEach((wall) => {
+      const wallMesh = createWallMeshWithOpenings(wall, wallPalette(wall.material));
+      if (wallMesh) {
+        geometryRoot.add(wallMesh);
+      }
+      const ring = wallPlanRing(wall);
+      if (ring.length >= 3) {
+        planPoints.push(...ring);
+      }
+      lowestElevation = Math.min(lowestElevation, wall.properties3D.baseElevation ?? 0);
+    });
+
+    const renderedOpeningIds = new Set<string>();
+    walls.forEach((wall) => {
+      if (!wall.openings || wall.openings.length === 0) {
+        return;
+      }
+
+      const openingsGroup = createWallOpenings3D(wall);
+      if (openingsGroup.children.length === 0) {
+        return;
+      }
+
+      openingsGroup.name = `wall-openings-${wall.id}`;
+      openingsGroup.renderOrder = 14;
+      geometryRoot.add(openingsGroup);
+      wall.openings.forEach((opening) => renderedOpeningIds.add(opening.id));
+    });
+
     hvacElements.forEach((element) => {
       const center = new THREE.Vector3(
         element.position.x + element.width / 2,
@@ -920,7 +1223,7 @@ export function IsometricViewCanvas({
         60,
         baseWidth * scaleFactor
       );
-      const depthMm = Math.max(
+      let depthMm = Math.max(
         40,
         baseDepth * scaleFactor
       );
@@ -928,10 +1231,39 @@ export function IsometricViewCanvas({
         definition.category === 'symbols' ? 140 : 240,
         baseHeight * scaleFactor
       );
-      const baseElevation = definition.category === 'windows'
-        ? definition.sillHeightMm ?? 900
-        : 0;
+      const isOpeningCategory = definition.category === 'doors' || definition.category === 'windows';
+      const baseElevationFromProps = readNumberProperty(instance.properties, 'baseElevationMm');
+      const baseElevation = baseElevationFromProps ?? (
+        definition.category === 'windows'
+          ? definition.sillHeightMm ?? 900
+          : 0
+      );
 
+      // If this door/window is already rendered via wall opening geometry,
+      // skip the simplified symbol box to avoid losing detail.
+      if (isOpeningCategory && renderedOpeningIds.has(instance.id)) {
+        lowestElevation = Math.min(lowestElevation, baseElevation);
+        if (definition.category !== 'symbols') {
+          labelAnchors.push({
+            key: `object-${instance.id}`,
+            position: new THREE.Vector3(instance.position.x, instance.position.y, baseElevation + heightMm + 30),
+            text: definition.name,
+            color: '#334155',
+          });
+        }
+        return;
+      }
+
+      if (isOpeningCategory) {
+        const hostWallId = typeof instance.properties.hostWallId === 'string'
+          ? instance.properties.hostWallId
+          : null;
+        const hostWallThickness = readNumberProperty(instance.properties, 'hostWallThicknessMm')
+          ?? (hostWallId ? wallsById.get(hostWallId)?.thickness : null);
+        const targetThickness = hostWallThickness ?? depthMm;
+        const inset = Math.min(OPENING_SURFACE_INSET_MM, Math.max(0.8, targetThickness * 0.05));
+        depthMm = Math.max(10, targetThickness - inset * 2);
+      }
       const mesh = createBoxMesh(
         new THREE.Vector3(instance.position.x, instance.position.y, baseElevation + heightMm / 2),
         widthMm,
@@ -994,7 +1326,7 @@ export function IsometricViewCanvas({
     }
     controls.update();
     renderRequestedRef.current = true;
-  }, [definitionsById, hvacElements, rooms, symbols, wallAssemblies]);
+  }, [definitionsById, hvacElements, rooms, symbols, wallAssemblies, walls, wallsById, wallsWithOpenings]);
 
   return (
     <div

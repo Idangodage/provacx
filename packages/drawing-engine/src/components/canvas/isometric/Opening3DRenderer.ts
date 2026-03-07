@@ -25,8 +25,8 @@ const DOOR_HANDLE_BASE_COLOR = '#a0a0a0';
 const DOOR_THRESHOLD_COLOR = '#6b6b6b';
 const WINDOW_FRAME_COLOR = '#e8e8e8';
 const WINDOW_FRAME_ACCENT = '#d0d0d0';
-const WINDOW_GLASS_COLOR = '#c8e8ff';
-const WINDOW_GLASS_OPACITY = 0.35;
+const WINDOW_GLASS_COLOR = '#d6f1ff';
+const WINDOW_GLASS_OPACITY = 0.46;
 const WINDOW_SILL_COLOR = '#d8d8d8';
 
 // =============================================================================
@@ -311,19 +311,24 @@ function createDoor3D(
   const revealDepth = wall.thickness * 0.8;
   const revealMat = new THREE.MeshStandardMaterial({ color: '#3a2a1a', roughness: 1, side: THREE.DoubleSide });
   // Left reveal
-  const lReveal = new THREE.Mesh(new THREE.PlaneGeometry(revealDepth, doorHeight - headerH), revealMat);
+  const lReveal = new THREE.Mesh(
+    new THREE.PlaneGeometry(doorHeight - headerH, revealDepth),
+    revealMat
+  );
   lReveal.position.set(-halfW + frameThick + 1, 0, baseZ + (doorHeight - headerH) / 2);
   lReveal.rotation.y = Math.PI / 2;
   group.add(lReveal);
   // Right reveal
-  const rReveal = new THREE.Mesh(new THREE.PlaneGeometry(revealDepth, doorHeight - headerH), revealMat.clone());
+  const rReveal = new THREE.Mesh(
+    new THREE.PlaneGeometry(doorHeight - headerH, revealDepth),
+    revealMat.clone()
+  );
   rReveal.position.set(halfW - frameThick - 1, 0, baseZ + (doorHeight - headerH) / 2);
   rReveal.rotation.y = Math.PI / 2;
   group.add(rReveal);
   // Top reveal
   const tReveal = new THREE.Mesh(new THREE.PlaneGeometry(opening.width - frameThick * 2, revealDepth), revealMat.clone());
   tReveal.position.set(0, 0, baseZ + doorHeight - headerH - 1);
-  tReveal.rotation.x = Math.PI / 2;
   group.add(tReveal);
 
   // Transform to wall orientation
@@ -423,6 +428,9 @@ function createWindow3D(
     metalness: 0.05,
     side: THREE.DoubleSide,
     depthWrite: false,
+    transmission: 0.78,
+    clearcoat: 0.35,
+    clearcoatRoughness: 0.08,
   });
   const glass = new THREE.Mesh(glassGeo, glassMaterial);
   glass.position.set(0, 0, winBottom + windowHeight / 2);
@@ -432,11 +440,17 @@ function createWindow3D(
   // Dark inner reveal for depth
   const revealMat = new THREE.MeshStandardMaterial({ color: '#555555', roughness: 1, side: THREE.DoubleSide });
   const revealD = wall.thickness * 0.75;
-  const lReveal = new THREE.Mesh(new THREE.PlaneGeometry(revealD, innerH), revealMat);
+  const lReveal = new THREE.Mesh(
+    new THREE.PlaneGeometry(innerH, revealD),
+    revealMat
+  );
   lReveal.position.set(-halfW + frameThick + 1, 0, winBottom + windowHeight / 2);
   lReveal.rotation.y = Math.PI / 2;
   group.add(lReveal);
-  const rReveal = new THREE.Mesh(new THREE.PlaneGeometry(revealD, innerH), revealMat.clone());
+  const rReveal = new THREE.Mesh(
+    new THREE.PlaneGeometry(innerH, revealD),
+    revealMat.clone()
+  );
   rReveal.position.set(halfW - frameThick - 1, 0, winBottom + windowHeight / 2);
   rReveal.rotation.y = Math.PI / 2;
   group.add(rReveal);
