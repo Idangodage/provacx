@@ -120,12 +120,12 @@ export const VISUAL_CONFIG = {
   centerLineWidth: 1,
 
   // Selection
-  selectionStroke: '#2563EB',
-  selectionStrokeWidth: 2, // in screen pixels, scaled to scene
-  selectionFill: 'rgba(37, 99, 235, 0.08)',
-  hoverStroke: '#059669',
-  hoverStrokeWidth: 1.5,
-  hoverFill: 'rgba(5, 150, 105, 0.06)',
+  selectionStroke: 'transparent',
+  selectionStrokeWidth: 0,
+  selectionFill: 'transparent',
+  hoverStroke: 'transparent',
+  hoverStrokeWidth: 0,
+  hoverFill: 'transparent',
 
   // Control handles — all sizes in screen pixels (zoom-independent)
   endpointRadius: 7,
@@ -643,12 +643,12 @@ export class WallRenderer {
     this.wallObjects.forEach((group, currentWallId) => {
       const hoverOutline = group.getObjects().find((obj) => (obj as NamedObject).name === 'hoverOutline');
       if (!hoverOutline) return;
-      hoverOutline.set(
-        'visible',
-        currentWallId === hoveredWallId &&
-        individuallyHoveredWallIds.has(currentWallId) &&
-        !this.selectedWallIds.has(currentWallId)
-      );
+      void currentWallId;
+      hoverOutline.set({
+        visible: false,
+        stroke: VISUAL_CONFIG.hoverStroke,
+        fill: VISUAL_CONFIG.hoverFill,
+      });
     });
 
     this.clearHoverComponents();
@@ -823,72 +823,8 @@ export class WallRenderer {
    * Standard in AutoCAD, Revit, SketchUp, and Figma (for lines).
    * Displays length in mm (or m for walls > 1000mm) alongside the wall.
    */
-  private renderDimensionLabels(wallIds: string[]): void {
+  private renderDimensionLabels(_wallIds: string[]): void {
     this.clearDimensionLabels();
-
-    for (const wallId of wallIds) {
-      const wall = this.wallData.get(wallId);
-      if (!wall) continue;
-
-      const length = computeWallLength(wall);
-      const label = length >= 1000
-        ? `${(length / 1000).toFixed(2)} m`
-        : `${Math.round(length)} mm`;
-
-      const center = computeWallCenter(wall);
-      const canvasCenter = this.toCanvasPoint(center);
-
-      // Offset label perpendicular to wall so it doesn't overlap
-      const dx = wall.endPoint.x - wall.startPoint.x;
-      const dy = wall.endPoint.y - wall.startPoint.y;
-      const len = Math.hypot(dx, dy) || 1;
-      const offsetPx = this.toSceneSize(20);
-      const labelX = canvasCenter.x + (-dy / len) * offsetPx;
-      const labelY = canvasCenter.y + (dx / len) * offsetPx;
-
-      // Background
-      const fontSize = this.toSceneSize(VISUAL_CONFIG.dimensionFontSize);
-      const bgPad = this.toSceneSize(VISUAL_CONFIG.dimensionBgPadding);
-      const bgCorner = this.toSceneSize(3);
-      const bg = new fabric.Rect({
-        left: labelX, top: labelY,
-        width: label.length * fontSize * 0.62 + bgPad * 2,
-        height: fontSize * 1.4 + bgPad,
-        fill: VISUAL_CONFIG.dimensionBgColor,
-        rx: bgCorner, ry: bgCorner,
-        originX: 'center', originY: 'center',
-        selectable: false, evented: false,
-        shadow: new fabric.Shadow({
-          color: 'rgba(0,0,0,0.12)',
-          blur: this.toSceneSize(4),
-          offsetX: 0, offsetY: this.toSceneSize(1),
-        }),
-      });
-
-      const text = new fabric.Text(label, {
-        left: labelX, top: labelY,
-        fill: VISUAL_CONFIG.dimensionColor,
-        fontSize,
-        fontFamily: VISUAL_CONFIG.dimensionFontFamily,
-        fontWeight: '600',
-        originX: 'center', originY: 'center',
-        selectable: false, evented: false,
-      });
-
-      // Calculate rotation to align with wall
-      const wallAngleDeg = Math.atan2(dy, dx) * (180 / Math.PI);
-      // Keep text readable (not upside down)
-      const textAngle = (wallAngleDeg > 90 || wallAngleDeg < -90)
-        ? wallAngleDeg + 180
-        : wallAngleDeg;
-
-      bg.set('angle', textAngle);
-      text.set('angle', textAngle);
-
-      this.canvas.add(bg);
-      this.canvas.add(text);
-      this.dimensionObjects.push(bg, text);
-    }
   }
 
   private clearDimensionLabels(): void {
@@ -1430,6 +1366,9 @@ export class WallRenderer {
     const newSelection = new Set(selectedWallIds);
     const previousSelection = this.selectedWallIds;
     this.selectedWallIds = newSelection;
+    const singleSelectedWallId = newSelection.size === 1
+      ? Array.from(newSelection)[0] ?? null
+      : null;
 
     const selectionPlan = resolveWallSelectionPlan(
       Array.from(this.wallData.values()), this.rooms, selectedWallIds
@@ -1438,12 +1377,20 @@ export class WallRenderer {
 
     this.wallObjects.forEach((group, wallId) => {
       const outline = group.getObjects().find((obj) => (obj as NamedObject).name === 'selectionOutline');
-      if (outline) outline.set('visible', individuallyHighlightedWallIds.has(wallId));
+      if (!outline) return;
+      void wallId;
+      void individuallyHighlightedWallIds;
+      outline.set({
+        visible: false,
+        stroke: VISUAL_CONFIG.selectionStroke,
+        fill: VISUAL_CONFIG.selectionFill,
+      });
     });
 
-    // [FIX] Only remove controls for walls that are no longer selected
+    // Show wall edit controls only for single-wall selection.
+    // Room/multi-wall selection should remain texture-based and uncluttered.
     for (const wallId of previousSelection) {
-      if (!newSelection.has(wallId)) {
+      if (wallId !== singleSelectedWallId) {
         this.removeControlPoints(wallId);
       }
     }
@@ -1452,11 +1399,12 @@ export class WallRenderer {
     this.renderSelectionComponents(selectionPlan);
     this.syncHoverPreview();
 
-    // [FIX] Only create controls for newly selected walls
-    for (const wallId of newSelection) {
-      if (!previousSelection.has(wallId) && this.wallObjects.has(wallId)) {
-        this.createControlPoints(wallId);
-      }
+    if (
+      singleSelectedWallId &&
+      this.wallObjects.has(singleSelectedWallId) &&
+      !this.controlPointObjects.has(singleSelectedWallId)
+    ) {
+      this.createControlPoints(singleSelectedWallId);
     }
 
     // [NEW] Show dimension labels on selected walls

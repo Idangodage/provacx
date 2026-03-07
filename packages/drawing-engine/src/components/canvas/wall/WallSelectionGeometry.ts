@@ -1864,6 +1864,9 @@ export function resolveWallSelectionPlan(
   rooms: Room[],
   selectedWallIds: string[]
 ): WallSelectionPlan {
+  // Room selections are already expanded to wall IDs by the caller.
+  // Keep the plan wall-centric to avoid merged-room contour artifacts.
+  void rooms;
   const selectedSet = new Set(selectedWallIds);
   if (selectedSet.size === 0) {
     return {
@@ -1873,113 +1876,13 @@ export function resolveWallSelectionPlan(
   }
 
   const wallsById = new Map(walls.map((wall) => [wall.id, wall]));
-  const mergedComponents: WallSelectionComponent[] = [];
-  const coveredWallIds = new Set<string>();
-
-  const fullRenderData = computeWallUnionRenderData(walls);
-  const componentByWallId = new Map(
-    fullRenderData.components.flatMap((component) =>
-      component.wallIds.map((wallId) => [wallId, component] as const)
-    )
-  );
-  const selectedWallIdsExisting = Array.from(selectedSet)
-    .filter((wallId) => wallsById.has(wallId));
-  const selectedWallIdSetExisting = new Set(selectedWallIdsExisting);
-  const exactRoomMatch = rooms.find((room) => {
-    const uniqueRoomWallIds = Array.from(new Set(
-      room.wallIds.filter((wallId) => wallsById.has(wallId))
-    ));
-    if (uniqueRoomWallIds.length === 0) {
-      return false;
-    }
-    if (uniqueRoomWallIds.length !== selectedWallIdSetExisting.size) {
-      return false;
-    }
-    return uniqueRoomWallIds.every((wallId) => selectedWallIdSetExisting.has(wallId));
-  });
-  if (exactRoomMatch) {
-    const roomWalls = exactRoomMatch.wallIds
-      .map((wallId) => wallsById.get(wallId))
-      .filter((wall): wall is Wall => Boolean(wall));
-    if (roomWalls.length > 0) {
-      const roomComponent = buildRoomSelectionComponent(exactRoomMatch, roomWalls, wallsById);
-      if (roomComponent) {
-        mergedComponents.push(roomComponent);
-        exactRoomMatch.wallIds.forEach((wallId) => coveredWallIds.add(wallId));
-      }
-    }
-  }
-  fullRenderData.components
-    .filter((component) =>
-      component.wallIds.length > 1 &&
-      component.wallIds.every((wallId) => selectedSet.has(wallId)) &&
-      component.wallIds.some((wallId) => !coveredWallIds.has(wallId))
-    )
-    .forEach((component) => {
-      const selectionComponent = buildComponentSelectionComponent(component);
-      if (!selectionComponent) {
-        return;
-      }
-
-      mergedComponents.push(selectionComponent);
-      component.wallIds.forEach((wallId) => coveredWallIds.add(wallId));
-    });
-
-  rooms
-    .filter(
-      (room) =>
-        room.wallIds.length > 0 &&
-        room.wallIds.every((wallId) => selectedSet.has(wallId)) &&
-        room.wallIds.some((wallId) => !coveredWallIds.has(wallId))
-    )
-    .forEach((room) => {
-      const roomWalls = room.wallIds
-        .map((wallId) => wallsById.get(wallId))
-        .filter((wall): wall is Wall => Boolean(wall));
-      if (roomWalls.length === 0) {
-        return;
-      }
-
-      const selectionComponent = buildRoomSelectionComponent(room, roomWalls, wallsById);
-      if (!selectionComponent) {
-        return;
-      }
-
-      mergedComponents.push(selectionComponent);
-      room.wallIds.forEach((wallId) => coveredWallIds.add(wallId));
-    });
-
   const individualWallIds = Array.from(new Set(
-    selectedWallIds.filter((wallId) => wallsById.has(wallId) && !coveredWallIds.has(wallId))
+    selectedWallIds.filter((wallId) => wallsById.has(wallId))
   ));
 
-  const fallbackWallIds: string[] = [];
-  individualWallIds.forEach((wallId) => {
-    const wall = wallsById.get(wallId);
-    if (!wall) {
-      return;
-    }
-
-    const component = componentByWallId.get(wallId);
-    const componentWalls = (component?.wallIds ?? [wallId])
-      .map((componentWallId) => wallsById.get(componentWallId))
-      .filter((componentWall): componentWall is Wall => Boolean(componentWall));
-    const selectionComponent = buildWallSelectionComponent(
-      wall,
-      fullRenderData.joinsMap,
-      componentWalls
-    );
-    if (!selectionComponent) {
-      fallbackWallIds.push(wallId);
-      return;
-    }
-
-    mergedComponents.push(selectionComponent);
-  });
-
   return {
-    individualWallIds: fallbackWallIds,
-    mergedComponents,
+    individualWallIds,
+    mergedComponents: [],
   };
 }
 
