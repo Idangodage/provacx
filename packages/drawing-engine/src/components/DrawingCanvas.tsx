@@ -19,6 +19,7 @@ import {
     Grid,
     PageLayout,
     Rulers,
+    snapToGrid as snapWallGridPoint,
     snapPointToGrid,
     getToolCursor,
     isDrawingTool,
@@ -39,7 +40,6 @@ import {
     SectionLineRenderer,
     HvacPlanRenderer,
 } from './canvas';
-import { RoomConfigPopup } from './canvas/wall';
 
 // =============================================================================
 // Types & Constants
@@ -1166,12 +1166,20 @@ export function DrawingCanvas({
         connectWalls,
     });
 
-    // Room tool hook
+    // Room tool hook (2-click rectangle)
     const roomTool = useRoomTool({
         gridSize: wallSettings.gridSize,
+        wallThickness: wallSettings.defaultThickness,
+        wallMaterial: wallSettings.defaultMaterial,
         createRoomWalls,
     });
-    const { handleMouseDown: handleRoomMouseDown } = roomTool;
+    const {
+        isDrawing: isRoomDrawing,
+        startCorner: roomStartCorner,
+        handleMouseDown: handleRoomMouseDown,
+        handleMouseMove: handleRoomMouseMove,
+        cancelRoomCreation,
+    } = roomTool;
 
     const {
         handlePlacementMouseDown: handleDimensionPlacementMouseDown,
@@ -1284,9 +1292,14 @@ export function DrawingCanvas({
     const handleEscapeShortcut = useCallback(() => {
         if (pendingPlacementDefinition) return true;
         if (tool === 'wall' && isWallDrawing) return true;
+        if (tool === 'room' && isRoomDrawing) {
+            cancelRoomCreation();
+            wallRenderer?.clearPreviewWall();
+            return true;
+        }
         if (tool === 'section-line' && sectionLineDrawingState.isDrawing) return true;
         return false;
-    }, [pendingPlacementDefinition, tool, isWallDrawing, sectionLineDrawingState.isDrawing]);
+    }, [pendingPlacementDefinition, tool, isWallDrawing, isRoomDrawing, cancelRoomCreation, sectionLineDrawingState.isDrawing, wallRenderer]);
 
     // Keyboard handling
     useCanvasKeyboard({
@@ -1299,6 +1312,13 @@ export function DrawingCanvas({
         onCopy: copySelectedWalls,
         onPaste: pasteWalls,
     });
+
+    // Ensure room perimeter preview is cleared when leaving room tool.
+    useEffect(() => {
+        if (tool !== 'room') {
+            wallRenderer?.clearPreviewWall();
+        }
+    }, [tool, wallRenderer]);
 
     // ---------------------------------------------------------------------------
     // Canvas Initialization
@@ -1725,13 +1745,17 @@ export function DrawingCanvas({
                 return;
             }
 
-            // Handle room tool - convert from pixels to mm
+            // Handle room tool (2-click rectangle) - convert from pixels to mm
             if (tool === 'room') {
+                const wasRoomDrawing = isRoomDrawing;
                 const roomPoint = {
                     x: rawPoint.x / MM_TO_PX,
                     y: rawPoint.y / MM_TO_PX,
                 };
                 handleRoomMouseDown(roomPoint);
+                if (wasRoomDrawing) {
+                    wallRenderer?.clearPreviewWall();
+                }
                 return;
             }
 
@@ -1780,6 +1804,7 @@ export function DrawingCanvas({
             closeObjectContextMenu,
             placePendingObject,
             handleWallMouseDown,
+            isRoomDrawing,
             handleRoomMouseDown,
             handleDimensionPlacementMouseDown,
             setMarqueeSelectionMode,
@@ -1787,6 +1812,7 @@ export function DrawingCanvas({
             startSectionLineDrawing,
             updateSectionLinePreview,
             commitSectionLine,
+            wallRenderer,
         ]
     );
 
@@ -1868,6 +1894,34 @@ export function DrawingCanvas({
                     // But snap indicators are already rendered by handleWallMouseMove
                 }
                 if (isWallDrawing) return;
+            }
+
+            if (tool === 'room') {
+                const roomPoint = {
+                    x: rawPoint.x / MM_TO_PX,
+                    y: rawPoint.y / MM_TO_PX,
+                };
+                handleRoomMouseMove(roomPoint);
+                if (isRoomDrawing && roomStartCorner) {
+                    const snappedEnd = snapWallGridPoint(roomPoint, wallSettings.gridSize);
+                    const minX = Math.min(roomStartCorner.x, snappedEnd.x);
+                    const maxX = Math.max(roomStartCorner.x, snappedEnd.x);
+                    const minY = Math.min(roomStartCorner.y, snappedEnd.y);
+                    const maxY = Math.max(roomStartCorner.y, snappedEnd.y);
+                    const segments = [
+                        { startPoint: { x: minX, y: minY }, endPoint: { x: maxX, y: minY } },
+                        { startPoint: { x: maxX, y: minY }, endPoint: { x: maxX, y: maxY } },
+                        { startPoint: { x: maxX, y: maxY }, endPoint: { x: minX, y: maxY } },
+                        { startPoint: { x: minX, y: maxY }, endPoint: { x: minX, y: minY } },
+                    ];
+                    wallRenderer?.renderPreviewWalls(
+                        segments,
+                        wallSettings.defaultThickness,
+                        wallSettings.defaultMaterial
+                    );
+                    return;
+                }
+                wallRenderer?.clearPreviewWall();
             }
 
             if (tool === 'section-line' && sectionLineDrawingState.isDrawing) {
@@ -1960,7 +2014,10 @@ export function DrawingCanvas({
             pendingPlacementDefinition,
             computePlacement,
             isWallDrawing,
+            isRoomDrawing,
+            roomStartCorner,
             handleWallMouseMove,
+            handleRoomMouseMove,
             handleDimensionPlacementMouseMove,
             handleDimensionSelectMouseMove,
             handleSelectMouseMove,
@@ -1970,6 +2027,8 @@ export function DrawingCanvas({
             resolveRoomIdFromTarget,
             resolveSectionLineIdFromTarget,
             wallRenderer,
+            wallSettings.gridSize,
+            wallSettings.defaultThickness,
             setHoveredElement,
             setMarqueeSelectionMode,
         ]
@@ -2303,9 +2362,11 @@ export function DrawingCanvas({
             const isRoomAreaClick = roomInteriorDistance > roomInteriorThreshold;
             if (
                 clickedRoomId &&
+                !clickedWallId &&
                 isRoomAreaClick &&
                 !targetMeta.isRoomControl &&
-                !targetMeta.isWallControl
+                !targetMeta.isWallControl &&
+                !targetMeta.wallId
             ) {
                 const perimeterWallIds = perimeterWallIdsForRooms([clickedRoomId]);
                 if (perimeterWallIds.length > 0) {
@@ -2686,20 +2747,6 @@ export function DrawingCanvas({
                     style={{ pointerEvents: 'none' }}
                 />
             </div>
-
-            {/* Room Configuration Popup */}
-            {roomTool.showConfigPopup && roomTool.startCorner && (
-                <RoomConfigPopup
-                    config={roomTool.roomConfig}
-                    onChange={roomTool.setRoomConfig}
-                    onConfirm={roomTool.confirmRoomCreation}
-                    onCancel={roomTool.cancelRoomCreation}
-                    position={{
-                        x: roomTool.startCorner.x * MM_TO_PX * viewportZoom - panOffset.x * viewportZoom + originOffset.x + 20,
-                        y: roomTool.startCorner.y * MM_TO_PX * viewportZoom - panOffset.y * viewportZoom + originOffset.y + 20,
-                    }}
-                />
-            )}
 
             {wallContextMenu && (
                 <div

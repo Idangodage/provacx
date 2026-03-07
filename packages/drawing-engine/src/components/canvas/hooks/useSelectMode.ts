@@ -2402,26 +2402,6 @@ export function useSelectMode({
         return;
       }
 
-      // Professional UX: dragging the body of an already-selected wall moves it directly.
-      if (
-        meta.wallId &&
-        !meta.isWallControl &&
-        !meta.isRoomControl &&
-        !addToSelection &&
-        optionsRef.current.selectedIds.includes(meta.wallId) &&
-        beginControlDrag(
-          {
-            wallId: meta.wallId,
-            controlType: 'wall-center-handle',
-            isWallControl: true,
-          },
-          scenePoint
-        )
-      ) {
-        optionsRef.current.setHoveredElement(meta.wallId);
-        return;
-      }
-
       const clickedId =
         meta.wallId ??
         meta.roomId ??

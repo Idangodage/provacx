@@ -30,7 +30,7 @@ function PresetButton({
     <button
       type="button"
       onClick={onClick}
-      className={`rounded-md border px-1.5 py-1 text-[11px] font-medium transition-colors ${
+      className={`shrink-0 rounded-md border px-1.5 py-1 text-[11px] font-medium transition-colors ${
         active
           ? 'border-amber-400 bg-amber-200 text-amber-900'
           : 'border-amber-200/80 bg-white text-slate-600 hover:bg-amber-50'
@@ -43,9 +43,13 @@ function PresetButton({
 
 export interface AttributeQuickToolbarProps {
   className?: string;
+  keepSpaceWhenHidden?: boolean;
 }
 
-export function AttributeQuickToolbar({ className = '' }: AttributeQuickToolbarProps) {
+export function AttributeQuickToolbar({
+  className = '',
+  keepSpaceWhenHidden = false,
+}: AttributeQuickToolbarProps) {
   const {
     activeTool,
     selectedElementIds,
@@ -65,7 +69,7 @@ export function AttributeQuickToolbar({ className = '' }: AttributeQuickToolbarP
   }, [selectedElementIds, walls]);
 
   const visible = activeTool === 'wall' || Boolean(selectedWall);
-  if (!visible) return null;
+  if (!visible && !keepSpaceWhenHidden) return null;
 
   const currentMaterialId = selectedWall?.properties3D.materialId ?? '';
   const currentHeight = selectedWall?.properties3D.height ?? wallSettings.defaultHeight;
@@ -105,9 +109,13 @@ export function AttributeQuickToolbar({ className = '' }: AttributeQuickToolbarP
     }
   };
 
+  if (!visible) {
+    return <div className={`h-full ${className}`} aria-hidden="true" />;
+  }
+
   return (
-    <div className={`border-b border-amber-200/70 bg-[#fff8e8] px-2 py-1.5 ${className}`}>
-      <div className="flex flex-wrap items-center gap-1.5">
+    <div className={`h-full px-2 ${className}`}>
+      <div className="flex h-full items-center gap-1.5 overflow-x-auto whitespace-nowrap scrollbar-thin scrollbar-thumb-amber-300">
         <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Height</span>
         {HEIGHT_PRESETS.map((heightMm) => (
           <PresetButton
@@ -138,7 +146,7 @@ export function AttributeQuickToolbar({ className = '' }: AttributeQuickToolbarP
             type="button"
             onClick={() => applyMaterial(material.id)}
             title={`${material.name} (${material.defaultThicknessMm}mm, R-${material.thermalResistance})`}
-            className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs transition-colors ${
+            className={`shrink-0 inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs transition-colors ${
               currentMaterialId === material.id
                 ? 'border-amber-400 bg-amber-200 text-amber-900'
                 : 'border-amber-200/80 bg-white text-slate-600 hover:bg-amber-50'

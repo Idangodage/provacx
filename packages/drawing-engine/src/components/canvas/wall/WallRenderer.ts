@@ -1009,6 +1009,57 @@ export class WallRenderer {
     this.previewObjects = [];
   }
 
+  /**
+   * Draw multiple semi-transparent preview walls in one frame.
+   * Used by room tool to preview a full rectangular perimeter before commit.
+   */
+  renderPreviewWalls(
+    segments: Array<{ startPoint: Point2D; endPoint: Point2D }>,
+    thickness: number,
+    material: WallMaterial = 'brick'
+  ): void {
+    this.clearPreviewWall();
+    if (segments.length === 0) return;
+    const materialColors = WALL_MATERIAL_COLORS[material];
+    const hatchPattern =
+      materialColors.pattern === 'hatch' ? this.hatchPatterns.get(material) ?? null : null;
+    const previewFill: string | fabric.Pattern = hatchPattern ?? materialColors.fill;
+
+    for (const segment of segments) {
+      const dx = segment.endPoint.x - segment.startPoint.x;
+      const dy = segment.endPoint.y - segment.startPoint.y;
+      const length = Math.hypot(dx, dy);
+      if (length < 0.1) continue;
+
+      const dirX = dx / length;
+      const dirY = dy / length;
+      const perpX = -dirY;
+      const perpY = dirX;
+      const halfT = thickness / 2;
+
+      const vertices = [
+        this.toCanvasPoint({ x: segment.startPoint.x + perpX * halfT, y: segment.startPoint.y + perpY * halfT }),
+        this.toCanvasPoint({ x: segment.endPoint.x + perpX * halfT, y: segment.endPoint.y + perpY * halfT }),
+        this.toCanvasPoint({ x: segment.endPoint.x - perpX * halfT, y: segment.endPoint.y - perpY * halfT }),
+        this.toCanvasPoint({ x: segment.startPoint.x - perpX * halfT, y: segment.startPoint.y - perpY * halfT }),
+      ];
+
+      const preview = new fabric.Polygon(vertices, {
+        fill: previewFill,
+        stroke: '#6B7280',
+        strokeWidth: this.toSceneSize(1),
+        selectable: false,
+        evented: false,
+        opacity: 0.82,
+      });
+
+      this.canvas.add(preview);
+      this.previewObjects.push(preview);
+    }
+
+    this.canvas.requestRenderAll();
+  }
+
   // ─── Update Wall (improved) ─────────────────────────────────────────────
 
   /**

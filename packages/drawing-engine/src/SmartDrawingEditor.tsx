@@ -1134,10 +1134,8 @@ export function SmartDrawingEditor({
         )}
 
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          <div className="flex items-center gap-1 border-b border-amber-200/70 bg-[#fef9ec] px-2 py-1">
-            <AttributeQuickToolbar className="!px-0 !py-0 !border-0 flex-1" />
-            <div className="h-4 w-px bg-amber-200/80 mx-1" />
-            <div className="flex items-center gap-0.5">
+          <div className="flex h-10 items-center gap-2 border-b border-amber-200/70 bg-[#fef9ec] px-2">
+            <div className="flex shrink-0 items-center gap-0.5">
               <button
                 type="button"
                 onClick={() => setEditorViewMode('plan')}
@@ -1203,6 +1201,10 @@ export function SmartDrawingEditor({
                 <Box size={12} />
                 Iso
               </button>
+            </div>
+            <div className="h-5 w-px shrink-0 bg-amber-200/80" />
+            <div className="min-w-0 flex-1 self-stretch">
+              <AttributeQuickToolbar className="h-full w-full !px-0" keepSpaceWhenHidden />
             </div>
           </div>
 

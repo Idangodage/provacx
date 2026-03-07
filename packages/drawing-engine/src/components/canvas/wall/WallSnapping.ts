@@ -64,6 +64,10 @@ export interface EnhancedSnapResult extends SnapResult {
   snapDistance?: number;
 }
 
+const AUTO_ORTHO_ANGLE_TOLERANCE_DEG = 2.5;
+const AUTO_ORTHO_MIN_LENGTH_MM = 40;
+const AUTO_ORTHO_PIXEL_TOLERANCE = 8;
+
 // =============================================================================
 // Grid Snapping
 // =============================================================================
@@ -73,6 +77,44 @@ export function snapToGrid(point: Point2D, gridSize: number): Point2D {
     x: Math.round(point.x / gridSize) * gridSize,
     y: Math.round(point.y / gridSize) * gridSize,
   };
+}
+
+function applyAutoOrthogonalAssist(
+  rawPoint: Point2D,
+  snappedPoint: Point2D,
+  startPoint: Point2D,
+  settings: WallSettings,
+  zoom: number
+): Point2D {
+  const rawDx = rawPoint.x - startPoint.x;
+  const rawDy = rawPoint.y - startPoint.y;
+  const rawAbsDx = Math.abs(rawDx);
+  const rawAbsDy = Math.abs(rawDy);
+  const major = Math.max(rawAbsDx, rawAbsDy);
+  const minor = Math.min(rawAbsDx, rawAbsDy);
+
+  if (major < AUTO_ORTHO_MIN_LENGTH_MM) return snappedPoint;
+
+  const axisAngleDeg = Math.atan2(minor, major) * (180 / Math.PI);
+  if (axisAngleDeg > AUTO_ORTHO_ANGLE_TOLERANCE_DEG) return snappedPoint;
+
+  const pixelToleranceMm = AUTO_ORTHO_PIXEL_TOLERANCE / Math.max(zoom, 0.01) / MM_TO_PX;
+  const axisToleranceMm = Math.max(pixelToleranceMm, settings.gridSize * 0.35);
+
+  const isVerticalCandidate = rawAbsDy >= rawAbsDx;
+  if (isVerticalCandidate) {
+    const crossAxisDelta = Math.abs(snappedPoint.x - startPoint.x);
+    if (crossAxisDelta <= axisToleranceMm) {
+      return { x: startPoint.x, y: snappedPoint.y };
+    }
+    return snappedPoint;
+  }
+
+  const crossAxisDelta = Math.abs(snappedPoint.y - startPoint.y);
+  if (crossAxisDelta <= axisToleranceMm) {
+    return { x: snappedPoint.x, y: startPoint.y };
+  }
+  return snappedPoint;
 }
 
 // =============================================================================
@@ -276,15 +318,15 @@ export function snapToPerpendicular(
 }
 
 // =============================================================================
-// [NEW] Wall Face Snapping
+// [NEW] Wall Body (Centerline) Snapping
 // =============================================================================
 
 /**
- * Snap to the interior or exterior face of a wall (not just centerline).
- * When starting a new wall from the side of an existing wall, users expect
- * to snap to the visible wall edge, not an invisible centerline.
+ * Snap to the wall BODY via centerline projection (segment interior only).
+ * This avoids endpoint/face-edge drift and keeps new connections aligned to
+ * the true wall axis for clean T-junction joins.
  */
-export function snapToWallFace(
+export function snapToWallBodyCenterline(
   point: Point2D,
   walls: Wall[],
   tolerancePx: number,
@@ -299,27 +341,15 @@ export function snapToWallFace(
   for (const wall of walls) {
     if (wall.id === excludeWallId) continue;
 
-    // Check interior face
-    const intProj = projectPointToSegment(point, wall.interiorLine.start, wall.interiorLine.end);
-    if (intProj.distance < closestDistance && intProj.t > 0.01 && intProj.t < 0.99) {
-      closestDistance = intProj.distance;
+    // Project onto wall centerline and keep only interior segment body.
+    const proj = projectPointToSegment(point, wall.startPoint, wall.endPoint);
+    if (proj.distance < closestDistance && proj.t > 0.02 && proj.t < 0.98) {
+      closestDistance = proj.distance;
       closest = {
-        snappedPoint: intProj.closest,
-        wallId: wall.id,
-        endpoint: 'midpoint', // using midpoint as a generic "on-wall" indicator
-        distance: intProj.distance,
-      };
-    }
-
-    // Check exterior face
-    const extProj = projectPointToSegment(point, wall.exteriorLine.start, wall.exteriorLine.end);
-    if (extProj.distance < closestDistance && extProj.t > 0.01 && extProj.t < 0.99) {
-      closestDistance = extProj.distance;
-      closest = {
-        snappedPoint: extProj.closest,
+        snappedPoint: proj.closest,
         wallId: wall.id,
         endpoint: 'midpoint',
-        distance: extProj.distance,
+        distance: proj.distance,
       };
     }
   }
@@ -441,7 +471,7 @@ function normalizeAngle(angle: number): number {
  * an endpoint 14px away always beat a midpoint 2px away — now the closer
  * snap wins when both are within tolerance.
  *
- * [NEW] Includes extension line, perpendicular, intersection, and wall face snapping.
+ * [NEW] Includes extension line, perpendicular, intersection, and wall-body snapping.
  * [NEW] Returns guideLines for snap indicator rendering.
  *
  * Priority tiers (highest first):
@@ -450,7 +480,7 @@ function normalizeAngle(angle: number): number {
  *   3. Midpoint snap
  *   4. Perpendicular snap (NEW, only when drawing from a startPoint)
  *   5. Extension line snap (NEW)
- *   6. Wall face snap (NEW)
+ *   6. Wall body snap (centerline projection)
  *   7. Angle lock (Shift key)
  *   8. Grid snap
  *
@@ -554,15 +584,21 @@ export function snapWallPoint(
     });
   }
 
-  // 6. Wall face snap (priority 50)
-  const faceSnap = snapToWallFace(point, walls, settings.endpointSnapTolerance * 0.8, zoom, excludeWallId);
-  if (faceSnap) {
+  // 6. Wall body snap on centerline (priority 50)
+  const bodySnap = snapToWallBodyCenterline(
+    point,
+    walls,
+    settings.endpointSnapTolerance * 0.8,
+    zoom,
+    excludeWallId
+  );
+  if (bodySnap) {
     candidates.push({
-      point: faceSnap.snappedPoint,
+      point: bodySnap.snappedPoint,
       type: 'endpoint',
-      wallId: faceSnap.wallId,
-      endpoint: faceSnap.endpoint,
-      distance: faceSnap.distance,
+      wallId: bodySnap.wallId,
+      // Keep endpoint undefined for body snaps so downstream can treat as T-junction.
+      distance: bodySnap.distance,
       priority: 50,
     });
   }
@@ -608,6 +644,12 @@ export function snapWallPoint(
   if (snapType === 'none' && settings.snapToGrid) {
     snappedPoint = snapToGrid(point, settings.gridSize);
     snapType = 'grid';
+  }
+
+  // Auto-orthogonal stabilization for grid-snapped drawing.
+  // Prevents tiny skew in preview/commit when starting from off-grid endpoints.
+  if (startPoint && snapType === 'grid' && settings.snapToGrid) {
+    snappedPoint = applyAutoOrthogonalAssist(point, snappedPoint, startPoint, settings, zoom);
   }
 
   return {
