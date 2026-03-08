@@ -17,6 +17,7 @@
 import * as fabric from 'fabric';
 
 import type { Point2D, Wall, Opening } from '../../../types';
+import { readDoorOpenSide } from '../../../utils/doorSwing';
 import { MM_TO_PX } from '../scale';
 
 // =============================================================================
@@ -126,7 +127,8 @@ function doorGapMask(wall: Wall, opening: Opening): fabric.Polygon {
 function renderSingleSwingDoor(
   wall: Wall,
   opening: Opening,
-  swingDirection: 'left' | 'right' = 'left'
+  swingDirection: 'left' | 'right' = 'left',
+  openSide: 'positive' | 'negative' = 'positive'
 ): OpeningRenderResult {
   const frame = wallLocalFrame(wall);
   const center = openingCenter(wall, opening);
@@ -151,6 +153,7 @@ function renderSingleSwingDoor(
 
   // Door leaf and swing arc start from the wall centerline (mid-thickness).
   const leafPerpOffset = 0;
+  const openSideSign = openSide === 'negative' ? -1 : 1;
 
   // Door leaf in closed position from hinge pivot to opposite jamb.
   const pivotSide = swingDirection === 'left' ? -1 : 1;
@@ -161,7 +164,7 @@ function renderSingleSwingDoor(
   };
   const openEndLocal = {
     x: pivotX,
-    y: leafPerpOffset + opening.width,
+    y: leafPerpOffset + openSideSign * opening.width,
   };
   const leafEndPx = {
     x: (center.x + frame.dir.x * openEndLocal.x + frame.perp.x * openEndLocal.y) * MM_TO_PX,
@@ -185,7 +188,7 @@ function renderSingleSwingDoor(
     const xLocal = pivotSide === -1
       ? pivotX + Math.cos(theta) * opening.width
       : pivotX - Math.cos(theta) * opening.width;
-    const yLocal = leafPerpOffset + Math.sin(theta) * opening.width;
+    const yLocal = leafPerpOffset + openSideSign * Math.sin(theta) * opening.width;
     arcPoints.push({
       x: (center.x + frame.dir.x * xLocal + frame.perp.x * yLocal) * MM_TO_PX,
       y: (center.y + frame.dir.y * xLocal + frame.perp.y * yLocal) * MM_TO_PX,
@@ -215,6 +218,7 @@ function renderSingleSwingDoor(
 function renderDoubleSwingDoor(
   wall: Wall,
   opening: Opening,
+  openSide: 'positive' | 'negative' = 'positive'
 ): OpeningRenderResult {
   const frame = wallLocalFrame(wall);
   const center = openingCenter(wall, opening);
@@ -239,6 +243,7 @@ function renderDoubleSwingDoor(
 
   // Door leaves and arcs start from the wall centerline (mid-thickness).
   const leafPerpOffset = 0;
+  const openSideSign = openSide === 'negative' ? -1 : 1;
 
   // Two leaves, each half-width, both swing to interior
   for (const side of [-1, 1] as const) {
@@ -248,8 +253,8 @@ function renderDoubleSwingDoor(
       y: (center.y + frame.dir.y * pivotOffset + frame.perp.y * leafPerpOffset) * MM_TO_PX,
     };
     const leafEnd = {
-      x: (center.x + frame.dir.x * pivotOffset + frame.perp.x * (leafPerpOffset + halfLeaf)) * MM_TO_PX,
-      y: (center.y + frame.dir.y * pivotOffset + frame.perp.y * (leafPerpOffset + halfLeaf)) * MM_TO_PX,
+      x: (center.x + frame.dir.x * pivotOffset + frame.perp.x * (leafPerpOffset + openSideSign * halfLeaf)) * MM_TO_PX,
+      y: (center.y + frame.dir.y * pivotOffset + frame.perp.y * (leafPerpOffset + openSideSign * halfLeaf)) * MM_TO_PX,
     };
     const leafLine = new fabric.Line([leafStart.x, leafStart.y, leafEnd.x, leafEnd.y], {
       stroke: DOOR_ARC_STROKE,
@@ -269,7 +274,7 @@ function renderDoubleSwingDoor(
       const xLocal = side === -1
         ? pivotOffset + Math.cos(theta) * halfLeaf
         : pivotOffset - Math.cos(theta) * halfLeaf;
-      const yLocal = leafPerpOffset + Math.sin(theta) * halfLeaf;
+      const yLocal = leafPerpOffset + openSideSign * Math.sin(theta) * halfLeaf;
       arcPoints.push({
         x: (center.x + frame.dir.x * xLocal + frame.perp.x * yLocal) * MM_TO_PX,
         y: (center.y + frame.dir.y * xLocal + frame.perp.y * yLocal) * MM_TO_PX,
@@ -739,17 +744,18 @@ export function renderOpening(
   const openingKind = resolveOpeningKind(opening, symbolProps);
   const subType = resolveOpeningSubType(openingKind, symbolProps);
   const swingDirection = (symbolProps?.swingDirection as 'left' | 'right') ?? 'left';
+  const doorOpenSide = readDoorOpenSide(symbolProps);
 
   if (openingKind === 'door') {
     switch (subType) {
       case 'double-swing':
-        return renderDoubleSwingDoor(wall, opening);
+        return renderDoubleSwingDoor(wall, opening, doorOpenSide);
       case 'sliding':
         return renderSlidingDoor(wall, opening);
       case 'bi-fold':
         return renderBifoldDoor(wall, opening);
       default:
-        return renderSingleSwingDoor(wall, opening, swingDirection);
+        return renderSingleSwingDoor(wall, opening, swingDirection, doorOpenSide);
     }
   }
 

@@ -13,6 +13,7 @@ import { useEffect, useRef, useCallback, useMemo, useState } from 'react';
 import type { ArchitecturalObjectDefinition } from '../data';
 import { useSmartDrawingStore } from '../store';
 import type { DisplayUnit, Point2D, SymbolInstance2D, Wall } from '../types';
+import { resolveHostedDoorSwingProperties } from '../utils/doorSwing';
 import { generateId } from '../utils/geometry';
 
 import {
@@ -962,6 +963,79 @@ export function DrawingCanvas({
         [walls, updateWall]
     );
 
+    const buildHostedOpeningSymbolProperties = useCallback(
+        (
+            definition: ArchitecturalObjectDefinition,
+            wall: Wall,
+            positionAlongWallMm: number,
+            sourceProperties: Record<string, unknown>,
+            openingWidthMm: number,
+            openingHeightMm: number,
+            openingSillHeightMm: number,
+        ): Record<string, unknown> => {
+            const nextBaseElevationMm =
+                definition.category === 'windows'
+                    ? (wall.properties3D.baseElevation ?? 0) + openingSillHeightMm
+                    : (wall.properties3D.baseElevation ?? 0);
+            const nextProperties: Record<string, unknown> = {
+                ...sourceProperties,
+                widthMm: openingWidthMm,
+                depthMm: wall.thickness,
+                heightMm: openingHeightMm,
+                hostWallId: wall.id,
+                hostWallThicknessMm: wall.thickness,
+                positionAlongWallMm: positionAlongWallMm,
+                baseElevationMm: nextBaseElevationMm,
+            };
+
+            if (definition.category === 'windows') {
+                nextProperties.sillHeightMm = openingSillHeightMm;
+            }
+
+            if (definition.category === 'doors') {
+                Object.assign(
+                    nextProperties,
+                    resolveHostedDoorSwingProperties(
+                        wall,
+                        positionAlongWallMm,
+                        openingWidthMm,
+                        rooms,
+                        nextProperties
+                    )
+                );
+            }
+
+            return nextProperties;
+        },
+        [rooms]
+    );
+
+    const buildOpeningPreviewProperties = useCallback(
+        (
+            definition: ArchitecturalObjectDefinition,
+            snappedWall?: { wall: Wall; positionAlongWall: number } | null
+        ): Record<string, unknown> | undefined => {
+            if (definition.category !== 'doors' || !snappedWall) {
+                return undefined;
+            }
+
+            return {
+                type: definition.type,
+                swingDirection: 'left',
+                doorSwingBehavior: 'inward',
+                doorHingeMode: 'auto-corner',
+                ...resolveHostedDoorSwingProperties(
+                    snappedWall.wall,
+                    snappedWall.positionAlongWall,
+                    definition.openingWidthMm ?? definition.widthMm,
+                    rooms,
+                    { swingDirection: 'left', doorSwingBehavior: 'inward', doorHingeMode: 'auto-corner' }
+                ),
+            };
+        },
+        [rooms]
+    );
+
     const placePendingObject = useCallback((point: Point2D): boolean => {
         if (!pendingPlacementDefinition) return false;
         const placement = computePlacement(point, pendingPlacementDefinition);
@@ -979,39 +1053,56 @@ export function DrawingCanvas({
             return true;
         }
 
+        const baseProperties: Record<string, unknown> = {
+            definitionId: pendingPlacementDefinition.id,
+            category: pendingPlacementDefinition.category,
+            type: pendingPlacementDefinition.type,
+            widthMm:
+                (pendingPlacementDefinition.category === 'doors' || pendingPlacementDefinition.category === 'windows') &&
+                    placement.snappedWall
+                    ? (pendingPlacementDefinition.openingWidthMm ?? pendingPlacementDefinition.widthMm)
+                    : pendingPlacementDefinition.widthMm,
+            depthMm:
+                (pendingPlacementDefinition.category === 'doors' || pendingPlacementDefinition.category === 'windows') &&
+                    placement.snappedWall
+                    ? placement.snappedWall.wall.thickness
+                    : pendingPlacementDefinition.depthMm,
+            heightMm: pendingPlacementDefinition.heightMm,
+            baseElevationMm:
+                pendingPlacementDefinition.category === 'windows'
+                    ? ((placement.snappedWall?.wall.properties3D.baseElevation ?? 0) +
+                        (pendingPlacementDefinition.sillHeightMm ?? 900))
+                    : (placement.snappedWall?.wall.properties3D.baseElevation ?? 0),
+            material: pendingPlacementDefinition.material,
+            swingDirection: 'left',
+            doorSwingBehavior: pendingPlacementDefinition.category === 'doors' ? 'inward' : undefined,
+            doorHingeMode: pendingPlacementDefinition.category === 'doors' ? 'auto-corner' : undefined,
+            hostWallId: placement.snappedWall?.wall.id,
+            hostWallThicknessMm: placement.snappedWall?.wall.thickness,
+            positionAlongWallMm: placement.snappedWall?.positionAlongWall,
+            placedAt: new Date().toISOString(),
+        };
+        const resolvedProperties =
+            (pendingPlacementDefinition.category === 'doors' || pendingPlacementDefinition.category === 'windows') &&
+                placement.snappedWall
+                ? buildHostedOpeningSymbolProperties(
+                    pendingPlacementDefinition,
+                    placement.snappedWall.wall,
+                    placement.snappedWall.positionAlongWall,
+                    baseProperties,
+                    pendingPlacementDefinition.openingWidthMm ?? pendingPlacementDefinition.widthMm,
+                    pendingPlacementDefinition.heightMm,
+                    pendingPlacementDefinition.sillHeightMm ?? 900
+                )
+                : baseProperties;
+
         const symbolPayload: Omit<SymbolInstance2D, 'id'> = {
             symbolId: pendingPlacementDefinition.id,
             position: placement.point,
             rotation: placement.rotationDeg,
             scale: 1,
             flipped: false,
-            properties: {
-                definitionId: pendingPlacementDefinition.id,
-                category: pendingPlacementDefinition.category,
-                type: pendingPlacementDefinition.type,
-                widthMm:
-                    (pendingPlacementDefinition.category === 'doors' || pendingPlacementDefinition.category === 'windows') &&
-                        placement.snappedWall
-                        ? (pendingPlacementDefinition.openingWidthMm ?? pendingPlacementDefinition.widthMm)
-                        : pendingPlacementDefinition.widthMm,
-                depthMm:
-                    (pendingPlacementDefinition.category === 'doors' || pendingPlacementDefinition.category === 'windows') &&
-                        placement.snappedWall
-                        ? placement.snappedWall.wall.thickness
-                        : pendingPlacementDefinition.depthMm,
-                heightMm: pendingPlacementDefinition.heightMm,
-                baseElevationMm:
-                    pendingPlacementDefinition.category === 'windows'
-                        ? ((placement.snappedWall?.wall.properties3D.baseElevation ?? 0) +
-                            (pendingPlacementDefinition.sillHeightMm ?? 900))
-                        : (placement.snappedWall?.wall.properties3D.baseElevation ?? 0),
-                material: pendingPlacementDefinition.material,
-                swingDirection: 'left',
-                hostWallId: placement.snappedWall?.wall.id,
-                hostWallThicknessMm: placement.snappedWall?.wall.thickness,
-                positionAlongWallMm: placement.snappedWall?.positionAlongWall,
-                placedAt: new Date().toISOString(),
-            },
+            properties: resolvedProperties,
         };
         const symbolId = addSymbol(symbolPayload);
         const placedInstance: SymbolInstance2D = { ...symbolPayload, id: symbolId };
@@ -1035,6 +1126,7 @@ export function DrawingCanvas({
         return true;
     }, [
         pendingPlacementDefinition,
+        buildHostedOpeningSymbolProperties,
         computePlacement,
         addSymbol,
         setSelectedIds,
@@ -1248,23 +1340,15 @@ export function DrawingCanvas({
                 y: wall.startPoint.y + dy * t,
             };
             const nextRotation = (Math.atan2(dy, dx) * 180) / Math.PI;
-            const nextBaseElevationMm =
-                definition.category === 'windows'
-                    ? (wall.properties3D.baseElevation ?? 0) + openingSillHeightMm
-                    : (wall.properties3D.baseElevation ?? 0);
-            const nextProperties: Record<string, unknown> = {
-                ...instance.properties,
-                widthMm: openingWidthMm,
-                depthMm: wall.thickness,
-                heightMm: openingHeightMm,
-                hostWallId: wall.id,
-                hostWallThicknessMm: wall.thickness,
-                positionAlongWallMm: positionAlongWallMm,
-                baseElevationMm: nextBaseElevationMm,
-            };
-            if (definition.category === 'windows') {
-                nextProperties.sillHeightMm = openingSillHeightMm;
-            }
+            const nextProperties = buildHostedOpeningSymbolProperties(
+                definition,
+                wall,
+                positionAlongWallMm,
+                instance.properties,
+                openingWidthMm,
+                openingHeightMm,
+                openingSillHeightMm
+            );
             updateSymbol(
                 instance.id,
                 {
@@ -1275,7 +1359,7 @@ export function DrawingCanvas({
                 options
             );
         },
-        [updateSymbol]
+        [buildHostedOpeningSymbolProperties, updateSymbol]
     );
 
     const updateOpeningPointerInteraction = useCallback(
@@ -1710,6 +1794,7 @@ export function DrawingCanvas({
         updateSymbol(instance.id, {
             properties: {
                 ...instance.properties,
+                doorHingeMode: 'manual',
                 swingDirection: next,
             },
         });
@@ -1744,20 +1829,15 @@ export function DrawingCanvas({
                 }
 
                 const snappedWall = placement.snappedWall.wall;
-                const nextProperties = {
-                    ...instance.properties,
-                    widthMm: openingWidthMm,
-                    depthMm: snappedWall.thickness,
-                    heightMm: openingHeightMm,
-                    baseElevationMm:
-                        definition.category === 'windows'
-                            ? ((snappedWall.properties3D.baseElevation ?? 0) +
-                                openingSillHeightMm)
-                            : (snappedWall.properties3D.baseElevation ?? 0),
-                    hostWallId: snappedWall.id,
-                    hostWallThicknessMm: snappedWall.thickness,
-                    positionAlongWallMm: placement.snappedWall.positionAlongWall,
-                };
+                const nextProperties = buildHostedOpeningSymbolProperties(
+                    definition,
+                    snappedWall,
+                    placement.snappedWall.positionAlongWall,
+                    instance.properties,
+                    openingWidthMm,
+                    openingHeightMm,
+                    openingSillHeightMm
+                );
 
                 syncOpeningForSymbol(instance.id, definition, {
                     wall: snappedWall,
@@ -1788,6 +1868,7 @@ export function DrawingCanvas({
         selectedIds,
         symbols,
         objectDefinitionsById,
+        buildHostedOpeningSymbolProperties,
         computePlacement,
         syncOpeningForSymbol,
         resolveOpeningWidthMm,
@@ -2391,20 +2472,15 @@ export function DrawingCanvas({
                 definition.category === 'windows'
                     ? (wall.properties3D.baseElevation ?? 0) + nextSillHeightMm
                     : (wall.properties3D.baseElevation ?? 0);
-
-            const nextProperties: Record<string, unknown> = {
-                ...instance.properties,
-                widthMm: nextWidthMm,
-                depthMm: wall.thickness,
-                heightMm: nextHeightMm,
-                hostWallId: wall.id,
-                hostWallThicknessMm: wall.thickness,
-                positionAlongWallMm: opening.position,
-                baseElevationMm: nextBaseElevationMm,
-            };
-            if (definition.category === 'windows') {
-                nextProperties.sillHeightMm = nextSillHeightMm;
-            }
+            const nextProperties = buildHostedOpeningSymbolProperties(
+                definition,
+                wall,
+                opening.position,
+                instance.properties,
+                nextWidthMm,
+                nextHeightMm,
+                nextSillHeightMm
+            );
 
             const properties = instance.properties ?? {};
             const changed =
@@ -2417,6 +2493,7 @@ export function DrawingCanvas({
                 Math.abs(Number(properties.positionAlongWallMm ?? 0) - opening.position) > 0.01 ||
                 String(properties.hostWallId ?? '') !== wall.id ||
                 Math.abs(Number(properties.baseElevationMm ?? 0) - nextBaseElevationMm) > 0.01 ||
+                String(properties.doorOpenSide ?? '') !== String(nextProperties.doorOpenSide ?? '') ||
                 (definition.category === 'windows' &&
                     Math.abs(Number(properties.sillHeightMm ?? 0) - nextSillHeightMm) > 0.01);
 
@@ -2436,6 +2513,7 @@ export function DrawingCanvas({
         walls,
         symbols,
         objectDefinitionsById,
+        buildHostedOpeningSymbolProperties,
         fitOpeningToWall,
         resolveOpeningSillHeightMm,
         updateWall,
@@ -2618,9 +2696,16 @@ export function DrawingCanvas({
                     wall: placement.snappedWall.wall,
                     positionAlongWall: placement.snappedWall.positionAlongWall,
                 } : null,
+                buildOpeningPreviewProperties(
+                    pendingPlacementDefinition,
+                    placement.snappedWall ? {
+                        wall: placement.snappedWall.wall,
+                        positionAlongWall: placement.snappedWall.positionAlongWall,
+                    } : null
+                ),
             );
         }
-    }, [pendingPlacementDefinition, computePlacement]);
+    }, [pendingPlacementDefinition, buildOpeningPreviewProperties, computePlacement]);
 
     useEffect(() => {
         if (!pendingPlacementDefinition || !placementCursorRef.current) return;
@@ -2635,8 +2720,15 @@ export function DrawingCanvas({
                 wall: placement.snappedWall.wall,
                 positionAlongWall: placement.snappedWall.positionAlongWall,
             } : null,
+            buildOpeningPreviewProperties(
+                pendingPlacementDefinition,
+                placement.snappedWall ? {
+                    wall: placement.snappedWall.wall,
+                    positionAlongWall: placement.snappedWall.positionAlongWall,
+                } : null
+            ),
         );
-    }, [pendingPlacementDefinition, placementRotationDeg, computePlacement]);
+    }, [pendingPlacementDefinition, placementRotationDeg, buildOpeningPreviewProperties, computePlacement]);
 
     useEffect(() => { canvasStateRef.current = canvasState; }, [canvasState]);
 
@@ -2960,6 +3052,13 @@ export function DrawingCanvas({
                         wall: placement.snappedWall.wall,
                         positionAlongWall: placement.snappedWall.positionAlongWall,
                     } : null,
+                    buildOpeningPreviewProperties(
+                        pendingPlacementDefinition,
+                        placement.snappedWall ? {
+                            wall: placement.snappedWall.wall,
+                            positionAlongWall: placement.snappedWall.positionAlongWall,
+                        } : null
+                    ),
                 );
                 return;
             }
@@ -3855,20 +3954,15 @@ export function DrawingCanvas({
                         const snappedWall = placement.snappedWall.wall;
                         const nextRotation = placement.rotationDeg;
                         const nextPosition = placement.point;
-                        const nextProperties = {
-                            ...existing.properties,
-                            widthMm: openingWidthMm,
-                            depthMm: snappedWall.thickness,
-                            heightMm: openingHeightMm,
-                            baseElevationMm:
-                                definition.category === 'windows'
-                                    ? ((snappedWall.properties3D.baseElevation ?? 0) +
-                                        openingSillHeightMm)
-                                    : (snappedWall.properties3D.baseElevation ?? 0),
-                            hostWallId: snappedWall.id,
-                            hostWallThicknessMm: snappedWall.thickness,
-                            positionAlongWallMm: placement.snappedWall.positionAlongWall,
-                        };
+                        const nextProperties = buildHostedOpeningSymbolProperties(
+                            definition,
+                            snappedWall,
+                            placement.snappedWall.positionAlongWall,
+                            existing.properties,
+                            openingWidthMm,
+                            openingHeightMm,
+                            openingSillHeightMm
+                        );
 
                         syncOpeningForSymbol(objectId, definition, {
                             wall: snappedWall,
@@ -3895,7 +3989,8 @@ export function DrawingCanvas({
                             Math.abs(
                                 Number(existing.properties?.positionAlongWallMm ?? 0) -
                                 Number(nextProperties.positionAlongWallMm ?? 0)
-                            ) > 0.01;
+                            ) > 0.01 ||
+                            String(existing.properties?.doorOpenSide ?? '') !== String(nextProperties.doorOpenSide ?? '');
 
                         if (changed) {
                             updateSymbol(objectId, {

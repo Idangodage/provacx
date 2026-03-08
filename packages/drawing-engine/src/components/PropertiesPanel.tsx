@@ -629,6 +629,8 @@ function ObjectSection({ propertyUnit }: { propertyUnit: PropertyUnit }) {
   const heightMm = propertyAsNumber(selectedObject.properties, 'heightMm', 0);
   const sillHeightMm = propertyAsNumber(selectedObject.properties, 'sillHeightMm', 900);
   const swingDirection = propertyAsString(selectedObject.properties, 'swingDirection', 'left');
+  const doorHingeMode = propertyAsString(selectedObject.properties, 'doorHingeMode', 'manual');
+  const doorSwingBehavior = propertyAsString(selectedObject.properties, 'doorSwingBehavior', 'inward');
   const hostWallId = propertyAsString(selectedObject.properties, 'hostWallId', '');
   const positionAlongWallMm = propertyAsNumber(selectedObject.properties, 'positionAlongWallMm', NaN);
   const isDoor = category === 'doors';
@@ -928,15 +930,48 @@ function ObjectSection({ propertyUnit }: { propertyUnit: PropertyUnit }) {
         <span className="text-xs text-slate-500">&deg;</span>
       </PropertyRow>
       {category === 'doors' && (
+        <PropertyRow label="Opening">
+          <button
+            type="button"
+            onClick={() => updateProperty('doorSwingBehavior', doorSwingBehavior === 'outward' ? 'inward' : 'outward')}
+            className="rounded border border-amber-200/80 bg-white px-2 py-1 text-xs text-slate-700 hover:bg-amber-50"
+          >
+            {doorSwingBehavior === 'outward' ? 'Outward' : 'Inward'}
+          </button>
+        </PropertyRow>
+      )}
+      {category === 'doors' && (
+        <PropertyRow label="Hinge Mode">
+          <button
+            type="button"
+            onClick={() => updateProperty('doorHingeMode', doorHingeMode === 'auto-corner' ? 'manual' : 'auto-corner')}
+            className="rounded border border-amber-200/80 bg-white px-2 py-1 text-xs text-slate-700 hover:bg-amber-50"
+          >
+            {doorHingeMode === 'auto-corner' ? 'Auto Corner' : 'Manual'}
+          </button>
+        </PropertyRow>
+      )}
+      {category === 'doors' && (
         <PropertyRow label="Swing">
           <button
             type="button"
-            onClick={() => updateProperty('swingDirection', swingDirection === 'right' ? 'left' : 'right')}
+            onClick={() => updateSymbol(selectedObject.id, {
+              properties: {
+                ...selectedObject.properties,
+                doorHingeMode: 'manual',
+                swingDirection: swingDirection === 'right' ? 'left' : 'right',
+              },
+            })}
             className="rounded border border-amber-200/80 bg-white px-2 py-1 text-xs text-slate-700 hover:bg-amber-50"
           >
             {swingDirection === 'right' ? 'Right-Hand' : 'Left-Hand'}
           </button>
         </PropertyRow>
+      )}
+      {category === 'doors' && (
+        <p className="text-[11px] text-slate-500">
+          Inward opening plus Auto Corner hinge is the recommended setup. Auto Corner places the hinge near the nearest wall corner for typical room-entry layout; manual hand override is still available.
+        </p>
       )}
     </div>
   );

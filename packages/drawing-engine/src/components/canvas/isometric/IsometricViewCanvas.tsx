@@ -10,7 +10,7 @@ import type { ArchitecturalObjectDefinition } from '../../../data';
 import type { HvacElement, Point2D, Room, SymbolInstance2D, Wall } from '../../../types';
 import { computeWallJoinMap } from '../wall/WallJoinNetwork';
 import { computeWallUnionRenderData } from '../wall/WallUnionGeometry';
-import { createWallOpenings3D } from './Opening3DRenderer';
+import { createWallOpenings3D, type OpeningRenderOptions } from './Opening3DRenderer';
 
 const VIEW_MARGIN = 1.14;
 const EPSILON = 0.001;
@@ -892,6 +892,21 @@ export function IsometricViewCanvas({
     () => new Map(objectDefinitions.map((definition) => [definition.id, definition])),
     [objectDefinitions]
   );
+  const openingRenderOptionsById = useMemo<Record<string, OpeningRenderOptions>>(() => {
+    const options: Record<string, OpeningRenderOptions> = {};
+    symbols.forEach((instance) => {
+      const definition = definitionsById.get(instance.symbolId) ?? definitionFallback(instance.symbolId);
+      if (definition.category !== 'doors') {
+        return;
+      }
+
+      options[instance.id] = {
+        swingDirection: instance.properties?.swingDirection === 'right' ? 'right' : 'left',
+        openSide: instance.properties?.doorOpenSide === 'negative' ? 'negative' : 'positive',
+      };
+    });
+    return options;
+  }, [definitionsById, symbols]);
   const wallsById = useMemo(() => new Map(walls.map((wall) => [wall.id, wall])), [walls]);
   const allJoinsMap = useMemo(() => computeWallJoinMap(walls), [walls]);
   const wallBands = useMemo(
@@ -1209,7 +1224,7 @@ export function IsometricViewCanvas({
         return;
       }
 
-      const openingsGroup = createWallOpenings3D(wall);
+      const openingsGroup = createWallOpenings3D(wall, openingRenderOptionsById);
       if (openingsGroup.children.length === 0) {
         return;
       }
@@ -1375,7 +1390,7 @@ export function IsometricViewCanvas({
     }
     controls.update();
     renderRequestedRef.current = true;
-  }, [definitionsById, hvacElements, rooms, symbols, wallBands, walls, wallsById]);
+  }, [definitionsById, hvacElements, openingRenderOptionsById, rooms, symbols, wallBands, walls, wallsById]);
 
   return (
     <div

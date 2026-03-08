@@ -167,6 +167,11 @@ interface WallFrame {
   thickness: number;
 }
 
+export type OpeningRenderOptions = {
+  swingDirection?: 'left' | 'right';
+  openSide?: 'positive' | 'negative';
+};
+
 function getWallFrame(wall: Wall): WallFrame {
   const dx = wall.endPoint.x - wall.startPoint.x;
   const dy = wall.endPoint.y - wall.startPoint.y;
@@ -196,6 +201,7 @@ function openingWorldCenter(wall: Wall, opening: Opening): THREE.Vector3 {
 function createDoor3D(
   wall: Wall,
   opening: Opening,
+  options?: OpeningRenderOptions,
 ): THREE.Group {
   const group = new THREE.Group();
   const wf = getWallFrame(wall);
@@ -206,6 +212,8 @@ function createDoor3D(
   const frameDepth = wall.thickness;
   // Frame must be thick enough to be visible from isometric distance
   const frameThick = Math.max(60, wall.thickness * 0.25);
+  const hingeSign = options?.swingDirection === 'right' ? 1 : -1;
+  const openSideSign = options?.openSide === 'negative' ? -1 : 1;
 
   const frameTexture = createWoodGrainTexture(128, 256, DOOR_FRAME_COLOR, '#2a1808');
   const frameMaterial = new THREE.MeshStandardMaterial({
@@ -262,15 +270,15 @@ function createDoor3D(
 
   // Pivot around hinge edge, ~15 degrees open
   const pivotGroup = new THREE.Group();
-  pivotGroup.position.set(-halfW + frameThick, 0, 0);
-  leaf.position.set(leafWidth / 2, 0, baseZ + leafHeight / 2 + 5);
+  pivotGroup.position.set(hingeSign * (halfW - frameThick), 0, 0);
+  leaf.position.set(-hingeSign * (leafWidth / 2), 0, baseZ + leafHeight / 2 + 5);
   pivotGroup.add(leaf);
-  pivotGroup.rotation.z = 0.26;
+  pivotGroup.rotation.z = openSideSign * hingeSign * -0.26;
   group.add(pivotGroup);
 
   // Handle — oversized for visibility
   const handleZ = baseZ + doorHeight * 0.45;
-  const handleX = leafWidth * 0.7;
+  const handleX = -hingeSign * leafWidth * 0.7;
   const handleMat = new THREE.MeshStandardMaterial({
     color: DOOR_HANDLE_COLOR,
     roughness: 0.2,
@@ -479,10 +487,17 @@ export function createOpening3D(wall: Wall, opening: Opening): THREE.Group {
 /**
  * Create 3D geometry for all openings in a wall.
  */
-export function createWallOpenings3D(wall: Wall): THREE.Group {
+export function createWallOpenings3D(
+  wall: Wall,
+  optionsByOpeningId?: Record<string, OpeningRenderOptions>,
+  openingsOverride?: Opening[]
+): THREE.Group {
   const group = new THREE.Group();
-  for (const opening of wall.openings) {
-    const openingMesh = createOpening3D(wall, opening);
+  const openings = openingsOverride ?? wall.openings;
+  for (const opening of openings) {
+    const openingMesh = opening.type === 'door'
+      ? createDoor3D(wall, opening, optionsByOpeningId?.[opening.id])
+      : createWindow3D(wall, opening);
     group.add(openingMesh);
   }
   return group;

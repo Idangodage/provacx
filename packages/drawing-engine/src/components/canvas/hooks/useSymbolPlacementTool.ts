@@ -309,6 +309,8 @@ export function useSymbolPlacementTool({
             : (state.snappedWall?.wall.properties3D.baseElevation ?? 0),
         material: definition.material,
         swingDirection: 'left',
+        doorSwingBehavior: definition.category === 'doors' ? 'inward' : undefined,
+        doorHingeMode: definition.category === 'doors' ? 'auto-corner' : undefined,
         hostWallId: state.snappedWall?.wall.id,
         hostWallThicknessMm: state.snappedWall?.wall.thickness,
         positionAlongWallMm: state.snappedWall?.positionAlongWall,

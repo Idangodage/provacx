@@ -181,6 +181,7 @@ function quarterArc(
 function doorGraphics(
   definition: ArchitecturalObjectDefinition,
   swingDirectionRaw: unknown,
+  doorOpenSideRaw: unknown,
   widthPx: number,
   depthPx: number,
   stroke: string
@@ -194,6 +195,7 @@ function doorGraphics(
   const leafY = -jambHalf;
   const objects: fabric.FabricObject[] = [...openingWallStubs(openingWidth, depthPx, stroke, isError)];
   const swingDirection = swingDirectionRaw === 'right' ? 'right' : 'left';
+  const openSideSign = doorOpenSideRaw === 'negative' ? -1 : 1;
 
   if (definition.type === 'sliding') {
     const trackOffset = Math.max(2, jambHalf * 0.45);
@@ -240,9 +242,17 @@ function doorGraphics(
     const halfLeaf = openingWidth / 2;
     const leftPivotX = -halfW;
     const rightPivotX = halfW;
-    objects.push(makeLine([leftPivotX, leafY, leftPivotX, leafY + halfLeaf], arcStroke, DOOR_ARC_STROKE_WIDTH, undefined, true));
-    objects.push(makeLine([rightPivotX, leafY, rightPivotX, leafY + halfLeaf], arcStroke, DOOR_ARC_STROKE_WIDTH, undefined, true));
-    objects.push(new fabric.Polyline(quarterArc(leftPivotX, leafY, halfLeaf, 'left'), {
+    objects.push(makeLine([leftPivotX, leafY, leftPivotX, leafY + openSideSign * halfLeaf], arcStroke, DOOR_ARC_STROKE_WIDTH, undefined, true));
+    objects.push(makeLine([rightPivotX, leafY, rightPivotX, leafY + openSideSign * halfLeaf], arcStroke, DOOR_ARC_STROKE_WIDTH, undefined, true));
+    const leftArc = quarterArc(leftPivotX, leafY, halfLeaf, 'left').map((point) => ({
+      x: point.x,
+      y: leafY + openSideSign * (point.y - leafY),
+    }));
+    const rightArc = quarterArc(rightPivotX, leafY, halfLeaf, 'right').map((point) => ({
+      x: point.x,
+      y: leafY + openSideSign * (point.y - leafY),
+    }));
+    objects.push(new fabric.Polyline(leftArc, {
       fill: 'transparent',
       stroke: arcStroke,
       strokeWidth: DOOR_ARC_STROKE_WIDTH,
@@ -253,7 +263,7 @@ function doorGraphics(
       selectable: false,
       evented: false,
     }));
-    objects.push(new fabric.Polyline(quarterArc(rightPivotX, leafY, halfLeaf, 'right'), {
+    objects.push(new fabric.Polyline(rightArc, {
       fill: 'transparent',
       stroke: arcStroke,
       strokeWidth: DOOR_ARC_STROKE_WIDTH,
@@ -268,9 +278,13 @@ function doorGraphics(
   }
 
   const pivotX = swingDirection === 'left' ? -halfW : halfW;
-  objects.push(makeLine([pivotX, leafY, pivotX, leafY + openingWidth], arcStroke, DOOR_ARC_STROKE_WIDTH, undefined, true));
+  objects.push(makeLine([pivotX, leafY, pivotX, leafY + openSideSign * openingWidth], arcStroke, DOOR_ARC_STROKE_WIDTH, undefined, true));
+  const arcPoints = quarterArc(pivotX, leafY, openingWidth, swingDirection).map((point) => ({
+    x: point.x,
+    y: leafY + openSideSign * (point.y - leafY),
+  }));
   objects.push(new fabric.Polyline(
-    quarterArc(pivotX, leafY, openingWidth, swingDirection),
+    arcPoints,
     {
       fill: 'transparent',
       stroke: arcStroke,
@@ -386,7 +400,8 @@ function graphicsForDefinition(
 ): fabric.FabricObject[] {
   if (definition.category === 'doors') {
     const swingDirection = instance.properties?.swingDirection;
-    return doorGraphics(definition, swingDirection, widthPx, depthPx, stroke);
+    const doorOpenSide = instance.properties?.doorOpenSide;
+    return doorGraphics(definition, swingDirection, doorOpenSide, widthPx, depthPx, stroke);
   }
   if (definition.category === 'windows') {
     return windowGraphics(definition, widthPx, depthPx, stroke);
@@ -656,6 +671,7 @@ export class ObjectRenderer {
     rotationDeg: number,
     valid: boolean,
     snappedWall?: { wall: Wall; positionAlongWall: number } | null,
+    previewProperties?: Record<string, unknown>,
   ): void {
     this.clearPlacementPreview();
 
@@ -676,7 +692,7 @@ export class ObjectRenderer {
       const previewObjects = renderOpeningPreview(
         snappedWall.wall,
         previewOpening,
-        { type: definition.type, swingDirection: 'left' },
+        { type: definition.type, swingDirection: 'left', ...previewProperties },
       );
 
       if (previewObjects.length > 0) {
