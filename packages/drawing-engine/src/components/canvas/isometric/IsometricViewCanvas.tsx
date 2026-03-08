@@ -40,6 +40,8 @@ type WallBand = {
   height: number;
   palette: WallPalette;
   name: string;
+  showOutline?: boolean;
+  showTopCap?: boolean;
 };
 
 type OpeningSpan = {
@@ -538,6 +540,8 @@ function buildUnifiedWallBands(
             height: wallH,
             palette: pal,
             name: baseName,
+            showOutline: true,
+            showTopCap: true,
           });
           return;
         }
@@ -569,6 +573,8 @@ function buildUnifiedWallBands(
               height: bH,
               palette: pal,
               name: `${baseName}-b${i}`,
+              showOutline: bTop >= wallTop - EPSILON,
+              showTopCap: bTop >= wallTop - EPSILON,
             });
           } else {
             const holes = active.map(({ wall, span }) => openingHoleRectWorld(wall, span));
@@ -580,6 +586,8 @@ function buildUnifiedWallBands(
                 height: bH,
                 palette: pal,
                 name: `${baseName}-b${i}-r${rIdx}`,
+                showOutline: bTop >= wallTop - EPSILON,
+                showTopCap: bTop >= wallTop - EPSILON,
               });
             });
           }
@@ -635,7 +643,9 @@ function createWallMesh(
   polygon: Point2D[][],
   baseElevation: number,
   height: number,
-  palette: WallPalette
+  palette: WallPalette,
+  showOutline = true,
+  showTopCap = true
 ): THREE.Group | null {
   const shape = buildShapeFromPolygon(polygon);
   if (!shape || height <= EPSILON) {
@@ -652,10 +662,12 @@ function createWallMesh(
   geometry.translate(0, 0, baseElevation);
   geometry.computeVertexNormals();
 
+  // Use side-colored extrusion caps so intermediate opening bands do not
+  // read as bright horizontal seams across the wall face.
   const capMaterial = new THREE.MeshStandardMaterial({
-    color: palette.top,
-    roughness: 0.96,
-    metalness: 0.01,
+    color: palette.side,
+    roughness: 0.98,
+    metalness: 0,
   });
   const sideMaterial = new THREE.MeshStandardMaterial({
     color: palette.side,
@@ -664,6 +676,26 @@ function createWallMesh(
   });
   const mesh = new THREE.Mesh(geometry, [capMaterial, sideMaterial]);
   group.add(mesh);
+
+  if (showTopCap) {
+    const topGeometry = new THREE.ShapeGeometry(shape);
+    const topMaterial = new THREE.MeshStandardMaterial({
+      color: palette.top,
+      roughness: 0.96,
+      metalness: 0.01,
+      side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    });
+    const topCap = new THREE.Mesh(topGeometry, topMaterial);
+    topCap.position.z = baseElevation + height + 0.4;
+    group.add(topCap);
+  }
+
+  if (!showOutline) {
+    return group;
+  }
 
   polygon.forEach((ring, ringIndex) => {
     const points = sanitizeRing(ring);
@@ -850,6 +882,7 @@ export function IsometricViewCanvas({
   const sizeRef = useRef(DEFAULT_EMPTY_SIZE);
   const renderRequestedRef = useRef(true);
   const hasAutoFitRef = useRef(false);
+  const isInteractingRef = useRef(false);
   const [containerSize, setContainerSize] = useState(DEFAULT_EMPTY_SIZE);
   const [screenLabels, setScreenLabels] = useState<ScreenLabel[]>([]);
   const [isEmpty, setIsEmpty] = useState(false);
@@ -879,7 +912,9 @@ export function IsometricViewCanvas({
       updateCameraClipping(camera, box);
     }
     renderer.render(scene, camera);
-    setScreenLabels(projectLabels(labelAnchorsRef.current, camera, width, height));
+    if (!isInteractingRef.current) {
+      setScreenLabels(projectLabels(labelAnchorsRef.current, camera, width, height));
+    }
   }, []);
 
   const resetView = useCallback(() => {
@@ -970,8 +1005,7 @@ export function IsometricViewCanvas({
     camera.up.set(0, 0, 1);
 
     const controls = new OrbitControls(camera, canvas);
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.08;
+    controls.enableDamping = false;
     controls.enablePan = true;
     controls.enableRotate = true;
     controls.enableZoom = true;
@@ -1017,10 +1051,16 @@ export function IsometricViewCanvas({
     canvas.addEventListener('contextmenu', preventContextMenu);
 
     controls.addEventListener('start', () => {
+      isInteractingRef.current = true;
       canvas.style.cursor = 'grabbing';
+      setScreenLabels([]);
+      renderRequestedRef.current = true;
+    });
+    controls.addEventListener('change', () => {
       renderRequestedRef.current = true;
     });
     controls.addEventListener('end', () => {
+      isInteractingRef.current = false;
       canvas.style.cursor = 'grab';
       renderRequestedRef.current = true;
     });
@@ -1037,7 +1077,7 @@ export function IsometricViewCanvas({
     let frameId = 0;
     const animate = () => {
       const changed = controls.update();
-      if (changed || renderRequestedRef.current) {
+      if (changed || renderRequestedRef.current || isInteractingRef.current) {
         renderRequestedRef.current = false;
         renderViewport();
       }
@@ -1145,7 +1185,14 @@ export function IsometricViewCanvas({
     // all walls (including those with openings) into continuous corner
     // geometry. Openings are punched as holes in the appropriate height bands.
     wallBands.forEach((band) => {
-      const wallMesh = createWallMesh(band.polygon, band.baseElevation, band.height, band.palette);
+      const wallMesh = createWallMesh(
+        band.polygon,
+        band.baseElevation,
+        band.height,
+        band.palette,
+        band.showOutline ?? true,
+        band.showTopCap ?? true
+      );
       if (wallMesh) {
         wallMesh.name = band.name;
         geometryRoot.add(wallMesh);
