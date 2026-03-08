@@ -677,8 +677,11 @@ function unionWallComponent(
   };
 }
 
-export function computeWallUnionRenderData(walls: Wall[]): WallUnionRenderData {
-  const joinsMap = computeWallJoinMap(walls);
+export function computeWallUnionRenderData(
+  walls: Wall[],
+  precomputedJoinsMap?: Map<string, JoinData[]>
+): WallUnionRenderData {
+  const joinsMap = precomputedJoinsMap ?? computeWallJoinMap(walls);
   const wallsById = new Map(walls.map((wall) => [wall.id, wall]));
   const components = buildConnectedComponents(walls, joinsMap)
     .map((wallIds, index) => {
@@ -698,4 +701,54 @@ export function computeWallUnionRenderData(walls: Wall[]): WallUnionRenderData {
     joinsMap,
     components,
   };
+}
+
+/**
+ * Compute junction (corner) patch polygons for all nodes where 2+ walls meet.
+ * Each patch is a 2D polygon that fills the gap between wall endpoints at a junction.
+ * Returns the polygon vertices and the IDs of walls participating in each junction.
+ */
+export function computeJunctionPatchPolygons(
+  walls: Wall[],
+  precomputedJoinsMap?: Map<string, JoinData[]>
+): { polygon: Point2D[]; wallIds: string[] }[] {
+  const joinsMap = precomputedJoinsMap ?? computeWallJoinMap(walls);
+  const nodes = buildEndpointNodes(walls);
+  const patches: { polygon: Point2D[]; wallIds: string[] }[] = [];
+
+  for (const node of nodes) {
+    if (node.endpoints.length < 2) {
+      continue;
+    }
+
+    const resolvedVertices = node.endpoints.flatMap((endpointRef) => {
+      const vertices = endpointResolvedCapVertices(endpointRef, joinsMap);
+      return [vertices.leftVertex, vertices.rightVertex];
+    });
+    const uniqueVertices: Point2D[] = [];
+    resolvedVertices.forEach((vertex) => {
+      if (!uniqueVertices.some((candidate) => pointDistance(candidate, vertex) <= COORDINATE_TOLERANCE_MM)) {
+        uniqueVertices.push(copyPoint(vertex));
+      }
+    });
+
+    if (uniqueVertices.length < 3) {
+      continue;
+    }
+
+    const ring = uniqueVertices.sort(
+      (a, b) => anchorAngleDeg(node.point, a) - anchorAngleDeg(node.point, b)
+    );
+
+    if (Math.abs(polygonArea(ring)) < MIN_PATCH_AREA_MM2) {
+      continue;
+    }
+
+    patches.push({
+      polygon: ring,
+      wallIds: node.endpoints.map((ep) => ep.wall.id),
+    });
+  }
+
+  return patches;
 }

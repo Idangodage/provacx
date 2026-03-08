@@ -4,8 +4,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
+import * as turf from '@turf/turf';
+
 import type { ArchitecturalObjectDefinition } from '../../../data';
 import type { HvacElement, Point2D, Room, SymbolInstance2D, Wall } from '../../../types';
+import { computeWallJoinMap } from '../wall/WallJoinNetwork';
 import { computeWallUnionRenderData } from '../wall/WallUnionGeometry';
 import { createWallOpenings3D } from './Opening3DRenderer';
 
@@ -31,11 +34,12 @@ type SolidPalette = {
   opacity?: number;
 };
 
-type WallAssembly = {
-  polygons: Point2D[][][];
+type WallBand = {
+  polygon: Point2D[][];
   baseElevation: number;
   height: number;
   palette: WallPalette;
+  name: string;
 };
 
 type OpeningSpan = {
@@ -386,42 +390,7 @@ function wallStyleKey(wall: Wall): string {
   ].join('|');
 }
 
-function buildWallAssemblies(walls: Wall[]): WallAssembly[] {
-  const groups = new Map<string, Wall[]>();
-  walls.forEach((wall) => {
-    const key = wallStyleKey(wall);
-    groups.set(key, [...(groups.get(key) ?? []), wall]);
-  });
-
-  const assemblies: WallAssembly[] = [];
-  groups.forEach((groupWalls) => {
-    if (groupWalls.length === 0) {
-      return;
-    }
-
-    const renderData = computeWallUnionRenderData(groupWalls);
-    const baseElevation = groupWalls[0].properties3D.baseElevation ?? 0;
-    const height = Math.max(1, groupWalls[0].properties3D.height ?? 2700);
-    const palette = wallPalette(groupWalls[0].material);
-
-    renderData.components.forEach((component) => {
-      if (component.polygons.length === 0) {
-        return;
-      }
-
-      assemblies.push({
-        polygons: component.polygons,
-        baseElevation,
-        height,
-        palette,
-      });
-    });
-  });
-
-  return assemblies;
-}
-
-function wallPlanRing(wall: Wall): Point2D[] {
+function openingHoleRectWorld(wall: Wall, span: OpeningSpan): Point2D[] {
   const dx = wall.endPoint.x - wall.startPoint.x;
   const dy = wall.endPoint.y - wall.startPoint.y;
   const len = Math.hypot(dx, dy);
@@ -429,87 +398,197 @@ function wallPlanRing(wall: Wall): Point2D[] {
     return [];
   }
 
-  const ux = dx / len;
-  const uy = dy / len;
-  const halfT = Math.max(1, wall.thickness) / 2;
-  const px = -uy * halfT;
-  const py = ux * halfT;
+  const dirX = dx / len;
+  const dirY = dy / len;
+  const perpX = -dirY;
+  const perpY = dirX;
+  // Use generous overshoot so the cut fully covers the wall thickness.
+  // The rectangle will be clipped to the union polygon via turf.difference.
+  const halfThickCut = wall.thickness / 2 + 50;
+
+  const cx = wall.startPoint.x + dirX * (span.start + span.end) / 2;
+  const cy = wall.startPoint.y + dirY * (span.start + span.end) / 2;
+  const halfLen = (span.end - span.start) / 2;
 
   return [
-    { x: wall.startPoint.x + px, y: wall.startPoint.y + py },
-    { x: wall.endPoint.x + px, y: wall.endPoint.y + py },
-    { x: wall.endPoint.x - px, y: wall.endPoint.y - py },
-    { x: wall.startPoint.x - px, y: wall.startPoint.y - py },
+    { x: cx - dirX * halfLen + perpX * halfThickCut, y: cy - dirY * halfLen + perpY * halfThickCut },
+    { x: cx + dirX * halfLen + perpX * halfThickCut, y: cy + dirY * halfLen + perpY * halfThickCut },
+    { x: cx + dirX * halfLen - perpX * halfThickCut, y: cy + dirY * halfLen - perpY * halfThickCut },
+    { x: cx - dirX * halfLen - perpX * halfThickCut, y: cy - dirY * halfLen - perpY * halfThickCut },
   ];
 }
 
-function createWallSegmentMesh(
-  segmentLength: number,
-  wallThickness: number,
-  bottomZ: number,
-  topZ: number,
-  centerX: number,
-  palette: WallPalette,
-  options: { showTopOutline?: boolean } = {}
-): THREE.Group | null {
-  const length = Math.max(0, segmentLength);
-  const height = topZ - bottomZ;
-  if (length <= EPSILON || height <= EPSILON) {
-    return null;
+/** Convert Point2D[] ring to a closed turf-compatible coordinate array */
+function ringToCoords(ring: Point2D[]): number[][] {
+  const coords = ring.map((p) => [p.x, p.y]);
+  if (coords.length > 0) {
+    coords.push([ring[0].x, ring[0].y]);
   }
+  return coords;
+}
 
-  const group = new THREE.Group();
-  const wallBody = new THREE.Mesh(
-    new THREE.BoxGeometry(length, wallThickness, height),
-    new THREE.MeshStandardMaterial({
-      color: palette.side,
-      roughness: 0.98,
-      metalness: 0,
-      polygonOffset: true,
-      polygonOffsetFactor: -0.5,
-      polygonOffsetUnits: -0.5,
-    })
-  );
-  wallBody.position.set(centerX, 0, bottomZ + height / 2);
-  group.add(wallBody);
-
-  const topCap = new THREE.Mesh(
-    new THREE.PlaneGeometry(length, wallThickness),
-    new THREE.MeshStandardMaterial({
-      color: palette.top,
-      roughness: 0.95,
-      metalness: 0.01,
-      side: THREE.DoubleSide,
-      polygonOffset: true,
-      polygonOffsetFactor: -1,
-      polygonOffsetUnits: -1,
-    })
-  );
-  topCap.position.set(centerX, 0, topZ + 0.4);
-  group.add(topCap);
-
-  if (options.showTopOutline) {
-    const capOutline = new THREE.Line(
-      new THREE.BufferGeometry().setFromPoints([
-        new THREE.Vector3(centerX - length / 2, -wallThickness / 2, topZ + 1.2),
-        new THREE.Vector3(centerX + length / 2, -wallThickness / 2, topZ + 1.2),
-        new THREE.Vector3(centerX + length / 2, wallThickness / 2, topZ + 1.2),
-        new THREE.Vector3(centerX - length / 2, wallThickness / 2, topZ + 1.2),
-        new THREE.Vector3(centerX - length / 2, -wallThickness / 2, topZ + 1.2),
-      ]),
-      new THREE.LineBasicMaterial({
-        color: palette.outline,
-        transparent: true,
-        opacity: 0.4,
-        depthWrite: false,
-        depthTest: true,
-        toneMapped: false,
-      })
+/** Convert turf geometry coordinates back to Point2D[][] polygons */
+function turfCoordsToPolygons(
+  geometry: { type: string; coordinates: number[][][] | number[][][][] }
+): Point2D[][][] {
+  if (geometry.type === 'Polygon') {
+    const coords = geometry.coordinates as number[][][];
+    return [coords.map((ring) => ring.slice(0, -1).map((c) => ({ x: c[0], y: c[1] })))];
+  }
+  if (geometry.type === 'MultiPolygon') {
+    const coords = geometry.coordinates as number[][][][];
+    return coords.map((poly) =>
+      poly.map((ring) => ring.slice(0, -1).map((c) => ({ x: c[0], y: c[1] })))
     );
-    group.add(capOutline);
+  }
+  return [];
+}
+
+/**
+ * Subtract opening hole rectangles from a wall polygon using turf.difference.
+ * Returns one or more result polygons (an opening can split a wall into pieces).
+ * This guarantees holes are properly clipped to the polygon boundary,
+ * preventing triangulation artifacts at mitered corners.
+ */
+function subtractOpeningHoles(
+  polygon: Point2D[][],
+  holes: Point2D[][]
+): Point2D[][][] {
+  const outerRing = polygon[0];
+  if (!outerRing || outerRing.length < 3) {
+    return [polygon];
   }
 
-  return group;
+  const existingHoles = polygon.slice(1).filter((r) => r.length >= 3);
+  const turfOuter = ringToCoords(outerRing);
+  const turfHoles = existingHoles.map(ringToCoords);
+
+  let current: ReturnType<typeof turf.polygon> | ReturnType<typeof turf.multiPolygon>;
+  try {
+    current = turf.polygon([turfOuter, ...turfHoles]);
+  } catch {
+    return [polygon];
+  }
+
+  for (const hole of holes) {
+    if (hole.length < 3) {
+      continue;
+    }
+    try {
+      const holePoly = turf.polygon([ringToCoords(hole)]);
+      const diff = turf.difference(turf.featureCollection([current, holePoly]));
+      if (!diff) {
+        return [];
+      }
+      current = diff as typeof current;
+    } catch {
+      // If difference fails, keep current polygon unchanged for this hole
+    }
+  }
+
+  return turfCoordsToPolygons(current.geometry as { type: string; coordinates: number[][][] | number[][][][] });
+}
+
+function buildUnifiedWallBands(
+  walls: Wall[],
+  joinsMap: Map<string, import('../../../types').JoinData[]>
+): WallBand[] {
+  const groups = new Map<string, Wall[]>();
+  walls.forEach((wall) => {
+    const key = wallStyleKey(wall);
+    groups.set(key, [...(groups.get(key) ?? []), wall]);
+  });
+
+  const bands: WallBand[] = [];
+  let groupIdx = 0;
+
+  groups.forEach((groupWalls) => {
+    if (groupWalls.length === 0) {
+      return;
+    }
+
+    groupIdx += 1;
+    const renderData = computeWallUnionRenderData(groupWalls, joinsMap);
+    const baseElev = groupWalls[0].properties3D.baseElevation ?? 0;
+    const wallH = Math.max(1, groupWalls[0].properties3D.height ?? 2700);
+    const wallTop = baseElev + wallH;
+    const pal = wallPalette(groupWalls[0].material);
+
+    // Collect all opening spans from ALL walls in this style group
+    const allSpans: Array<{ wall: Wall; span: OpeningSpan }> = [];
+    groupWalls.forEach((wall) => {
+      openingSpansForWall(wall).forEach((span) => {
+        allSpans.push({ wall, span });
+      });
+    });
+
+    renderData.components.forEach((component, cIdx) => {
+      if (component.polygons.length === 0) {
+        return;
+      }
+
+      component.polygons.forEach((polygon, pIdx) => {
+        const baseName = `wall-${groupIdx}-${cIdx}-${pIdx}`;
+
+        if (allSpans.length === 0) {
+          // No openings — single full-height extrusion
+          bands.push({
+            polygon,
+            baseElevation: baseElev,
+            height: wallH,
+            palette: pal,
+            name: baseName,
+          });
+          return;
+        }
+
+        // Height-band decomposition: split at every opening edge
+        const heightBreaks = new Set<number>([baseElev, wallTop]);
+        allSpans.forEach(({ span }) => {
+          heightBreaks.add(Math.max(baseElev, span.bottom));
+          heightBreaks.add(Math.min(wallTop, span.top));
+        });
+        const sorted = [...heightBreaks].filter(Number.isFinite).sort((a, b) => a - b);
+
+        for (let i = 0; i < sorted.length - 1; i += 1) {
+          const bBot = sorted[i];
+          const bTop = sorted[i + 1];
+          const bH = bTop - bBot;
+          if (bH <= EPSILON) {
+            continue;
+          }
+
+          const active = allSpans.filter(
+            ({ span }) => span.bottom < bTop - EPSILON && span.top > bBot + EPSILON
+          );
+
+          if (active.length === 0) {
+            bands.push({
+              polygon,
+              baseElevation: bBot,
+              height: bH,
+              palette: pal,
+              name: `${baseName}-b${i}`,
+            });
+          } else {
+            const holes = active.map(({ wall, span }) => openingHoleRectWorld(wall, span));
+            const resultPolygons = subtractOpeningHoles(polygon, holes);
+            resultPolygons.forEach((resultPoly, rIdx) => {
+              bands.push({
+                polygon: resultPoly,
+                baseElevation: bBot,
+                height: bH,
+                palette: pal,
+                name: `${baseName}-b${i}-r${rIdx}`,
+              });
+            });
+          }
+        }
+      });
+    });
+  });
+
+  return bands;
 }
 
 function openingSpansForWall(wall: Wall): OpeningSpan[] {
@@ -550,113 +629,6 @@ function openingSpansForWall(wall: Wall): OpeningSpan[] {
     .sort((left, right) => left.start - right.start);
 
   return spans;
-}
-
-function createWallMeshWithOpenings(
-  wall: Wall,
-  palette: WallPalette
-): THREE.Group | null {
-  const dx = wall.endPoint.x - wall.startPoint.x;
-  const dy = wall.endPoint.y - wall.startPoint.y;
-  const wallLength = Math.hypot(dx, dy);
-  if (wallLength <= EPSILON) {
-    return null;
-  }
-
-  const spans = openingSpansForWall(wall);
-  if (spans.length === 0) {
-    return null;
-  }
-
-  const group = new THREE.Group();
-  const wallBase = wall.properties3D.baseElevation ?? 0;
-  const wallTop = wallBase + Math.max(1, wall.properties3D.height ?? 2700);
-  const wallThickness = Math.max(1, wall.thickness);
-
-  // Horizontal gaps with full-height wall body (left/right of openings)
-  const occupiedRanges: Array<{ start: number; end: number }> = [];
-  spans.forEach((span) => {
-    if (occupiedRanges.length === 0) {
-      occupiedRanges.push({ start: span.start, end: span.end });
-      return;
-    }
-    const previous = occupiedRanges[occupiedRanges.length - 1];
-    if (span.start <= previous.end + EPSILON) {
-      previous.end = Math.max(previous.end, span.end);
-      return;
-    }
-    occupiedRanges.push({ start: span.start, end: span.end });
-  });
-
-  let cursor = 0;
-  occupiedRanges.forEach((range) => {
-    if (range.start > cursor + EPSILON) {
-      const segment = createWallSegmentMesh(
-        range.start - cursor,
-        wallThickness,
-        wallBase,
-        wallTop,
-        (cursor + range.start) / 2,
-        palette,
-        { showTopOutline: true }
-      );
-      if (segment) {
-        group.add(segment);
-      }
-    }
-    cursor = Math.max(cursor, range.end);
-  });
-  if (cursor < wallLength - EPSILON) {
-    const segment = createWallSegmentMesh(
-      wallLength - cursor,
-      wallThickness,
-      wallBase,
-      wallTop,
-      (cursor + wallLength) / 2,
-      palette,
-      { showTopOutline: true }
-    );
-    if (segment) {
-      group.add(segment);
-    }
-  }
-
-  // Lintel and sill segments inside opening widths.
-  spans.forEach((span) => {
-    if (span.bottom > wallBase + EPSILON) {
-      const sillSegment = createWallSegmentMesh(
-        span.end - span.start,
-        wallThickness,
-        wallBase,
-        span.bottom,
-        (span.start + span.end) / 2,
-        palette,
-        { showTopOutline: false }
-      );
-      if (sillSegment) {
-        group.add(sillSegment);
-      }
-    }
-    if (span.top < wallTop - EPSILON) {
-      const lintelSegment = createWallSegmentMesh(
-        span.end - span.start,
-        wallThickness,
-        span.top,
-        wallTop,
-        (span.start + span.end) / 2,
-        palette,
-        { showTopOutline: true }
-      );
-      if (lintelSegment) {
-        group.add(lintelSegment);
-      }
-    }
-  });
-
-  group.position.set(wall.startPoint.x, wall.startPoint.y, 0);
-  group.rotation.z = Math.atan2(dy, dx);
-  group.name = `wall-with-openings-${wall.id}`;
-  return group;
 }
 
 function createWallMesh(
@@ -846,15 +818,11 @@ export function IsometricViewCanvas({
     [objectDefinitions]
   );
   const wallsById = useMemo(() => new Map(walls.map((wall) => [wall.id, wall])), [walls]);
-  const wallsWithoutOpenings = useMemo(
-    () => walls.filter((wall) => wall.openings.length === 0),
-    [walls]
+  const allJoinsMap = useMemo(() => computeWallJoinMap(walls), [walls]);
+  const wallBands = useMemo(
+    () => buildUnifiedWallBands(walls, allJoinsMap),
+    [walls, allJoinsMap]
   );
-  const wallsWithOpenings = useMemo(
-    () => walls.filter((wall) => wall.openings.length > 0),
-    [walls]
-  );
-  const wallAssemblies = useMemo(() => buildWallAssemblies(wallsWithoutOpenings), [wallsWithoutOpenings]);
 
   const renderViewport = useCallback(() => {
     const sceneState = sceneRef.current;
@@ -1127,38 +1095,19 @@ export function IsometricViewCanvas({
       });
     });
 
-    wallAssemblies.forEach((assembly, assemblyIndex) => {
-      lowestElevation = Math.min(lowestElevation, assembly.baseElevation);
-
-      assembly.polygons.forEach((polygon, polygonIndex) => {
-        const wallMesh = createWallMesh(
-          polygon,
-          assembly.baseElevation,
-          assembly.height,
-          assembly.palette
-        );
-        if (!wallMesh) {
-          return;
-        }
-
-        wallMesh.name = `wall-assembly-${assemblyIndex}-${polygonIndex}`;
+    // Render all wall geometry as unified bands. The union system merges
+    // all walls (including those with openings) into continuous corner
+    // geometry. Openings are punched as holes in the appropriate height bands.
+    wallBands.forEach((band) => {
+      const wallMesh = createWallMesh(band.polygon, band.baseElevation, band.height, band.palette);
+      if (wallMesh) {
+        wallMesh.name = band.name;
         geometryRoot.add(wallMesh);
-        polygon.forEach((ring) => {
+        band.polygon.forEach((ring) => {
           planPoints.push(...sanitizeRing(ring));
         });
-      });
-    });
-
-    wallsWithOpenings.forEach((wall) => {
-      const wallMesh = createWallMeshWithOpenings(wall, wallPalette(wall.material));
-      if (wallMesh) {
-        geometryRoot.add(wallMesh);
       }
-      const ring = wallPlanRing(wall);
-      if (ring.length >= 3) {
-        planPoints.push(...ring);
-      }
-      lowestElevation = Math.min(lowestElevation, wall.properties3D.baseElevation ?? 0);
+      lowestElevation = Math.min(lowestElevation, band.baseElevation);
     });
 
     const renderedOpeningIds = new Set<string>();
@@ -1326,7 +1275,7 @@ export function IsometricViewCanvas({
     }
     controls.update();
     renderRequestedRef.current = true;
-  }, [definitionsById, hvacElements, rooms, symbols, wallAssemblies, walls, wallsById, wallsWithOpenings]);
+  }, [definitionsById, hvacElements, rooms, symbols, wallBands, walls, wallsById]);
 
   return (
     <div

@@ -203,7 +203,7 @@ function createDoor3D(
   const halfW = opening.width / 2;
   const baseZ = wall.properties3D.baseElevation ?? 0;
   const doorHeight = opening.height || 2100;
-  const frameDepth = wall.thickness + 10;
+  const frameDepth = wall.thickness;
   // Frame must be thick enough to be visible from isometric distance
   const frameThick = Math.max(60, wall.thickness * 0.25);
 
@@ -353,7 +353,7 @@ function createWindow3D(
   const baseZ = wall.properties3D.baseElevation ?? 0;
   const sillHeight = opening.sillHeight ?? 900;
   const windowHeight = opening.height || 1200;
-  const frameDepth = wall.thickness + 10;
+  const frameDepth = wall.thickness;
   const frameThick = Math.max(50, wall.thickness * 0.2);
   const winBottom = baseZ + sillHeight;
   const winTop = winBottom + windowHeight;
