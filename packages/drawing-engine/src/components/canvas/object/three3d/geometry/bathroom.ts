@@ -9,6 +9,7 @@ export function buildToilet(): THREE.Group {
   const group = new THREE.Group();
   const ceramic = ceramicMaterial(0xF5F5F0);
   const chrome = chromeMaterial();
+  const ceramicShadow = ceramicMaterial(0xeaeae2);
 
   // Bowl base
   const bowlGeo = new THREE.CylinderGeometry(0.18, 0.16, 0.38, 16);
@@ -32,7 +33,11 @@ export function buildToilet(): THREE.Group {
   lid.position.set(0, 0.41, 0.06);
   group.add(lid);
 
-  // Tank
+  const pedestalGeo = new THREE.BoxGeometry(0.18, 0.22, 0.18);
+  const pedestal = new THREE.Mesh(pedestalGeo, ceramicShadow);
+  pedestal.position.set(0, 0.12, -0.04);
+  group.add(pedestal);
+
   const tankGeo = new THREE.BoxGeometry(0.36, 0.32, 0.16);
   tankGeo.translate(0, 0.16, 0);
   const tank = new THREE.Mesh(tankGeo, ceramic);
@@ -52,40 +57,46 @@ export function buildBathtub(): THREE.Group {
   const group = new THREE.Group();
   const ceramic = ceramicMaterial(0xF5F5F0);
   const chrome = chromeMaterial();
+  const ceramicShadow = ceramicMaterial(0xebe9e2);
 
-  // Outer shell (rounded box)
   const outerGeo = new THREE.BoxGeometry(1.60, 0.55, 0.75);
   outerGeo.translate(0, 0.275, 0);
   const outer = new THREE.Mesh(outerGeo, ceramic);
   group.add(outer);
 
-  // Inner basin (darker, slightly smaller, raised)
   const innerGeo = new THREE.BoxGeometry(1.48, 0.42, 0.63);
   innerGeo.translate(0, 0.21, 0);
-  const inner = new THREE.Mesh(innerGeo, ceramicMaterial(0xE8E8E0));
+  const inner = new THREE.Mesh(innerGeo, ceramicShadow);
   inner.position.y = 0.10;
   group.add(inner);
 
-  // Rim (top edge)
   const rimGeo = new THREE.BoxGeometry(1.62, 0.04, 0.77);
   const rim = new THREE.Mesh(rimGeo, ceramic);
   rim.position.y = 0.56;
   group.add(rim);
 
-  // Faucet
   const faucetGeo = new THREE.CylinderGeometry(0.015, 0.02, 0.12, 8);
   const faucet = new THREE.Mesh(faucetGeo, chrome);
   faucet.position.set(0, 0.62, -0.30);
   group.add(faucet);
 
-  // Spout
   const spoutGeo = new THREE.CylinderGeometry(0.012, 0.012, 0.08, 8);
   spoutGeo.rotateZ(Math.PI / 2);
   const spout = new THREE.Mesh(spoutGeo, chrome);
   spout.position.set(0, 0.66, -0.26);
   group.add(spout);
 
-  // 4 feet (claw foot style)
+  const drainGeo = new THREE.CylinderGeometry(0.03, 0.03, 0.008, 12);
+  const drain = new THREE.Mesh(drainGeo, chrome);
+  drain.position.set(0.48, 0.34, 0);
+  group.add(drain);
+
+  const overflowGeo = new THREE.CylinderGeometry(0.018, 0.018, 0.006, 10);
+  const overflow = new THREE.Mesh(overflowGeo, chrome);
+  overflow.rotation.x = Math.PI / 2;
+  overflow.position.set(0.62, 0.40, -0.30);
+  group.add(overflow);
+
   const footGeo = new THREE.SphereGeometry(0.035, 8, 6);
   for (const [x, z] of [[-0.65, -0.28], [0.65, -0.28], [-0.65, 0.28], [0.65, 0.28]]) {
     const foot = new THREE.Mesh(footGeo, chrome);
@@ -101,14 +112,19 @@ export function buildShower(): THREE.Group {
   const ceramic = ceramicMaterial(0xF0F0F0);
   const chrome = chromeMaterial();
   const glass = glassMaterial();
+  const darkMetal = metalMaterial(0x555555);
 
-  // Base tray
   const trayGeo = new THREE.BoxGeometry(0.86, 0.06, 0.86);
   trayGeo.translate(0, 0.03, 0);
   const tray = new THREE.Mesh(trayGeo, ceramic);
   group.add(tray);
 
-  // Glass panels (2 walls — corner shower)
+  const curbGeo = new THREE.BoxGeometry(0.78, 0.03, 0.06);
+  const curb = new THREE.Mesh(curbGeo, ceramic);
+  curb.position.set(0, 0.075, 0.40);
+  group.add(curb);
+
+  // Glass panels
   const panelGeo = new THREE.BoxGeometry(0.86, 2.0, 0.01);
   panelGeo.translate(0, 1.0, 0);
 
@@ -121,7 +137,12 @@ export function buildShower(): THREE.Group {
   sidePanel.position.x = 0.43;
   group.add(sidePanel);
 
-  // Chrome frame rails
+  const doorGeo = new THREE.BoxGeometry(0.40, 1.96, 0.01);
+  doorGeo.translate(0, 0.98, 0);
+  const door = new THREE.Mesh(doorGeo, glass);
+  door.position.set(-0.23, 0, 0.43);
+  group.add(door);
+
   const railGeo = new THREE.CylinderGeometry(0.008, 0.008, 2.0, 6);
   railGeo.translate(0, 1.0, 0);
   const positions = [
@@ -135,7 +156,22 @@ export function buildShower(): THREE.Group {
     group.add(rail);
   }
 
-  // Shower head (mounted on back wall)
+  const topRailGeo = new THREE.BoxGeometry(0.86, 0.02, 0.02);
+  const topRail = new THREE.Mesh(topRailGeo, darkMetal);
+  topRail.position.set(0, 1.98, 0.43);
+  group.add(topRail);
+
+  const doorHandleGeo = new THREE.CylinderGeometry(0.008, 0.008, 0.22, 8);
+  const doorHandle = new THREE.Mesh(doorHandleGeo, chrome);
+  doorHandle.position.set(-0.03, 1.0, 0.44);
+  group.add(doorHandle);
+
+  // Shower column and head
+  const columnGeo = new THREE.CylinderGeometry(0.012, 0.012, 1.10, 8);
+  const column = new THREE.Mesh(columnGeo, chrome);
+  column.position.set(0, 1.30, -0.40);
+  group.add(column);
+
   const mountGeo = new THREE.CylinderGeometry(0.02, 0.02, 0.04, 8);
   const mount = new THREE.Mesh(mountGeo, chrome);
   mount.position.set(0, 1.90, -0.40);
@@ -147,9 +183,13 @@ export function buildShower(): THREE.Group {
   head.position.set(0, 1.86, -0.35);
   group.add(head);
 
-  // Drain
+  const mixerGeo = new THREE.BoxGeometry(0.08, 0.04, 0.03);
+  const mixer = new THREE.Mesh(mixerGeo, chrome);
+  mixer.position.set(0, 1.05, -0.39);
+  group.add(mixer);
+
   const drainGeo = new THREE.CylinderGeometry(0.03, 0.03, 0.005, 12);
-  const drain = new THREE.Mesh(drainGeo, metalMaterial(0x666666));
+  const drain = new THREE.Mesh(drainGeo, darkMetal);
   drain.position.set(0, 0.06, 0);
   group.add(drain);
 

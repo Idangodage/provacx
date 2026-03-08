@@ -36,6 +36,8 @@ export function buildDiningChair(): THREE.Group {
   const group = new THREE.Group();
   const wood = woodMaterial(0x7A5C30);
   const fabric = fabricMaterial(0x8B4513);
+  const woodDark = woodMaterial(0x5f4522);
+  const metal = chromeMaterial();
 
   // Seat
   const seatGeo = roundedBoxGeometry(0.42, 0.035, 0.42, 0.02);
@@ -43,8 +45,15 @@ export function buildDiningChair(): THREE.Group {
   seat.position.y = 0.44;
   group.add(seat);
 
-  // 4 legs
-  const legGeo = new THREE.CylinderGeometry(0.015, 0.018, 0.44, 8);
+  const seatSeamGeo = new THREE.TorusGeometry(0.17, 0.004, 6, 22);
+  seatSeamGeo.rotateX(Math.PI / 2);
+  seatSeamGeo.scale(1.15, 1, 1.12);
+  const seatSeam = new THREE.Mesh(seatSeamGeo, metal);
+  seatSeam.position.y = 0.452;
+  group.add(seatSeam);
+
+  // Slim tapered legs and stretchers.
+  const legGeo = new THREE.CylinderGeometry(0.012, 0.018, 0.46, 8);
   const offsets = [
     [-0.17, -0.17],
     [0.17, -0.17],
@@ -57,17 +66,40 @@ export function buildDiningChair(): THREE.Group {
     group.add(leg);
   }
 
-  // Backrest
-  const backGeo = roundedBoxGeometry(0.40, 0.38, 0.025, 0.01);
+  const stretcherSideGeo = new THREE.BoxGeometry(0.015, 0.025, 0.30);
+  for (const x of [-0.15, 0.15]) {
+    const stretcher = new THREE.Mesh(stretcherSideGeo, woodDark);
+    stretcher.position.set(x, 0.17, 0);
+    group.add(stretcher);
+  }
+
+  const stretcherFrontGeo = new THREE.BoxGeometry(0.26, 0.025, 0.015);
+  for (const z of [-0.15, 0.15]) {
+    const stretcher = new THREE.Mesh(stretcherFrontGeo, woodDark);
+    stretcher.position.set(0, 0.17, z);
+    group.add(stretcher);
+  }
+
+  // Backrest and top rail.
+  const backGeo = roundedBoxGeometry(0.40, 0.30, 0.025, 0.01);
   const back = new THREE.Mesh(backGeo, wood);
-  back.position.set(0, 0.66, -0.19);
+  back.position.set(0, 0.62, -0.19);
   group.add(back);
 
-  // Back supports (2 vertical spindles)
-  const spindleGeo = new THREE.CylinderGeometry(0.01, 0.01, 0.38, 6);
-  for (const x of [-0.12, 0.12]) {
+  const topRailGeo = new THREE.BoxGeometry(0.42, 0.04, 0.04);
+  const topRail = new THREE.Mesh(topRailGeo, woodDark);
+  topRail.position.set(0, 0.83, -0.19);
+  group.add(topRail);
+
+  const backCutoutGeo = new THREE.BoxGeometry(0.12, 0.07, 0.02);
+  const backCutout = new THREE.Mesh(backCutoutGeo, woodDark);
+  backCutout.position.set(0, 0.75, -0.18);
+  group.add(backCutout);
+
+  const spindleGeo = new THREE.CylinderGeometry(0.008, 0.01, 0.30, 6);
+  for (const x of [-0.12, 0, 0.12]) {
     const spindle = new THREE.Mesh(spindleGeo, wood);
-    spindle.position.set(x, 0.66, -0.19);
+    spindle.position.set(x, 0.60, -0.19);
     group.add(spindle);
   }
 
@@ -78,6 +110,7 @@ export function buildOfficeChair(): THREE.Group {
   const group = new THREE.Group();
   const chrome = chromeMaterial();
   const leather = leatherMaterial(0x1A1A2E);
+  const darkMetal = chromeMaterial();
 
   // 5-star base
   const baseRadius = 0.28;
@@ -94,15 +127,24 @@ export function buildOfficeChair(): THREE.Group {
     arm.rotation.y = -angle;
     group.add(arm);
 
-    // Casters
-    const casterGeo = new THREE.SphereGeometry(0.02, 8, 6);
-    const caster = new THREE.Mesh(casterGeo, chrome);
-    caster.position.set(
-      Math.cos(angle) * baseRadius,
-      0.02,
-      Math.sin(angle) * baseRadius
-    );
-    group.add(caster);
+    const casterY = 0.02;
+    const casterX = Math.cos(angle) * baseRadius;
+    const casterZ = Math.sin(angle) * baseRadius;
+    const casterCoreGeo = new THREE.CylinderGeometry(0.01, 0.01, 0.04, 8);
+    casterCoreGeo.rotateX(Math.PI / 2);
+    const casterCore = new THREE.Mesh(casterCoreGeo, darkMetal);
+    casterCore.position.set(casterX, casterY, casterZ);
+    casterCore.rotation.y = -angle;
+    group.add(casterCore);
+
+    const wheelGeo = new THREE.CylinderGeometry(0.013, 0.013, 0.01, 10);
+    wheelGeo.rotateZ(Math.PI / 2);
+    for (const side of [-1, 1]) {
+      const wheel = new THREE.Mesh(wheelGeo, chrome);
+      wheel.position.set(casterX + Math.cos(angle) * side * 0.012, casterY, casterZ + Math.sin(angle) * side * 0.012);
+      wheel.rotation.y = -angle;
+      group.add(wheel);
+    }
   }
 
   // Gas lift column
@@ -111,11 +153,28 @@ export function buildOfficeChair(): THREE.Group {
   column.position.y = 0.22;
   group.add(column);
 
+  const seatSupportGeo = new THREE.CylinderGeometry(0.07, 0.05, 0.04, 12);
+  const seatSupport = new THREE.Mesh(seatSupportGeo, darkMetal);
+  seatSupport.position.y = 0.39;
+  group.add(seatSupport);
+
   // Seat
   const seatGeo = roundedBoxGeometry(0.48, 0.06, 0.46, 0.04);
   const seat = new THREE.Mesh(seatGeo, leather);
   seat.position.y = 0.42;
   group.add(seat);
+
+  const frontLipGeo = new THREE.BoxGeometry(0.40, 0.02, 0.04);
+  const frontLip = new THREE.Mesh(frontLipGeo, leather);
+  frontLip.position.set(0, 0.39, 0.18);
+  group.add(frontLip);
+
+  const seatStitchGeo = new THREE.BoxGeometry(0.36, 0.004, 0.002);
+  for (const z of [-0.15, 0.15]) {
+    const stitch = new THREE.Mesh(seatStitchGeo, darkMetal);
+    stitch.position.set(0, 0.45, z);
+    group.add(stitch);
+  }
 
   // Backrest (curved)
   const backGeo = roundedBoxGeometry(0.46, 0.42, 0.04, 0.03);
@@ -123,6 +182,12 @@ export function buildOfficeChair(): THREE.Group {
   back.position.set(0, 0.68, -0.2);
   back.rotation.x = 0.1;
   group.add(back);
+
+  const lumbarGeo = roundedBoxGeometry(0.34, 0.08, 0.03, 0.02);
+  const lumbar = new THREE.Mesh(lumbarGeo, leather);
+  lumbar.position.set(0, 0.60, -0.18);
+  lumbar.rotation.x = 0.06;
+  group.add(lumbar);
 
   // Armrests
   for (const side of [-1, 1]) {
@@ -144,6 +209,7 @@ export function buildArmchair(): THREE.Group {
   const group = new THREE.Group();
   const wood = woodMaterial(0x6B4226);
   const fabric = fabricMaterial(0x5B7553);
+  const cushionFabric = fabricMaterial(0x6c8764);
 
   // 4 short legs
   const legGeo = new THREE.CylinderGeometry(0.025, 0.028, 0.15, 8);
@@ -167,13 +233,13 @@ export function buildArmchair(): THREE.Group {
 
   // Seat cushion
   const seatGeo = roundedBoxGeometry(0.60, 0.12, 0.58, 0.04);
-  const seat = new THREE.Mesh(seatGeo, fabric);
+  const seat = new THREE.Mesh(seatGeo, cushionFabric);
   seat.position.set(0, 0.30, 0.03);
   group.add(seat);
 
   // Back cushion
   const backGeo = roundedBoxGeometry(0.58, 0.38, 0.10, 0.04);
-  const back = new THREE.Mesh(backGeo, fabric);
+  const back = new THREE.Mesh(backGeo, cushionFabric);
   back.position.set(0, 0.54, -0.30);
   back.rotation.x = 0.08;
   group.add(back);
@@ -185,6 +251,24 @@ export function buildArmchair(): THREE.Group {
     arm.position.set(side * 0.36, 0.36, -0.02);
     group.add(arm);
   }
+
+  const sideCushionGeo = roundedBoxGeometry(0.06, 0.16, 0.44, 0.02);
+  for (const side of [-1, 1]) {
+    const sideCushion = new THREE.Mesh(sideCushionGeo, cushionFabric);
+    sideCushion.position.set(side * 0.26, 0.34, 0.04);
+    group.add(sideCushion);
+  }
+
+  const backSplitGeo = new THREE.BoxGeometry(0.01, 0.30, 0.03);
+  const backSplit = new THREE.Mesh(backSplitGeo, fabric);
+  backSplit.position.set(0, 0.57, -0.25);
+  group.add(backSplit);
+
+  const throwPillowGeo = roundedBoxGeometry(0.18, 0.08, 0.18, 0.02);
+  const throwPillow = new THREE.Mesh(throwPillowGeo, fabricMaterial(0x7a8f73));
+  throwPillow.position.set(0.12, 0.38, 0.06);
+  throwPillow.rotation.y = -0.22;
+  group.add(throwPillow);
 
   return group;
 }

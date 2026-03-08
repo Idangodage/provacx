@@ -11,6 +11,8 @@ import type { HvacElement, Point2D, Room, SymbolInstance2D, Wall } from '../../.
 import { computeWallJoinMap } from '../wall/WallJoinNetwork';
 import { computeWallUnionRenderData } from '../wall/WallUnionGeometry';
 import { createWallOpenings3D, type OpeningRenderOptions } from './Opening3DRenderer';
+import { hasRenderer } from '../object/FurnitureSymbolRenderer';
+import { createFurnitureModel3D } from '../object/three3d/Furniture3DRenderer';
 
 const VIEW_MARGIN = 1.14;
 const EPSILON = 0.001;
@@ -775,6 +777,75 @@ function createBoxMesh(
   return mesh;
 }
 
+function createDetailedFurnitureMesh(
+  instance: SymbolInstance2D,
+  definition: ArchitecturalObjectDefinition,
+  widthMm: number,
+  depthMm: number,
+  heightMm: number,
+  baseElevationMm: number,
+): THREE.Group | null {
+  if (!definition.renderType || !hasRenderer(definition.renderType)) {
+    return null;
+  }
+
+  const model = createFurnitureModel3D(definition.renderType);
+  model.rotation.x = Math.PI / 2;
+
+  const rawBox = new THREE.Box3().setFromObject(model);
+  if (rawBox.isEmpty()) {
+    return null;
+  }
+
+  const rawSize = rawBox.getSize(new THREE.Vector3());
+  const rawCenter = rawBox.getCenter(new THREE.Vector3());
+  const minSourceSize = 0.001;
+
+  // Furniture source geometry is authored in meters, while plan/world units are
+  // millimeters. Scale directly against raw meter-sized bounds so each instance
+  // lands at the intended mm dimensions.
+  const scaleX = Math.max(0.001, widthMm / Math.max(rawSize.x, minSourceSize));
+  const scaleY = Math.max(0.001, depthMm / Math.max(rawSize.y, minSourceSize));
+  const scaleZ = Math.max(0.001, heightMm / Math.max(rawSize.z, minSourceSize));
+
+  model.scale.set(scaleX, scaleY, scaleZ);
+  model.position.set(
+    -rawCenter.x * scaleX,
+    -rawCenter.y * scaleY,
+    -rawBox.min.z * scaleZ
+  );
+  model.updateMatrixWorld(true);
+
+  const finalBox = new THREE.Box3().setFromObject(model);
+  const finalSize = finalBox.getSize(new THREE.Vector3());
+  if (
+    finalBox.isEmpty()
+    || !Number.isFinite(finalSize.x)
+    || !Number.isFinite(finalSize.y)
+    || !Number.isFinite(finalSize.z)
+    || finalSize.x < 1
+    || finalSize.y < 1
+    || finalSize.z < 1
+  ) {
+    return null;
+  }
+
+  model.traverse((child) => {
+    if (child instanceof THREE.Mesh) {
+      child.castShadow = true;
+      child.receiveShadow = true;
+      child.renderOrder = 15;
+    }
+  });
+
+  const group = new THREE.Group();
+  group.add(model);
+  group.position.set(instance.position.x, instance.position.y, baseElevationMm);
+  group.rotation.z = THREE.MathUtils.degToRad(instance.rotation);
+  group.name = `furniture-${instance.id}`;
+  return group;
+}
+
 function createPlanGrid(points: Point2D[], elevation: number): THREE.GridHelper {
   const bounds = ensurePlanBounds(points);
   const spanX = bounds.maxX - bounds.minX;
@@ -1289,6 +1360,11 @@ export function IsometricViewCanvas({
         baseHeight * scaleFactor
       );
       const isOpeningCategory = definition.category === 'doors' || definition.category === 'windows';
+      const isDetailedFurnitureCategory = (
+        definition.category === 'furniture'
+        || definition.category === 'fixtures'
+        || definition.category === 'my-library'
+      ) && !!definition.renderType && hasRenderer(definition.renderType);
       const baseElevationFromProps = readNumberProperty(instance.properties, 'baseElevationMm');
       const baseElevation = baseElevationFromProps ?? (
         definition.category === 'windows'
@@ -1309,6 +1385,40 @@ export function IsometricViewCanvas({
           });
         }
         return;
+      }
+
+      if (isDetailedFurnitureCategory) {
+        const detailedFurniture = createDetailedFurnitureMesh(
+          instance,
+          definition,
+          widthMm,
+          depthMm,
+          heightMm,
+          baseElevation
+        );
+        if (detailedFurniture) {
+          geometryRoot.add(detailedFurniture);
+          lowestElevation = Math.min(lowestElevation, baseElevation);
+          const halfWidth = widthMm / 2;
+          const halfDepth = depthMm / 2;
+          planPoints.push(
+            { x: instance.position.x - halfWidth, y: instance.position.y - halfDepth },
+            { x: instance.position.x + halfWidth, y: instance.position.y - halfDepth },
+            { x: instance.position.x + halfWidth, y: instance.position.y + halfDepth },
+            { x: instance.position.x - halfWidth, y: instance.position.y + halfDepth }
+          );
+          labelAnchors.push({
+            key: `object-${instance.id}`,
+            position: new THREE.Vector3(
+              instance.position.x,
+              instance.position.y,
+              baseElevation + heightMm + 30
+            ),
+            text: definition.name,
+            color: '#334155',
+          });
+          return;
+        }
       }
 
       if (isOpeningCategory) {

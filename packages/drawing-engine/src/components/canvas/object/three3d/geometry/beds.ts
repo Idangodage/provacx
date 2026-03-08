@@ -45,6 +45,7 @@ export function buildBed(size: BedSize = 'queen'): THREE.Group {
   const mattress = mattressMaterial(0xF0EDE5);
   const pillow = mattressMaterial(0xFAF8F0);
   const blanket = fabricMaterial(0x6B8FB5);
+  const blanketFold = fabricMaterial(0x567aa2);
 
   const width = BED_WIDTHS[size];
   const length = size === 'single' || size === 'double' ? 1.90 : 2.00;
@@ -56,6 +57,12 @@ export function buildBed(size: BedSize = 'queen'): THREE.Group {
   frameGeo.translate(0, frameH / 2, 0);
   const frame = new THREE.Mesh(frameGeo, wood);
   group.add(frame);
+
+  const railGeo = new THREE.BoxGeometry(width - 0.04, 0.10, length - 0.10);
+  railGeo.translate(0, 0.05, 0);
+  const rail = new THREE.Mesh(railGeo, woodMaterial(0x5c351d));
+  rail.position.y = 0.08;
+  group.add(rail);
 
   // Mattress
   const mGeo = roundedBoxGeometry(width - 0.04, mattressH, length - 0.06, 0.04);
@@ -70,6 +77,11 @@ export function buildBed(size: BedSize = 'queen'): THREE.Group {
   const headboard = new THREE.Mesh(headboardGeo, wood);
   headboard.position.set(0, frameH * 0.3, -length / 2 + 0.02);
   group.add(headboard);
+
+  const headPanelGeo = new THREE.BoxGeometry(width - 0.10, headboardH - 0.10, 0.025);
+  const headPanel = new THREE.Mesh(headPanelGeo, woodMaterial(0x7d5632));
+  headPanel.position.set(0, 0.26, -length / 2 + 0.05);
+  group.add(headPanel);
 
   // Pillows
   const pillowCount = size === 'single' ? 1 : 2;
@@ -89,6 +101,11 @@ export function buildBed(size: BedSize = 'queen'): THREE.Group {
   bk.position.set(0, frameH + mattressH + 0.04, length / 2 - blanketLen / 2 - 0.02);
   group.add(bk);
 
+  const foldGeo = roundedBoxGeometry(width - 0.08, 0.05, 0.22, 0.02);
+  const fold = new THREE.Mesh(foldGeo, blanketFold);
+  fold.position.set(0, frameH + mattressH + 0.045, -0.10);
+  group.add(fold);
+
   // Footboard (lower than headboard)
   const footH = 0.30;
   const footGeo = new THREE.BoxGeometry(width + 0.04, footH, 0.04);
@@ -96,6 +113,19 @@ export function buildBed(size: BedSize = 'queen'): THREE.Group {
   const foot = new THREE.Mesh(footGeo, wood);
   foot.position.set(0, frameH * 0.3, length / 2 - 0.01);
   group.add(foot);
+
+  const legGeo = new THREE.BoxGeometry(0.05, 0.10, 0.05);
+  legGeo.translate(0, 0.05, 0);
+  for (const [x, z] of [
+    [-width / 2 + 0.06, -length / 2 + 0.08],
+    [width / 2 - 0.06, -length / 2 + 0.08],
+    [-width / 2 + 0.06, length / 2 - 0.08],
+    [width / 2 - 0.06, length / 2 - 0.08],
+  ]) {
+    const leg = new THREE.Mesh(legGeo, woodMaterial(0x4d2d18));
+    leg.position.set(x, -0.05, z);
+    group.add(leg);
+  }
 
   return group;
 }

@@ -22,6 +22,84 @@ import {
 import { buildSink, buildStove, buildFridge } from './geometry/kitchen';
 import { buildToilet, buildBathtub, buildShower } from './geometry/bathroom';
 
+const SHARED_GEOMETRY_CACHE = new Map<string, THREE.Group>();
+
+function buildFurnitureGeometry(renderType: string): THREE.Group {
+  switch (renderType) {
+    case 'dining-chair':
+      return buildDiningChair();
+    case 'office-chair':
+      return buildOfficeChair();
+    case 'armchair':
+      return buildArmchair();
+    case 'sofa-2':
+      return buildSofa(2);
+    case 'sofa-3':
+      return buildSofa(3);
+    case 'dining-table':
+      return buildDiningTable();
+    case 'round-table':
+      return buildRoundTable();
+    case 'coffee-table':
+      return buildCoffeeTable();
+    case 'bed-single':
+      return buildBed('single');
+    case 'bed-double':
+      return buildBed('double');
+    case 'bed-queen':
+      return buildBed('queen');
+    case 'bed-king':
+      return buildBed('king');
+    case 'nightstand':
+      return buildNightstand();
+    case 'dresser':
+      return buildDresser();
+    case 'wardrobe':
+      return buildWardrobe();
+    case 'tv-stand':
+      return buildTvStand();
+    case 'bookshelf':
+      return buildBookshelf();
+    case 'buffet':
+      return buildBuffet();
+    case 'sink':
+      return buildSink();
+    case 'stove':
+      return buildStove();
+    case 'fridge':
+      return buildFridge();
+    case 'toilet':
+      return buildToilet();
+    case 'bathtub':
+      return buildBathtub();
+    case 'shower':
+      return buildShower();
+    default: {
+      const group = new THREE.Group();
+      const geo = new THREE.BoxGeometry(0.5, 0.5, 0.5);
+      const mat = new THREE.MeshStandardMaterial({ color: 0xCCCCCC, roughness: 0.6 });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.y = 0.25;
+      group.add(mesh);
+      return group;
+    }
+  }
+}
+
+/**
+ * Shared furniture model getter for in-scene 3D usage.
+ * Returned groups are cloned so each placed instance can be transformed independently.
+ */
+export function createFurnitureModel3D(renderType: string): THREE.Group {
+  const key = renderType || '__default__';
+  let cached = SHARED_GEOMETRY_CACHE.get(key);
+  if (!cached) {
+    cached = buildFurnitureGeometry(renderType);
+    SHARED_GEOMETRY_CACHE.set(key, cached);
+  }
+  return cached.clone(true);
+}
+
 export class Furniture3DRenderer {
   private static instance: Furniture3DRenderer | null = null;
 
@@ -119,66 +197,7 @@ export class Furniture3DRenderer {
   }
 
   private buildGeometry(renderType: string): THREE.Group {
-    switch (renderType) {
-      case 'dining-chair':
-        return buildDiningChair();
-      case 'office-chair':
-        return buildOfficeChair();
-      case 'armchair':
-        return buildArmchair();
-      case 'sofa-2':
-        return buildSofa(2);
-      case 'sofa-3':
-        return buildSofa(3);
-      case 'dining-table':
-        return buildDiningTable();
-      case 'round-table':
-        return buildRoundTable();
-      case 'coffee-table':
-        return buildCoffeeTable();
-      case 'bed-single':
-        return buildBed('single');
-      case 'bed-double':
-        return buildBed('double');
-      case 'bed-queen':
-        return buildBed('queen');
-      case 'bed-king':
-        return buildBed('king');
-      case 'nightstand':
-        return buildNightstand();
-      case 'dresser':
-        return buildDresser();
-      case 'wardrobe':
-        return buildWardrobe();
-      case 'tv-stand':
-        return buildTvStand();
-      case 'bookshelf':
-        return buildBookshelf();
-      case 'buffet':
-        return buildBuffet();
-      case 'sink':
-        return buildSink();
-      case 'stove':
-        return buildStove();
-      case 'fridge':
-        return buildFridge();
-      case 'toilet':
-        return buildToilet();
-      case 'bathtub':
-        return buildBathtub();
-      case 'shower':
-        return buildShower();
-      default: {
-        // Generic fallback cube
-        const group = new THREE.Group();
-        const geo = new THREE.BoxGeometry(0.5, 0.5, 0.5);
-        const mat = new THREE.MeshStandardMaterial({ color: 0xCCCCCC, roughness: 0.6 });
-        const mesh = new THREE.Mesh(geo, mat);
-        mesh.position.y = 0.25;
-        group.add(mesh);
-        return group;
-      }
-    }
+    return buildFurnitureGeometry(renderType);
   }
 
   private fitCameraToObject(object: THREE.Group, aspect: number): void {
