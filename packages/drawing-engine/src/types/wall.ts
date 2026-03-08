@@ -24,7 +24,15 @@ export interface BevelControl {
 export type WallMaterial = 'brick' | 'concrete' | 'partition';
 export type WallLayer = 'structural' | 'partition';
 export type JoinType = 'miter' | 'bevel' | 'butt';
-export type RoomType = 'Bathroom/Closet' | 'Bedroom' | 'Living Room' | 'Open Space' | 'Custom';
+export type RoomType =
+  | 'Bathroom/Closet'
+  | 'Bedroom'
+  | 'Living Room'
+  | 'Open Space'
+  | 'Corridor'
+  | 'Passage'
+  | 'Balcony'
+  | 'Custom';
 export type CompassDirection = 'N' | 'NE' | 'E' | 'SE' | 'S' | 'SW' | 'W' | 'NW';
 export type RoomOccupancySchedule = 'daytime' | 'evening' | '24-hour';
 export type WallColorMode = 'material' | 'u-value' | 'exposure';

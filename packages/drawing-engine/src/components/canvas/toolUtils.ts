@@ -34,6 +34,8 @@ export function getToolCursor(tool: DrawingTool): string {
             return 'crosshair';
         case 'trim':
             return 'crosshair';
+        case 'extend':
+            return 'crosshair';
         default:
             return 'default';
     }

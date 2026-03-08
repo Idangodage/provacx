@@ -130,12 +130,12 @@ export const VISUAL_CONFIG = {
   centerLineWidth: 1,
 
   // Selection
-  selectionStroke: 'transparent',
-  selectionStrokeWidth: 0,
-  selectionFill: 'transparent',
-  hoverStroke: 'transparent',
-  hoverStrokeWidth: 0,
-  hoverFill: 'transparent',
+  selectionStroke: '#374151',
+  selectionStrokeWidth: 1.6,
+  selectionFill: 'rgba(55, 65, 81, 0.12)',
+  hoverStroke: '#0F766E',
+  hoverStrokeWidth: 1.2,
+  hoverFill: 'rgba(15, 118, 110, 0.08)',
 
   // Control handles — all sizes in screen pixels (zoom-independent)
   endpointRadius: 7,
@@ -1731,9 +1731,6 @@ export class WallRenderer {
     const newSelection = new Set(selectedWallIds);
     const previousSelection = this.selectedWallIds;
     this.selectedWallIds = newSelection;
-    const singleSelectedWallId = newSelection.size === 1
-      ? Array.from(newSelection)[0] ?? null
-      : null;
 
     const selectionPlan = resolveWallSelectionPlan(
       Array.from(this.wallData.values()), this.rooms, selectedWallIds
@@ -1753,24 +1750,21 @@ export class WallRenderer {
       group.set('dirty', true);
     });
 
-    // Show wall edit controls only for single-wall selection.
-    // Room/multi-wall selection should remain texture-based and uncluttered.
+    // Rebuild controls for all selected walls so multi-selection visuals
+    // appear immediately after click/shift-click.
     for (const wallId of previousSelection) {
-      if (wallId !== singleSelectedWallId) {
-        this.removeControlPoints(wallId);
-      }
+      this.removeControlPoints(wallId);
     }
 
     this.clearSelectionComponents();
     this.renderSelectionComponents(selectionPlan);
     this.syncHoverPreview();
 
-    if (
-      singleSelectedWallId &&
-      this.wallObjects.has(singleSelectedWallId) &&
-      !this.controlPointObjects.has(singleSelectedWallId)
-    ) {
-      this.createControlPoints(singleSelectedWallId);
+    for (const wallId of newSelection) {
+      if (!this.wallObjects.has(wallId)) continue;
+      if (!this.controlPointObjects.has(wallId)) {
+        this.createControlPoints(wallId);
+      }
     }
 
     // [NEW] Show dimension labels on selected walls

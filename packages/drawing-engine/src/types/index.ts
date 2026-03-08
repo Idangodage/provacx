@@ -113,7 +113,8 @@ export type DrawingTool =
   | 'revision-cloud'
   | 'pencil'
   | 'offset'
-  | 'trim';
+  | 'trim'
+  | 'extend';
 
 export type DimensionType = 'linear' | 'aligned' | 'angular' | 'radius' | 'diameter' | 'area';
 export type DimensionLinearMode = 'horizontal' | 'vertical' | 'aligned';

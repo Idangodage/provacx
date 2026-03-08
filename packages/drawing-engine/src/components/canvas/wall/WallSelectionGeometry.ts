@@ -1879,10 +1879,18 @@ export function resolveWallSelectionPlan(
   const individualWallIds = Array.from(new Set(
     selectedWallIds.filter((wallId) => wallsById.has(wallId))
   ));
+  const joinsMap = computeWallUnionRenderData(walls).joinsMap;
+  const mergedComponents = individualWallIds
+    .map((wallId) => {
+      const wall = wallsById.get(wallId);
+      if (!wall) return null;
+      return buildWallSelectionComponent(wall, joinsMap, walls);
+    })
+    .filter((component): component is WallSelectionComponent => Boolean(component));
 
   return {
     individualWallIds,
-    mergedComponents: [],
+    mergedComponents,
   };
 }
 

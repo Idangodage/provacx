@@ -37,3 +37,6 @@ export { useOffsetTool, type UseOffsetToolOptions, type UseOffsetToolResult } fr
 
 // Trim tool
 export { useTrimTool, type UseTrimToolOptions, type UseTrimToolResult } from './useTrimTool';
+
+// Extend tool
+export { useExtendTool, type UseExtendToolOptions, type UseExtendToolResult } from './useExtendTool';

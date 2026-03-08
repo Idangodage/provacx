@@ -41,6 +41,23 @@ export interface RoomDetectionResult {
   exteriorSignatures: Set<string>;
 }
 
+export interface SmartRoomTypeContext {
+  areaM2: number;
+  perimeterMm: number;
+  vertices: Point2D[];
+  adjacencyCount: number;
+  exteriorWallRatio: number;
+  hasWindows: boolean;
+}
+
+interface RoomShapeStats {
+  minDimensionMm: number;
+  maxDimensionMm: number;
+  aspectRatio: number;
+  compactness: number;
+  meanSpanMm: number;
+}
+
 function distanceSquared(a: Point2D, b: Point2D): number {
   const dx = a.x - b.x;
   const dy = a.y - b.y;
@@ -458,6 +475,134 @@ export function inferRoomType(areaM2: number): RoomType {
   return 'Open Space';
 }
 
+function computeOrientedBounds(vertices: Point2D[]): { shortSide: number; longSide: number } {
+  if (vertices.length < 2) {
+    return { shortSide: 0, longSide: 0 };
+  }
+
+  let bestArea = Number.POSITIVE_INFINITY;
+  let bestWidth = 0;
+  let bestHeight = 0;
+
+  for (let index = 0; index < vertices.length; index += 1) {
+    const current = vertices[index];
+    const next = vertices[(index + 1) % vertices.length];
+    const dx = next.x - current.x;
+    const dy = next.y - current.y;
+    const edgeLength = Math.hypot(dx, dy);
+    if (edgeLength <= 0.000001) continue;
+
+    const ux = dx / edgeLength;
+    const uy = dy / edgeLength;
+    const vx = -uy;
+    const vy = ux;
+
+    let minU = Number.POSITIVE_INFINITY;
+    let maxU = Number.NEGATIVE_INFINITY;
+    let minV = Number.POSITIVE_INFINITY;
+    let maxV = Number.NEGATIVE_INFINITY;
+
+    for (const vertex of vertices) {
+      const projectedU = vertex.x * ux + vertex.y * uy;
+      const projectedV = vertex.x * vx + vertex.y * vy;
+      if (projectedU < minU) minU = projectedU;
+      if (projectedU > maxU) maxU = projectedU;
+      if (projectedV < minV) minV = projectedV;
+      if (projectedV > maxV) maxV = projectedV;
+    }
+
+    const width = Math.max(0, maxU - minU);
+    const height = Math.max(0, maxV - minV);
+    const area = width * height;
+
+    if (area < bestArea) {
+      bestArea = area;
+      bestWidth = width;
+      bestHeight = height;
+    }
+  }
+
+  if (!Number.isFinite(bestArea)) {
+    const xs = vertices.map((point) => point.x);
+    const ys = vertices.map((point) => point.y);
+    bestWidth = Math.max(...xs) - Math.min(...xs);
+    bestHeight = Math.max(...ys) - Math.min(...ys);
+  }
+
+  const shortSide = Math.max(0, Math.min(bestWidth, bestHeight));
+  const longSide = Math.max(0, Math.max(bestWidth, bestHeight));
+  return { shortSide, longSide };
+}
+
+function computeRoomShapeStats(
+  vertices: Point2D[],
+  areaMm2: number,
+  perimeterMm: number
+): RoomShapeStats {
+  const bounds = computeOrientedBounds(vertices);
+  const safeArea = Math.max(0, areaMm2);
+  const safePerimeter = Math.max(0, perimeterMm);
+  const minDimensionMm = bounds.shortSide;
+  const maxDimensionMm = bounds.longSide;
+  const aspectRatio = minDimensionMm > 0 ? maxDimensionMm / minDimensionMm : 1;
+  const compactness =
+    safePerimeter > 0 ? (4 * Math.PI * safeArea) / (safePerimeter * safePerimeter) : 1;
+  const meanSpanMm = safePerimeter > 0 ? (2 * safeArea) / safePerimeter : minDimensionMm;
+
+  return {
+    minDimensionMm,
+    maxDimensionMm,
+    aspectRatio,
+    compactness,
+    meanSpanMm,
+  };
+}
+
+export function inferRoomTypeFromLayout(context: SmartRoomTypeContext): RoomType {
+  const fallback = inferRoomType(context.areaM2);
+  const areaMm2 = Math.max(0, context.areaM2) * 1_000_000;
+  const shape = computeRoomShapeStats(context.vertices, areaMm2, context.perimeterMm);
+  const adjacencyCount = Math.max(0, context.adjacencyCount);
+  const exteriorWallRatio = Math.max(0, Math.min(1, context.exteriorWallRatio));
+
+  const elongated = shape.aspectRatio >= 2.4 || shape.compactness <= 0.34;
+  const veryElongated = shape.aspectRatio >= 4 || shape.compactness <= 0.24;
+  const narrow = shape.meanSpanMm <= 2400 || shape.minDimensionMm <= 2200;
+  const veryNarrow = shape.meanSpanMm <= 1800 || shape.minDimensionMm <= 1600;
+  const connector = adjacencyCount >= 2;
+
+  const likelyBalcony =
+    adjacencyCount >= 1 &&
+    adjacencyCount <= 2 &&
+    exteriorWallRatio >= 0.5 &&
+    context.areaM2 <= 40 &&
+    (narrow || elongated || context.hasWindows);
+  if (likelyBalcony) {
+    return 'Balcony';
+  }
+
+  const likelyPassage =
+    connector &&
+    context.areaM2 <= 12 &&
+    veryNarrow &&
+    (shape.maxDimensionMm <= 9000 || elongated);
+  if (likelyPassage) {
+    return 'Passage';
+  }
+
+  const likelyCorridor =
+    connector &&
+    context.areaM2 >= 6 &&
+    context.areaM2 <= 80 &&
+    (veryElongated || (elongated && narrow) || (shape.meanSpanMm <= 2600 && adjacencyCount >= 3)) &&
+    (adjacencyCount >= 3 || exteriorWallRatio < 0.5);
+  if (likelyCorridor) {
+    return 'Corridor';
+  }
+
+  return fallback;
+}
+
 export function roomTypeFillColor(roomType: RoomType): string {
   switch (roomType) {
     case 'Bathroom/Closet':
@@ -468,6 +613,12 @@ export function roomTypeFillColor(roomType: RoomType): string {
       return '#FDE68A';
     case 'Open Space':
       return '#D8B4FE';
+    case 'Corridor':
+      return '#BFDBFE';
+    case 'Passage':
+      return '#FECACA';
+    case 'Balcony':
+      return '#86EFAC';
     case 'Custom':
     default:
       return '#E2E8F0';
@@ -507,6 +658,15 @@ export function roomMinimumDimensionWarnings(
   }
   if (roomType === 'Bathroom/Closet' && minDim < 1200) {
     return ['Bathroom/Closet minimum dimension is below 1.2m.'];
+  }
+  if (roomType === 'Corridor' && minDim < 1000) {
+    return ['Corridor minimum clear width is below 1.0m.'];
+  }
+  if (roomType === 'Passage' && minDim < 900) {
+    return ['Passage minimum clear width is below 0.9m.'];
+  }
+  if (roomType === 'Balcony' && minDim < 900) {
+    return ['Balcony minimum depth is below 0.9m.'];
   }
   return [];
 }

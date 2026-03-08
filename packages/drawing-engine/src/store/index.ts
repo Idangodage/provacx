@@ -109,6 +109,7 @@ import {
 import {
   detectRoomPolygons,
   inferRoomType,
+  inferRoomTypeFromLayout,
   roomMinimumDimensionWarnings,
   roomTopologyHash,
   roomTypeFillColor,
@@ -642,6 +643,10 @@ function buildAutoDetectedRooms(
 
   const detection = detectRoomPolygons(walls);
   if (detection.faces.length === 0) return [];
+  const interiorFaces = detection.faces.filter(
+    (face) => face.wallIds.length >= 3 && !detection.exteriorSignatures.has(face.signature)
+  );
+  if (interiorFaces.length === 0) return [];
 
   const existingBySignature = new Map<string, Room>();
   existingRooms.forEach((room) => {
@@ -650,33 +655,76 @@ function buildAutoDetectedRooms(
 
   const wallById = new Map(walls.map((wall) => [wall.id, wall]));
   const usedNames = new Set(existingRooms.map((room) => room.name));
+  const nextTypeOrdinal = new Map<RoomType, number>();
+  const faceIndicesByWallId = new Map<string, number[]>();
+  const adjacencyByFaceIndex = interiorFaces.map(() => new Set<number>());
+
+  interiorFaces.forEach((face, faceIndex) => {
+    face.wallIds.forEach((wallId) => {
+      faceIndicesByWallId.set(wallId, [...(faceIndicesByWallId.get(wallId) ?? []), faceIndex]);
+    });
+  });
+
+  faceIndicesByWallId.forEach((indices) => {
+    if (indices.length < 2) return;
+    for (let i = 0; i < indices.length - 1; i += 1) {
+      for (let j = i + 1; j < indices.length; j += 1) {
+        const left = indices[i];
+        const right = indices[j];
+        adjacencyByFaceIndex[left]?.add(right);
+        adjacencyByFaceIndex[right]?.add(left);
+      }
+    }
+  });
+
+  const reserveAutoName = (roomType: RoomType): string => {
+    let ordinal = nextTypeOrdinal.get(roomType) ?? 1;
+    let candidate = `${roomType} ${ordinal}`;
+    while (usedNames.has(candidate)) {
+      ordinal += 1;
+      candidate = `${roomType} ${ordinal}`;
+    }
+    nextTypeOrdinal.set(roomType, ordinal + 1);
+    return candidate;
+  };
+
   const nextRooms: Room[] = [];
 
-  detection.faces.forEach((face, index) => {
-    if (face.wallIds.length < 3) return;
-    if (detection.exteriorSignatures.has(face.signature)) return;
+  interiorFaces.forEach((face, index) => {
     const signature = roomSignatureFromWallIds(face.wallIds);
     const existing = existingBySignature.get(signature);
     const areaM2 = face.area / 1_000_000;
-    const roomType = existing?.roomType ?? inferRoomType(areaM2);
     const hasWindows = face.wallIds.some((wallId) => {
       const wall = wallById.get(wallId);
       if (!wall) return false;
       return wall.openings.some((opening) => opening.type === 'window');
     });
+    const adjacencyCount = adjacencyByFaceIndex[index]?.size ?? 0;
+    const exteriorWallCount = face.wallIds.reduce((count, wallId) => (
+      (faceIndicesByWallId.get(wallId)?.length ?? 0) <= 1 ? count + 1 : count
+    ), 0);
+    const exteriorWallRatio = face.wallIds.length > 0
+      ? exteriorWallCount / face.wallIds.length
+      : 0;
+    const inferredType = inferRoomTypeFromLayout({
+      areaM2,
+      perimeterMm: face.perimeter,
+      vertices: face.vertices,
+      adjacencyCount,
+      exteriorWallRatio,
+      hasWindows,
+    });
+    const resolvedRoomType = existing?.roomType ?? inferredType;
     const validationWarnings = buildRoomValidationWarnings({
       areaM2,
-      roomType,
+      roomType: resolvedRoomType,
       vertices: face.vertices,
       hasWindows,
     });
 
     let roomName = existing?.name;
     if (!roomName) {
-      roomName = `${roomType} ${index + 1}`;
-      if (usedNames.has(roomName)) {
-        roomName = `Room ${index + 1}`;
-      }
+      roomName = reserveAutoName(resolvedRoomType);
     }
     usedNames.add(roomName);
 
@@ -684,12 +732,12 @@ function buildAutoDetectedRooms(
       vertices: face.vertices,
       wallIds: face.wallIds,
       name: roomName,
-      roomType,
+      roomType: resolvedRoomType,
       perimeter: face.perimeter,
       centroid: face.centroid,
       finishes: existing?.finishes ?? '',
       notes: existing?.notes ?? '',
-      fillColor: existing?.fillColor ?? roomTypeFillColor(roomType),
+      fillColor: existing?.fillColor ?? roomTypeFillColor(resolvedRoomType),
       showLabel: existing?.showLabel ?? true,
       adjacentRoomIds: existing?.adjacentRoomIds ?? [],
       hasWindows,

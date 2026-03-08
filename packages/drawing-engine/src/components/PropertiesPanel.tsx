@@ -1072,7 +1072,16 @@ function RoomSection({ propertyUnit }: { propertyUnit: PropertyUnit }) {
   } = useSmartDrawingStore();
   const [selectedRoomId, setSelectedRoomId] = useState<string>('');
   const [tab, setTab] = useState<'general' | 'thermal' | 'ventilation' | 'calculated'>('general');
-  const roomTypeOptions: RoomType[] = ['Bathroom/Closet', 'Bedroom', 'Living Room', 'Open Space', 'Custom'];
+  const roomTypeOptions: RoomType[] = [
+    'Bathroom/Closet',
+    'Bedroom',
+    'Living Room',
+    'Open Space',
+    'Corridor',
+    'Passage',
+    'Balcony',
+    'Custom',
+  ];
   const scheduleOptions: RoomOccupancySchedule[] = ['daytime', 'evening', '24-hour'];
 
   const selectedFromCanvas = rooms.find((room) => selectedElementIds.includes(room.id));
@@ -1966,6 +1975,9 @@ function RoomListSection() {
           <option value="Bedroom">Bedroom</option>
           <option value="Living Room">Living Room</option>
           <option value="Open Space">Open Space</option>
+          <option value="Corridor">Corridor</option>
+          <option value="Passage">Passage</option>
+          <option value="Balcony">Balcony</option>
           <option value="Custom">Custom</option>
         </select>
         <select

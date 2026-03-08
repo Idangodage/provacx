@@ -161,6 +161,11 @@ export function useCanvasKeyboard({
                 setTool('dimension');
                 return;
             }
+            if (key === 'g') {
+                event.preventDefault();
+                setTool('extend');
+                return;
+            }
             if (key === 'k') {
                 event.preventDefault();
                 setTool('section-line');

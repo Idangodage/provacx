@@ -28,6 +28,7 @@ const CIRCULATION_TERMS = [
   'stair',
   'staircase',
   'landing',
+  'balcony',
 ];
 
 function normalizeDoorOpenSide(value: unknown): DoorOpenSide {
@@ -182,6 +183,13 @@ function inwardRoomPriority(room: Room): number {
       break;
     case 'Custom':
       score += 20;
+      break;
+    case 'Corridor':
+    case 'Passage':
+      score += 5;
+      break;
+    case 'Balcony':
+      score -= 10;
       break;
     case 'Living Room':
       score += 15;

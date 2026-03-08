@@ -26,6 +26,7 @@ import {
   BoxSelect,
   Copy,
   Scissors,
+  MoveHorizontal,
 } from 'lucide-react';
 import React from 'react';
 
@@ -88,6 +89,7 @@ const DRAWING_TOOLS: {
   { id: 'eraser', icon: <Eraser size={16} />, label: 'Eraser', shortLabel: 'Erase', shortcut: 'E' },
   { id: 'offset', icon: <Copy size={16} />, label: 'Offset', shortLabel: 'Offset', shortcut: 'O' },
   { id: 'trim', icon: <Scissors size={16} />, label: 'Trim', shortLabel: 'Trim', shortcut: 'X' },
+  { id: 'extend', icon: <MoveHorizontal size={16} />, label: 'Extend', shortLabel: 'Extend', shortcut: 'G' },
 ];
 
 // =============================================================================

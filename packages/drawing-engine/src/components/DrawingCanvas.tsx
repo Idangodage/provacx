@@ -37,6 +37,7 @@ import {
     useDimensionTool,
     useOffsetTool,
     useTrimTool,
+    useExtendTool,
     RoomRenderer,
     DimensionRenderer,
     ObjectRenderer,
@@ -140,6 +141,40 @@ const clampValue = (value: number, min: number, max: number): number => {
     return Math.min(max, Math.max(min, value));
 };
 
+const hideActiveSelectionChrome = (canvas: fabric.Canvas | null): void => {
+    if (!canvas) return;
+    const activeObject = canvas.getActiveObject() as
+        | (fabric.Object & {
+            setControlsVisibility?: (options: Record<string, boolean>) => void;
+        })
+        | null;
+    if (!activeObject) return;
+
+    activeObject.set({
+        hasControls: false,
+        hasBorders: false,
+        borderColor: 'rgba(0,0,0,0)',
+        cornerColor: 'rgba(0,0,0,0)',
+        cornerStrokeColor: 'rgba(0,0,0,0)',
+        transparentCorners: true,
+        cornerSize: 0,
+        padding: 0,
+    });
+    if (typeof activeObject.setControlsVisibility === 'function') {
+        activeObject.setControlsVisibility({
+            tl: false,
+            tr: false,
+            bl: false,
+            br: false,
+            ml: false,
+            mt: false,
+            mr: false,
+            mb: false,
+            mtr: false,
+        });
+    }
+};
+
 // =============================================================================
 // Component
 // =============================================================================
@@ -207,6 +242,7 @@ export function DrawingCanvas({
     const wallClipboardRef = useRef<Wall[] | null>(null);
     const openingResizeHandlesRef = useRef<fabric.Object[]>([]);
     const openingPointerInteractionRef = useRef<OpeningPointerInteraction | null>(null);
+    const suppressFabricSelectionSyncRef = useRef(0);
 
     // ── Drag-performance refs ──
     // Tracks the last position where collision was checked (in mm) to avoid per-pixel checks
@@ -2094,6 +2130,17 @@ export function DrawingCanvas({
         setProcessingStatus,
     });
 
+    const extendTool = useExtendTool({
+        fabricRef,
+        walls,
+        updateWall,
+        connectWalls,
+        setTool,
+        detectRooms,
+        saveToHistory,
+        setProcessingStatus,
+    });
+
     const copySelectedWalls = useCallback(() => {
         const selectedWallIds = new Set(selectedIds);
         const selectedWalls = walls
@@ -2374,6 +2421,7 @@ export function DrawingCanvas({
         canvas.setViewportTransform(viewportTransform);
         roomRendererRef.current?.setViewportZoom(viewportZoom);
         wallRenderer?.setViewportZoom(viewportZoom);
+        hideActiveSelectionChrome(canvas);
         canvas.requestRenderAll();
         zoomRef.current = viewportZoom;
         panOffsetRef.current = panOffset;
@@ -2406,6 +2454,12 @@ export function DrawingCanvas({
             trimTool.cleanup();
         }
     }, [tool, trimTool]);
+
+    useEffect(() => {
+        if (tool !== 'extend') {
+            extendTool.cleanup();
+        }
+    }, [tool, extendTool]);
 
     useEffect(() => {
         roomRendererRef.current?.renderAllRooms(rooms);
@@ -2884,6 +2938,9 @@ export function DrawingCanvas({
             obj.selectable = allowSelection;
             obj.evented = allowSelection;
         });
+        if (allowSelection) {
+            hideActiveSelectionChrome(canvas);
+        }
         canvas.renderAll();
     }, [tool, isSpacePressed, canvasState.isPanning, pendingPlacementDefinition, openingInteractionActive]);
 
@@ -3023,6 +3080,11 @@ export function DrawingCanvas({
                 return;
             }
 
+            if (tool === 'extend') {
+                extendTool.handleMouseDown(rawPoint);
+                return;
+            }
+
             if (isDrawingTool(tool)) {
                 const nextState: CanvasState = { ...canvasStateRef.current, isDrawing: true, drawingPoints: [point] };
                 canvasStateRef.current = nextState;
@@ -3052,6 +3114,9 @@ export function DrawingCanvas({
             updateSectionLinePreview,
             commitSectionLine,
             wallRenderer,
+            offsetTool,
+            trimTool,
+            extendTool,
         ]
     );
 
@@ -3230,6 +3295,11 @@ export function DrawingCanvas({
                 return;
             }
 
+            if (tool === 'extend') {
+                extendTool.handleMouseMove(rawPoint);
+                return;
+            }
+
             if (tool === 'select') {
                 const hitTarget = ((e.target as fabric.Object | null | undefined) ??
                     canvas.findTarget(e.e as unknown as fabric.TPointerEvent) ??
@@ -3325,6 +3395,9 @@ export function DrawingCanvas({
             walls,
             viewportZoom,
             wallRenderer,
+            offsetTool,
+            trimTool,
+            extendTool,
             wallSettings.gridSize,
             wallSettings.defaultThickness,
             setHoveredElement,
@@ -3552,6 +3625,12 @@ export function DrawingCanvas({
                     e.preventDefault();
                 }
             }
+            if (tool === 'extend') {
+                const handled = extendTool.handleKeyDown(e);
+                if (handled) {
+                    e.preventDefault();
+                }
+            }
         };
         const handleWallKeyUp = (e: KeyboardEvent) => {
             if (tool === 'wall') {
@@ -3561,6 +3640,15 @@ export function DrawingCanvas({
 
         const handleSelectionCreated = (event: fabric.CanvasEvents['selection:created']) => {
             if (tool !== 'select') return;
+            hideActiveSelectionChrome(canvas);
+            const nativeEvent = event.e as MouseEvent | PointerEvent | undefined;
+            if (nativeEvent?.shiftKey || nativeEvent?.ctrlKey || nativeEvent?.metaKey) {
+                return;
+            }
+            if (suppressFabricSelectionSyncRef.current > 0) {
+                suppressFabricSelectionSyncRef.current -= 1;
+                return;
+            }
             const openingInteraction = openingPointerInteractionRef.current;
             if (openingInteraction) {
                 setSelectedIds([openingInteraction.openingId]);
@@ -3590,6 +3678,15 @@ export function DrawingCanvas({
 
         const handleSelectionUpdated = (event: fabric.CanvasEvents['selection:updated']) => {
             if (tool !== 'select') return;
+            hideActiveSelectionChrome(canvas);
+            const nativeEvent = event.e as MouseEvent | PointerEvent | undefined;
+            if (nativeEvent?.shiftKey || nativeEvent?.ctrlKey || nativeEvent?.metaKey) {
+                return;
+            }
+            if (suppressFabricSelectionSyncRef.current > 0) {
+                suppressFabricSelectionSyncRef.current -= 1;
+                return;
+            }
             const openingInteraction = openingPointerInteractionRef.current;
             if (openingInteraction) {
                 setSelectedIds([openingInteraction.openingId]);
@@ -3617,7 +3714,15 @@ export function DrawingCanvas({
             updateSelectionFromTargets(targets);
         };
 
-        const handleSelectionCleared = () => {
+        const handleSelectionCleared = (event: fabric.CanvasEvents['selection:cleared']) => {
+            const nativeEvent = event?.e as MouseEvent | PointerEvent | undefined;
+            if (nativeEvent?.shiftKey || nativeEvent?.ctrlKey || nativeEvent?.metaKey) {
+                return;
+            }
+            if (suppressFabricSelectionSyncRef.current > 0) {
+                suppressFabricSelectionSyncRef.current -= 1;
+                return;
+            }
             applyMarqueeFilterRef.current = false;
             const openingInteraction = openingPointerInteractionRef.current;
             if (openingInteraction) {
@@ -3636,13 +3741,43 @@ export function DrawingCanvas({
             closeObjectContextMenu();
             if (pendingPlacementDefinition) return;
             if (tool !== 'select') return;
+            suppressFabricSelectionSyncRef.current = 0;
+            const suppressNextFabricSelectionSync = (count: number = 3) => {
+                suppressFabricSelectionSyncRef.current = Math.max(
+                    suppressFabricSelectionSyncRef.current,
+                    count
+                );
+            };
+            const getLiveSelectedSet = () =>
+                new Set(useSmartDrawingStore.getState().selectedElementIds);
+            const toggleSelectedId = (id: string) => {
+                const current = getLiveSelectedSet();
+                if (current.has(id)) {
+                    current.delete(id);
+                } else {
+                    current.add(id);
+                }
+                setSelectedIds(Array.from(current));
+            };
+            const toggleSelectedIds = (ids: string[]) => {
+                const current = getLiveSelectedSet();
+                const alreadySelected = ids.every((id) => current.has(id));
+                ids.forEach((id) => {
+                    if (alreadySelected) {
+                        current.delete(id);
+                    } else {
+                        current.add(id);
+                    }
+                });
+                setSelectedIds(Array.from(current));
+            };
             const hitTarget = ((event.target as fabric.Object | null | undefined) ??
                 (event.e ? canvas.findTarget(event.e as unknown as fabric.TPointerEvent) : null) ??
                 null);
             const subTargets = (event as fabric.CanvasEvents['mouse:down'] & { subTargets?: fabric.Object[] })
                 .subTargets ?? [];
             const candidateTargets = [...subTargets, ...(hitTarget ? [hitTarget] : [])];
-            const addToSelection = Boolean(event.e?.shiftKey);
+            const addToSelection = Boolean(event.e?.shiftKey || event.e?.ctrlKey || event.e?.metaKey);
             const scenePoint = event.e ? canvas.getScenePoint(event.e) : null;
             const wallPoint = scenePoint
                 ? {
@@ -3658,6 +3793,7 @@ export function DrawingCanvas({
                     .find((entry): entry is OpeningResizeHandleHit => Boolean(entry)) ??
                 null;
             if (openingResizeHandle) {
+                suppressNextFabricSelectionSync();
                 marqueeSelectionRef.current = { active: false, start: null, current: null, mode: 'window' };
                 lastMarqueeSelectionRef.current = { active: false, start: null, current: null, mode: 'window' };
                 applyMarqueeFilterRef.current = false;
@@ -3695,18 +3831,13 @@ export function DrawingCanvas({
                 ?? inferredOpening?.openingId
                 ?? null;
             if (openingVisualId) {
+                suppressNextFabricSelectionSync();
                 marqueeSelectionRef.current = { active: false, start: null, current: null, mode: 'window' };
                 lastMarqueeSelectionRef.current = { active: false, start: null, current: null, mode: 'window' };
                 applyMarqueeFilterRef.current = false;
                 setMarqueeSelectionMode('window');
                 if (addToSelection) {
-                    const current = new Set(selectedIds);
-                    if (current.has(openingVisualId)) {
-                        current.delete(openingVisualId);
-                    } else {
-                        current.add(openingVisualId);
-                    }
-                    setSelectedIds(Array.from(current));
+                    toggleSelectedId(openingVisualId);
                 } else {
                     setSelectedIds([openingVisualId]);
                 }
@@ -3760,14 +3891,9 @@ export function DrawingCanvas({
                     .find((entry): entry is string => Boolean(entry)) ??
                 resolveSectionLineIdFromTarget(hitTarget);
             if (sectionLineId) {
+                suppressNextFabricSelectionSync();
                 if (addToSelection) {
-                    const current = new Set(selectedIds);
-                    if (current.has(sectionLineId)) {
-                        current.delete(sectionLineId);
-                    } else {
-                        current.add(sectionLineId);
-                    }
-                    setSelectedIds(Array.from(current));
+                    toggleSelectedId(sectionLineId);
                 } else {
                     setSelectedIds([sectionLineId]);
                 }
@@ -3781,14 +3907,9 @@ export function DrawingCanvas({
                     .find((entry): entry is string => Boolean(entry)) ??
                 resolveObjectIdFromTarget(hitTarget);
             if (objectId) {
+                suppressNextFabricSelectionSync();
                 if (addToSelection) {
-                    const current = new Set(selectedIds);
-                    if (current.has(objectId)) {
-                        current.delete(objectId);
-                    } else {
-                        current.add(objectId);
-                    }
-                    setSelectedIds(Array.from(current));
+                    toggleSelectedId(objectId);
                 } else {
                     setSelectedIds([objectId]);
                 }
@@ -3810,10 +3931,16 @@ export function DrawingCanvas({
                 addToSelection
             );
             if (dimensionHandled) {
+                suppressNextFabricSelectionSync();
                 return;
             }
             const targetMeta = getTargetMeta(hitTarget);
-            const clickedWallId = wallRenderer?.getWallIdAtPoint(wallPointMm) ?? null;
+            const directWallId =
+                candidateTargets
+                    .map((target) => resolveWallIdFromTarget(target))
+                    .find((entry): entry is string => Boolean(entry)) ??
+                resolveWallIdFromTarget(hitTarget);
+            const clickedWallId = directWallId ?? wallRenderer?.getWallIdAtPoint(wallPointMm) ?? null;
             const clickedRoomId =
                 roomRendererRef.current?.getRoomIdAtPoint(wallPointMm) ??
                 resolveRoomIdFromTarget(hitTarget);
@@ -3840,17 +3967,9 @@ export function DrawingCanvas({
             ) {
                 const perimeterWallIds = perimeterWallIdsForRooms([clickedRoomId]);
                 if (perimeterWallIds.length > 0) {
+                    suppressNextFabricSelectionSync();
                     if (addToSelection) {
-                        const current = new Set(selectedIds);
-                        const alreadySelected = perimeterWallIds.every((wallId) => current.has(wallId));
-                        perimeterWallIds.forEach((wallId) => {
-                            if (alreadySelected) {
-                                current.delete(wallId);
-                            } else {
-                                current.add(wallId);
-                            }
-                        });
-                        setSelectedIds(Array.from(current));
+                        toggleSelectedIds(perimeterWallIds);
                     } else {
                         setSelectedIds(perimeterWallIds);
                     }
@@ -3861,22 +3980,17 @@ export function DrawingCanvas({
             }
             if (
                 targetMeta.isWallControl ||
-                targetMeta.isRoomControl ||
-                targetMeta.wallId ||
-                targetMeta.roomId
+                targetMeta.isRoomControl
             ) {
+                suppressNextFabricSelectionSync();
                 handleSelectMouseDown(hitTarget, wallPointMm, addToSelection);
                 return;
             }
             if (clickedWallId) {
+                suppressNextFabricSelectionSync();
                 if (addToSelection) {
-                    const current = new Set(selectedIds);
-                    if (current.has(clickedWallId)) {
-                        current.delete(clickedWallId);
-                    } else {
-                        current.add(clickedWallId);
-                    }
-                    setSelectedIds(Array.from(current));
+                    canvas.discardActiveObject();
+                    toggleSelectedId(clickedWallId);
                 } else {
                     setSelectedIds([clickedWallId]);
                 }
@@ -4309,6 +4423,9 @@ export function DrawingCanvas({
         handleDimensionDoubleClick,
         handleDimensionKeyDown,
         handleDimensionSelectMouseDown,
+        offsetTool,
+        trimTool,
+        extendTool,
         symbols,
         objectDefinitionsById,
         hasFurnitureCollision,
