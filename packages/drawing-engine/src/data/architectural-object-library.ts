@@ -145,7 +145,8 @@ function furniture(
   widthMm: number,
   depthMm: number,
   heightMm: number = 750,
-  renderType?: string
+  renderType?: string,
+  extraTags: string[] = []
 ): ArchitecturalObjectDefinition {
   return objectBase(
     id,
@@ -155,7 +156,7 @@ function furniture(
     widthMm,
     depthMm,
     heightMm,
-    ['furniture', zone],
+    ['furniture', zone, ...extraTags],
     renderType ? { renderType } : undefined
   );
 }
@@ -263,6 +264,28 @@ export const DEFAULT_ARCHITECTURAL_OBJECT_LIBRARY: ArchitecturalObjectDefinition
   furniture('furn-round-table', 'Round Table Ø900', 'dining', 900, 900, 750, 'round-table'),
   furniture('furn-chair', 'Dining Chair', 'dining', 450, 450, 830, 'dining-chair'),
   furniture('furn-buffet', 'Buffet', 'dining', 1500, 500, 900, 'buffet'),
+
+  // Furniture - Meeting Tables with chairs (separate circular / square variants)
+  furniture(
+    'furn-circular-table-chairs',
+    'Circular Meeting Table with Chairs',
+    'dining',
+    1600,
+    1600,
+    750,
+    'circular-table-chairs',
+    ['meeting', 'meeting-table', 'circular', 'chairs']
+  ),
+  furniture(
+    'furn-square-table-chairs',
+    'Square Meeting Table with Chairs',
+    'dining',
+    1800,
+    1400,
+    750,
+    'square-table-chairs',
+    ['meeting', 'meeting-table', 'square', 'chairs']
+  ),
 
   // Fixtures / Kitchen-Bath
   fixture('fix-sink', 'Sink', 'plumbing', 600, 500, 900, 'sink'),

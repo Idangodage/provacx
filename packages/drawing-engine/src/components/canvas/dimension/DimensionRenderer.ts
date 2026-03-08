@@ -345,7 +345,7 @@ export class DimensionRenderer {
         hasBorders: false,
         lockMovementX: true,
         lockMovementY: true,
-        objectCaching: false,
+        objectCaching: true,
       }
     ) as DimensionGroup;
 
@@ -434,7 +434,7 @@ export class DimensionRenderer {
         hasBorders: false,
         lockMovementX: true,
         lockMovementY: true,
-        objectCaching: false,
+        objectCaching: true,
       }
     ) as DimensionGroup;
 
@@ -499,7 +499,7 @@ export class DimensionRenderer {
       hasBorders: false,
       lockMovementX: true,
       lockMovementY: true,
-      objectCaching: false,
+      objectCaching: true,
     }) as DimensionGroup;
 
     group.id = dimension.id;
@@ -558,6 +558,7 @@ export class DimensionRenderer {
           obj.set('visible', selected);
         }
       });
+      group.set('dirty', true);
     });
     this.canvas.requestRenderAll();
   }
@@ -574,6 +575,7 @@ export class DimensionRenderer {
           );
         }
       });
+      group.set('dirty', true);
     });
     this.canvas.requestRenderAll();
   }

@@ -81,3 +81,14 @@ export {
   type CornerBevelDots,
   type EndpointBevelDots,
 } from './wallBevel';
+
+// Performance & GPU monitoring
+export {
+  GPUResourceMonitor,
+  MaterialPool,
+  GeometryOptimizer,
+  RenderScheduler,
+  ObjectPoolManager,
+  WebGLContextGuardian,
+} from './performance';
+export type { QualityLevel, FrameMetrics } from './performance';

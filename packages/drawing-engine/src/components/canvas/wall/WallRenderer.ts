@@ -546,7 +546,7 @@ export class WallRenderer {
       strokeLineJoin: 'miter',
       selectable: false,
       evented: false,
-      objectCaching: false,
+      objectCaching: true,
     });
 
     this.canvas.add(mergedPath);
@@ -568,7 +568,7 @@ export class WallRenderer {
         strokeWidth: 0,
         selectable: false,
         evented: false,
-        objectCaching: false,
+        objectCaching: true,
         clipPath: overlayClip,
       });
       this.canvas.add(overlayPath);
@@ -606,7 +606,7 @@ export class WallRenderer {
         strokeWidth: 0,
         selectable: false,
         evented: false,
-        objectCaching: false,
+        objectCaching: true,
       });
       const typedFill = fillPath as SelectionComponentObject;
       typedFill.name = `${component.kind}-${namePrefix}-fill`;
@@ -627,7 +627,7 @@ export class WallRenderer {
       strokeLineCap: 'round',
       selectable: false,
       evented: false,
-      objectCaching: false,
+      objectCaching: true,
     });
     const typedOutline = outline as SelectionComponentObject;
     typedOutline.name = `${component.kind}-${namePrefix}-outline`;
@@ -677,6 +677,7 @@ export class WallRenderer {
         stroke: VISUAL_CONFIG.hoverStroke,
         fill: VISUAL_CONFIG.hoverFill,
       });
+      group.set('dirty', true);
     });
 
     this.clearHoverComponents();
@@ -861,7 +862,7 @@ export class WallRenderer {
       selectable: true, evented: true, subTargetCheck: true,
       hasControls: false, hasBorders: false,
       lockMovementX: true, lockMovementY: true,
-      transparentCorners: false, objectCaching: false,
+      transparentCorners: false, objectCaching: true,
     }) as WallGroup;
 
     group.wallId = wall.id;
@@ -1634,6 +1635,7 @@ export class WallRenderer {
         stroke: VISUAL_CONFIG.selectionStroke,
         fill: VISUAL_CONFIG.selectionFill,
       });
+      group.set('dirty', true);
     });
 
     // Show wall edit controls only for single-wall selection.

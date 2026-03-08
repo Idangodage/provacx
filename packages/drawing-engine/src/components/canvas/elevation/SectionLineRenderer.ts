@@ -228,7 +228,7 @@ export class SectionLineRenderer {
       hasBorders: false,
       lockMovementX: !isDraggable,
       lockMovementY: !isDraggable,
-      objectCaching: false,
+      objectCaching: true,
     }) as SectionGroup;
     group.id = sectionLine.id;
     group.sectionLineId = sectionLine.id;
@@ -279,6 +279,7 @@ export class SectionLineRenderer {
       if (hover) {
         hover.set('visible', this.hoveredSectionLineId === sectionLineId && !this.selectedSectionLineIds.has(sectionLineId));
       }
+      group.set('dirty', true);
     });
     this.canvas.requestRenderAll();
   }
@@ -291,6 +292,7 @@ export class SectionLineRenderer {
         .find((object) => (object as NamedObject).name === 'section-line-hover');
       if (!hover) return;
       hover.set('visible', sectionLineId === id && !this.selectedSectionLineIds.has(sectionLineId));
+      group.set('dirty', true);
     });
     this.canvas.requestRenderAll();
   }

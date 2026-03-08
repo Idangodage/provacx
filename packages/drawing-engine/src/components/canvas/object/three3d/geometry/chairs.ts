@@ -1,5 +1,7 @@
 /**
  * 3D geometry builders for chair furniture types.
+ * roundedBoxGeometry: bottom face at y=0, top face at y=h.
+ * Set mesh.position.y to the desired bottom elevation.
  */
 
 import * as THREE from 'three';
@@ -28,7 +30,7 @@ function roundedBoxGeometry(w: number, h: number, d: number, r: number, segments
   };
   const geo = new THREE.ExtrudeGeometry(shape, extrudeSettings);
   geo.rotateX(-Math.PI / 2);
-  geo.translate(0, h / 2, 0);
+  // After rotation: bottom at y=0, top at y=h.
   return geo;
 }
 
@@ -228,19 +230,19 @@ export function buildArmchair(): THREE.Group {
   // Base frame
   const baseGeo = roundedBoxGeometry(0.78, 0.08, 0.78, 0.03);
   const base = new THREE.Mesh(baseGeo, fabric);
-  base.position.y = 0.19;
+  base.position.y = 0.15;                                  // bottom at leg top
   group.add(base);
 
   // Seat cushion
   const seatGeo = roundedBoxGeometry(0.60, 0.12, 0.58, 0.04);
   const seat = new THREE.Mesh(seatGeo, cushionFabric);
-  seat.position.set(0, 0.30, 0.03);
+  seat.position.set(0, 0.23, 0.03);                        // bottom on base top
   group.add(seat);
 
   // Back cushion
   const backGeo = roundedBoxGeometry(0.58, 0.38, 0.10, 0.04);
   const back = new THREE.Mesh(backGeo, cushionFabric);
-  back.position.set(0, 0.54, -0.30);
+  back.position.set(0, 0.35, -0.30);                       // bottom just above seat
   back.rotation.x = 0.08;
   group.add(back);
 
@@ -248,25 +250,25 @@ export function buildArmchair(): THREE.Group {
   for (const side of [-1, 1]) {
     const armGeo = roundedBoxGeometry(0.10, 0.25, 0.65, 0.03);
     const arm = new THREE.Mesh(armGeo, fabric);
-    arm.position.set(side * 0.36, 0.36, -0.02);
+    arm.position.set(side * 0.36, 0.15, -0.02);            // bottom at base level
     group.add(arm);
   }
 
   const sideCushionGeo = roundedBoxGeometry(0.06, 0.16, 0.44, 0.02);
   for (const side of [-1, 1]) {
     const sideCushion = new THREE.Mesh(sideCushionGeo, cushionFabric);
-    sideCushion.position.set(side * 0.26, 0.34, 0.04);
+    sideCushion.position.set(side * 0.26, 0.23, 0.04);     // aligns with seat
     group.add(sideCushion);
   }
 
   const backSplitGeo = new THREE.BoxGeometry(0.01, 0.30, 0.03);
   const backSplit = new THREE.Mesh(backSplitGeo, fabric);
-  backSplit.position.set(0, 0.57, -0.25);
+  backSplit.position.set(0, 0.50, -0.25);                   // inside back cushion
   group.add(backSplit);
 
   const throwPillowGeo = roundedBoxGeometry(0.18, 0.08, 0.18, 0.02);
   const throwPillow = new THREE.Mesh(throwPillowGeo, fabricMaterial(0x7a8f73));
-  throwPillow.position.set(0.12, 0.38, 0.06);
+  throwPillow.position.set(0.12, 0.35, 0.06);               // sits on seat cushion
   throwPillow.rotation.y = -0.22;
   group.add(throwPillow);
 

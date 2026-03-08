@@ -238,7 +238,7 @@ export class RoomRenderer {
       originY: 'center',
       selectable: false,
       evented: false,
-      objectCaching: false,
+      objectCaching: true,
       excludeFromExport: true,
     }) as RoomLabelGroup;
     labelGroup.id = room.id;
@@ -543,7 +543,7 @@ export class RoomRenderer {
         hasBorders: false,
         lockMovementX: true,
         lockMovementY: true,
-        objectCaching: false,
+        objectCaching: true,
       }
     ) as RoomGroup;
 
@@ -629,6 +629,7 @@ export class RoomRenderer {
           object.set('visible', selected);
         }
       });
+      group.set('dirty', true);
     });
     this.canvas.requestRenderAll();
   }
@@ -645,6 +646,7 @@ export class RoomRenderer {
           currentId === roomId && !this.selectedRoomIds.has(currentId)
         );
       }
+      group.set('dirty', true);
     });
     this.canvas.requestRenderAll();
   }

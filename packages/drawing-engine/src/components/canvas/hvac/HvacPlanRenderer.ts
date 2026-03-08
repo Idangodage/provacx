@@ -195,7 +195,7 @@ export class HvacPlanRenderer {
       hasControls: false,
       hasBorders: false,
       lockRotation: true,
-      objectCaching: false,
+      objectCaching: true,
     }) as HvacGroup;
     group.id = element.id;
     group.hvacElementId = element.id;
@@ -221,6 +221,7 @@ export class HvacPlanRenderer {
       if (halo) {
         halo.set('visible', this.selectedIds.has(id));
       }
+      group.set('dirty', true);
     });
     this.canvas.requestRenderAll();
   }

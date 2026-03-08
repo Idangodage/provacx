@@ -36,6 +36,10 @@ import {
 } from '../types/wall';
 
 import { fromMillimeters, toMillimeters } from './canvas/scale';
+import {
+  circularMeetingFootprintMm,
+  squareMeetingFootprintMm,
+} from './canvas/object/three3d/geometry/meeting-tables';
 
 type PropertyUnit = 'mm' | 'in' | 'ft';
 const COMPASS_DIRECTIONS: CompassDirection[] = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
@@ -899,6 +903,67 @@ function ObjectSection({ propertyUnit }: { propertyUnit: PropertyUnit }) {
           className="w-24 px-2 py-1 text-sm border border-amber-200/80 rounded focus:outline-none focus:ring-1 focus:ring-amber-400 bg-white"
         />
       </PropertyRow>
+      {(selectedObject.symbolId === 'furn-circular-table-chairs' || selectedObject.symbolId === 'furn-square-table-chairs') && (
+        <div className="rounded border border-amber-200/70 bg-amber-50/50 p-2 space-y-2">
+          <PropertyRow label="Chairs">
+            <input
+              type="number"
+              min={2}
+              max={20}
+              step={1}
+              value={propertyAsNumber(selectedObject.properties, 'chairCount', 4)}
+              onChange={(e) => {
+                const parsed = Number.parseInt(e.target.value, 10);
+                if (!Number.isFinite(parsed)) return;
+                const nextCount = Math.max(2, Math.min(20, parsed));
+                const footprint = selectedObject.symbolId === 'furn-circular-table-chairs'
+                  ? circularMeetingFootprintMm(nextCount)
+                  : squareMeetingFootprintMm(nextCount);
+                updateSymbol(selectedObject.id, {
+                  properties: {
+                    ...selectedObject.properties,
+                    chairCount: nextCount,
+                    widthMm: footprint.widthMm,
+                    depthMm: footprint.depthMm,
+                  },
+                });
+              }}
+              className="w-20 px-2 py-1 text-sm border border-amber-200/80 rounded focus:outline-none focus:ring-1 focus:ring-amber-400 bg-white"
+            />
+          </PropertyRow>
+          <div className="flex flex-wrap gap-1">
+            {[4, 6, 8, 10, 12].map((preset) => (
+              <button
+                key={preset}
+                type="button"
+                onClick={() => {
+                  const footprint = selectedObject.symbolId === 'furn-circular-table-chairs'
+                    ? circularMeetingFootprintMm(preset)
+                    : squareMeetingFootprintMm(preset);
+                  updateSymbol(selectedObject.id, {
+                    properties: {
+                      ...selectedObject.properties,
+                      chairCount: preset,
+                      widthMm: footprint.widthMm,
+                      depthMm: footprint.depthMm,
+                    },
+                  });
+                }}
+                className={`rounded border px-2 py-1 text-[11px] ${
+                  propertyAsNumber(selectedObject.properties, 'chairCount', 4) === preset
+                    ? 'border-amber-500 bg-amber-200 text-amber-900'
+                    : 'border-amber-200 bg-white text-slate-700 hover:bg-amber-100'
+                }`}
+              >
+                {preset} chairs
+              </button>
+            ))}
+          </div>
+          <p className="text-[11px] text-slate-500">
+            Table and footprint auto-resize to fit selected chair count.
+          </p>
+        </div>
+      )}
       {isWindow && (
         <PropertyRow label="Sill">
           <input

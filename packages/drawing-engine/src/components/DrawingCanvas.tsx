@@ -206,6 +206,14 @@ export function DrawingCanvas({
     const openingResizeHandlesRef = useRef<fabric.Object[]>([]);
     const openingPointerInteractionRef = useRef<OpeningPointerInteraction | null>(null);
 
+    // ── Drag-performance refs ──
+    // Tracks the last position where collision was checked (in mm) to avoid per-pixel checks
+    const lastCollisionCheckPosRef = useRef<Point2D | null>(null);
+    // Last collision result – reused when the object hasn't moved far enough to warrant re-check
+    const lastCollisionResultRef = useRef<boolean>(false);
+    // Whether we are currently dragging a furniture/fixture object
+    const isDraggingObjectRef = useRef(false);
+
     // State
     const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
     const [mousePosition, setMousePosition] = useState<Point2D>({ x: 0, y: 0 });
@@ -1077,6 +1085,10 @@ export function DrawingCanvas({
             swingDirection: 'left',
             doorSwingBehavior: pendingPlacementDefinition.category === 'doors' ? 'inward' : undefined,
             doorHingeMode: pendingPlacementDefinition.category === 'doors' ? 'auto-corner' : undefined,
+            ...(pendingPlacementDefinition.renderType === 'circular-table-chairs' ||
+                pendingPlacementDefinition.renderType === 'square-table-chairs'
+                ? { chairCount: 4 }
+                : {}),
             hostWallId: placement.snappedWall?.wall.id,
             hostWallThicknessMm: placement.snappedWall?.wall.thickness,
             positionAlongWallMm: placement.snappedWall?.positionAlongWall,
@@ -3230,6 +3242,15 @@ export function DrawingCanvas({
     const handleMouseUp = useCallback(() => {
         const canvas = fabricRef.current;
         if (!canvas) return;
+
+        // ── Safety cleanup for drag optimisation state ──
+        if (isDraggingObjectRef.current) {
+            isDraggingObjectRef.current = false;
+            lastCollisionCheckPosRef.current = null;
+            lastCollisionResultRef.current = false;
+            canvas.skipTargetFind = false;
+        }
+
         const currentState = canvasStateRef.current;
 
         if (currentState.isPanning) {
@@ -3846,6 +3867,16 @@ export function DrawingCanvas({
             const objectId = resolveObjectIdFromTarget(event.target);
             if (objectId) {
                 const target = event.target as fabric.Object;
+
+                // ── Drag-start optimisation: skip target-find while dragging ──
+                if (!isDraggingObjectRef.current) {
+                    isDraggingObjectRef.current = true;
+                    lastCollisionCheckPosRef.current = null;
+                    lastCollisionResultRef.current = false;
+                    // Tell Fabric not to hit-test other objects on every mouse move
+                    if (canvas) canvas.skipTargetFind = true;
+                }
+
                 if (resolvedSnapToGrid) {
                     const center = target.getCenterPoint();
                     const snappedPx = snapPointToGrid(
@@ -3893,9 +3924,25 @@ export function DrawingCanvas({
                         return;
                     }
 
-                    const collides = hasFurnitureCollision(movedPositionMm, definition, {
-                        ignoreSymbolId: objectId,
-                    });
+                    // ── Throttled collision detection ──
+                    // Only re-check when the object has moved ≥ 10 mm from the last check position.
+                    // This avoids iterating *all* symbols on every single mouse-move pixel.
+                    const COLLISION_CHECK_THRESHOLD_MM = 10;
+                    let collides = lastCollisionResultRef.current;
+                    const lastPos = lastCollisionCheckPosRef.current;
+                    const needsCheck =
+                        !lastPos ||
+                        Math.abs(movedPositionMm.x - lastPos.x) > COLLISION_CHECK_THRESHOLD_MM ||
+                        Math.abs(movedPositionMm.y - lastPos.y) > COLLISION_CHECK_THRESHOLD_MM;
+
+                    if (needsCheck) {
+                        collides = hasFurnitureCollision(movedPositionMm, definition, {
+                            ignoreSymbolId: objectId,
+                        });
+                        lastCollisionCheckPosRef.current = { ...movedPositionMm };
+                        lastCollisionResultRef.current = collides;
+                    }
+
                     if (collides) {
                         target.set({
                             left: instance.position.x * MM_TO_PX,
@@ -3911,6 +3958,14 @@ export function DrawingCanvas({
         };
 
         const handleObjectModified = (event: fabric.CanvasEvents['object:modified']) => {
+            // ── Drag-end cleanup: restore canvas interactive behaviour ──
+            if (isDraggingObjectRef.current) {
+                isDraggingObjectRef.current = false;
+                lastCollisionCheckPosRef.current = null;
+                lastCollisionResultRef.current = false;
+                if (canvas) canvas.skipTargetFind = false;
+            }
+
             if (!event.target) return;
             const objectId = resolveObjectIdFromTarget(event.target);
             if (objectId) {

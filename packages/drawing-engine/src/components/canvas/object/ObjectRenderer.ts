@@ -416,7 +416,7 @@ function graphicsForDefinition(
     const ctx2d = canvasEl.getContext('2d');
     if (ctx2d) {
       ctx2d.scale(2, 2);
-      renderFurniturePlan(ctx2d, renderType, w / 2, h / 2, w, h);
+      renderFurniturePlan(ctx2d, renderType, w / 2, h / 2, w, h, instance.properties);
     }
     const img = new fabric.FabricImage(canvasEl, {
       left: 0,
@@ -614,7 +614,7 @@ export class ObjectRenderer {
       lockScalingX: true,
       lockScalingY: true,
       transparentCorners: false,
-      objectCaching: false,
+      objectCaching: true,
       selectable: !isPreview,
       evented: !isPreview,
       subTargetCheck: false,
@@ -650,6 +650,8 @@ export class ObjectRenderer {
       const hover = group.getObjects().find((item) => (item as NamedObject).name === 'object-hover');
       if (selection) selection.set('visible', !isOpeningSymbol && this.selectedObjectIds.has(objectId));
       if (hover) hover.set('visible', !isOpeningSymbol && this.hoveredObjectId === objectId && !this.selectedObjectIds.has(objectId));
+      // Invalidate group cache so visibility change is rendered
+      group.set('dirty', true);
     });
     this.canvas.requestRenderAll();
   }
@@ -661,6 +663,8 @@ export class ObjectRenderer {
       const hover = group.getObjects().find((item) => (item as NamedObject).name === 'object-hover');
       if (!hover) return;
       hover.set('visible', this.hoveredObjectId === objectId && !this.selectedObjectIds.has(objectId));
+      // Invalidate group cache so visibility change is rendered
+      group.set('dirty', true);
     });
     this.canvas.requestRenderAll();
   }

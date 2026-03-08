@@ -36,7 +36,9 @@ export type FurnitureRenderType =
   | 'fridge'
   | 'toilet'
   | 'bathtub'
-  | 'shower';
+  | 'shower'
+  | 'circular-table-chairs'
+  | 'square-table-chairs';
 
 // =============================================================================
 // Material Palette
@@ -859,6 +861,154 @@ function endGenericSide(ctx: CanvasRenderingContext2D, cx: number, cy: number, d
 }
 
 // =============================================================================
+// Meeting Table Plan Views (circular + square with chairs)
+// =============================================================================
+
+function planCircularTableChairs(
+  ctx: CanvasRenderingContext2D,
+  cx: number, cy: number, w: number, d: number,
+  chairCount: number
+): void {
+  const n = Math.max(2, Math.min(20, chairCount));
+  const r = Math.min(w, d) / 2;
+
+  // Chair placement radius = proportional to half the footprint minus half a chair
+  const chairR = r * 0.72;
+  const tableR = r * 0.44;
+
+  // Shadow
+  planShadow(ctx, cx, cy, r * 0.9, r * 0.9);
+
+  // Round table top
+  const g = ctx.createRadialGradient(cx - tableR * 0.25, cy - tableR * 0.25, tableR * 0.1, cx, cy, tableR);
+  g.addColorStop(0, '#6a4830');
+  g.addColorStop(0.7, MAT.oak.t);
+  g.addColorStop(1, MAT.oak.f);
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(cx, cy, tableR, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 0.8;
+  ctx.beginPath(); ctx.arc(cx, cy, tableR, 0, Math.PI * 2); ctx.stroke();
+  // Circular grain
+  ctx.strokeStyle = 'rgba(0,0,0,0.06)'; ctx.lineWidth = 0.5;
+  for (let ri = tableR * 0.25; ri < tableR; ri += tableR * 0.15) {
+    ctx.beginPath(); ctx.arc(cx, cy, ri, 0, Math.PI * 2); ctx.stroke();
+  }
+  // Pedestal
+  const pedR = tableR * 0.20;
+  ctx.beginPath(); ctx.arc(cx, cy, pedR, 0, Math.PI * 2);
+  ctx.fillStyle = MAT.oak.s; ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.22)'; ctx.lineWidth = 0.5; ctx.stroke();
+
+  // Chairs around the circle
+  const chairW = Math.min(r * 0.32, w / (n * 0.55));
+  const chairD = chairW * 0.9;
+  for (let i = 0; i < n; i++) {
+    const angle = (i / n) * Math.PI * 2 - Math.PI / 2;
+    const chX = cx + Math.cos(angle) * chairR;
+    const chY = cy + Math.sin(angle) * chairR;
+
+    ctx.save();
+    ctx.translate(chX, chY);
+    ctx.rotate(angle + Math.PI / 2);
+    // Seat
+    roundRect(ctx, -chairW / 2, -chairD / 2, chairW, chairD * 0.78, chairW * 0.08, MAT.oak.t, 'rgba(0,0,0,0.35)', 0.6);
+    // Back bar
+    roundRect(ctx, -chairW / 2, -chairD / 2, chairW, chairD * 0.18, 1.5, MAT.oak.f, 'rgba(0,0,0,0.30)', 0.6);
+    ctx.restore();
+  }
+}
+
+function planSquareTableChairs(
+  ctx: CanvasRenderingContext2D,
+  cx: number, cy: number, w: number, d: number,
+  chairCount: number
+): void {
+  const n = Math.max(2, Math.min(20, chairCount));
+
+  // Table occupies the centre ~55% of the footprint
+  const tableW = w * 0.52;
+  const tableD = d * 0.52;
+
+  // Shadow
+  planShadow(ctx, cx, cy, w * 0.48, d * 0.48);
+
+  // Table top
+  const g = ctx.createLinearGradient(cx - tableW / 2, cy - tableD / 2, cx + tableW / 2, cy + tableD / 2);
+  g.addColorStop(0, MAT.oak.t);
+  g.addColorStop(0.5, '#6a4830');
+  g.addColorStop(1, MAT.oak.f);
+  roundRect(ctx, cx - tableW / 2, cy - tableD / 2, tableW, tableD, tableW * 0.01, g, 'rgba(0,0,0,0.35)', 0.7);
+  woodGrain(ctx, cx - tableW / 2, cy - tableD / 2, tableW, tableD, false);
+  // Apron inset
+  const li = tableW * 0.04;
+  roundRect(ctx, cx - tableW / 2 + li, cy - tableD / 2 + li, tableW - li * 2, tableD - li * 2, 2, undefined, 'rgba(0,0,0,0.12)', 0.4);
+  // Legs
+  const lg = tableW * 0.04;
+  [[-0.46, -0.46], [0.46, -0.46], [-0.46, 0.46], [0.46, 0.46]].forEach(([fx, fy]) =>
+    legPlan(ctx, cx + tableW * fx, cy + tableD * fy, lg, MAT.oak.s));
+
+  // Distribute chairs: front, back (along width), left, right (along depth)
+  const chairW = Math.min(w * 0.14, (w - tableW) * 0.38);
+  const chairD = chairW * 0.9;
+  const gap = (w - tableW) / 2;
+
+  type Side = 'front' | 'back' | 'left' | 'right';
+  const distribution: { side: Side; count: number }[] = [];
+  if (n <= 4) {
+    const sides: Side[] = ['front', 'back', 'left', 'right'];
+    for (let i = 0; i < n; i++) distribution.push({ side: sides[i % 4], count: 1 });
+  } else {
+    const longCap = Math.max(1, Math.floor(tableW / (chairW + 4)));
+    const shortCap = Math.max(1, Math.floor(tableD / (chairW + 4)));
+    const totalCap = 2 * longCap + 2 * shortCap;
+    const frontN = Math.min(longCap, Math.round(n * longCap / totalCap));
+    const backN = Math.min(longCap, Math.round(n * longCap / totalCap));
+    let rem = n - frontN - backN;
+    const leftN = Math.min(shortCap, Math.ceil(rem / 2));
+    const rightN = rem - leftN;
+    distribution.push({ side: 'front', count: frontN });
+    distribution.push({ side: 'back', count: backN });
+    if (leftN > 0) distribution.push({ side: 'left', count: leftN });
+    if (rightN > 0) distribution.push({ side: 'right', count: rightN });
+  }
+
+  for (const { side, count: sideCount } of distribution) {
+    for (let i = 0; i < sideCount; i++) {
+      const t = sideCount === 1 ? 0 : (i / (sideCount - 1)) * 2 - 1;
+      let chX = cx, chY = cy, rot = 0;
+      switch (side) {
+        case 'front':
+          chX = cx + t * (tableW / 2 - chairW / 2 - 2);
+          chY = cy - tableD / 2 - gap / 2;
+          rot = 0;
+          break;
+        case 'back':
+          chX = cx + t * (tableW / 2 - chairW / 2 - 2);
+          chY = cy + tableD / 2 + gap / 2;
+          rot = Math.PI;
+          break;
+        case 'left':
+          chX = cx - tableW / 2 - gap / 2;
+          chY = cy + t * (tableD / 2 - chairW / 2 - 2);
+          rot = -Math.PI / 2;
+          break;
+        case 'right':
+          chX = cx + tableW / 2 + gap / 2;
+          chY = cy + t * (tableD / 2 - chairW / 2 - 2);
+          rot = Math.PI / 2;
+          break;
+      }
+      ctx.save();
+      ctx.translate(chX, chY);
+      ctx.rotate(rot);
+      roundRect(ctx, -chairW / 2, -chairD / 2, chairW, chairD * 0.78, chairW * 0.08, MAT.oak.t, 'rgba(0,0,0,0.35)', 0.6);
+      roundRect(ctx, -chairW / 2, -chairD / 2, chairW, chairD * 0.18, 1.5, MAT.oak.f, 'rgba(0,0,0,0.30)', 0.6);
+      ctx.restore();
+    }
+  }
+}
+
+// =============================================================================
 // Main Dispatch Functions
 // =============================================================================
 
@@ -868,7 +1018,8 @@ export function renderFurniturePlan(
   cx: number,
   cy: number,
   widthPx: number,
-  depthPx: number
+  depthPx: number,
+  properties?: Record<string, unknown>
 ): void {
   ctx.save();
   switch (renderType) {
@@ -896,6 +1047,16 @@ export function renderFurniturePlan(
     case 'toilet': planToilet(ctx, cx, cy, widthPx, depthPx); break;
     case 'bathtub': planBathtub(ctx, cx, cy, widthPx, depthPx); break;
     case 'shower': planShower(ctx, cx, cy, widthPx, depthPx); break;
+    case 'circular-table-chairs': {
+      const chairCount = typeof properties?.chairCount === 'number' ? properties.chairCount : 4;
+      planCircularTableChairs(ctx, cx, cy, widthPx, depthPx, chairCount);
+      break;
+    }
+    case 'square-table-chairs': {
+      const chairCount = typeof properties?.chairCount === 'number' ? properties.chairCount : 4;
+      planSquareTableChairs(ctx, cx, cy, widthPx, depthPx, chairCount);
+      break;
+    }
     default: break; // Fall through to generic rendering
   }
   ctx.restore();
@@ -935,6 +1096,8 @@ export function renderFurnitureFront(
     case 'toilet': frontToilet(ctx, cx, cy, widthPx, heightPx); break;
     case 'bathtub': frontBathtub(ctx, cx, cy, widthPx, heightPx); break;
     case 'shower': frontShower(ctx, cx, cy, widthPx, heightPx); break;
+    case 'circular-table-chairs': frontGenericBox(ctx, cx, cy, widthPx, heightPx, MAT.oak); break;
+    case 'square-table-chairs': frontGenericBox(ctx, cx, cy, widthPx, heightPx, MAT.oak); break;
     default: break;
   }
   ctx.restore();
@@ -975,6 +1138,8 @@ export function renderFurnitureEnd(
     case 'toilet': frontToilet(ctx, cx, cy, depthPx, heightPx); break;
     case 'bathtub': endGenericSide(ctx, cx, cy, depthPx, heightPx, MAT.ceramic); break;
     case 'shower': frontShower(ctx, cx, cy, depthPx, heightPx); break;
+    case 'circular-table-chairs': endGenericSide(ctx, cx, cy, depthPx, heightPx, MAT.oak); break;
+    case 'square-table-chairs': endGenericSide(ctx, cx, cy, depthPx, heightPx, MAT.oak); break;
     default: break;
   }
   ctx.restore();
@@ -1301,6 +1466,7 @@ export function hasRenderer(renderType: string | undefined): boolean {
     'bed-single', 'bed-double', 'bed-queen', 'bed-king',
     'nightstand', 'dresser', 'wardrobe', 'tv-stand', 'bookshelf', 'buffet',
     'sink', 'stove', 'fridge', 'toilet', 'bathtub', 'shower',
+    'circular-table-chairs', 'square-table-chairs',
   ]);
   return supported.has(renderType);
 }
