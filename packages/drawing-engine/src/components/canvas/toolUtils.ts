@@ -30,6 +30,10 @@ export function getToolCursor(tool: DrawingTool): string {
             return 'text';
         case 'eraser':
             return 'not-allowed';
+        case 'offset':
+            return 'crosshair';
+        case 'trim':
+            return 'crosshair';
         default:
             return 'default';
     }

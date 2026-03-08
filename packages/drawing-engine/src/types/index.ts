@@ -111,7 +111,9 @@ export type DrawingTool =
   | 'arc'
   | 'spline'
   | 'revision-cloud'
-  | 'pencil';
+  | 'pencil'
+  | 'offset'
+  | 'trim';
 
 export type DimensionType = 'linear' | 'aligned' | 'angular' | 'radius' | 'diameter' | 'area';
 export type DimensionLinearMode = 'horizontal' | 'vertical' | 'aligned';

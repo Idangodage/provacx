@@ -1783,6 +1783,7 @@ export const useDrawingStore = create<DrawingState>()(
           startPoint: { ...trimmedEndpoints.startPoint },
           endPoint: { ...trimmedEndpoints.endPoint },
           thickness,
+          centerlineOffset: 0,
           material,
           layer,
           interiorLine: {
@@ -3024,6 +3025,7 @@ export const useDrawingStore = create<DrawingState>()(
               startPoint: rawWall.startPoint ?? { x: 0, y: 0 },
               endPoint: rawWall.endPoint ?? { x: 0, y: 0 },
               thickness: clampThickness(rawWall.thickness ?? 150),
+              centerlineOffset: rawWall.centerlineOffset ?? 0,
               material: rawWall.material ?? 'partition',
               layer: rawWall.layer ?? 'partition',
               interiorLine: rawWall.interiorLine ?? { start: { x: 0, y: 0 }, end: { x: 0, y: 0 } },

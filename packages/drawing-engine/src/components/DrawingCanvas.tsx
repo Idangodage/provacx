@@ -20,7 +20,7 @@ import {
     Grid,
     PageLayout,
     Rulers,
-    snapToGrid as snapWallGridPoint,
+    snapWallPoint,
     snapPointToGrid,
     getToolCursor,
     isDrawingTool,
@@ -35,6 +35,8 @@ import {
     useWallTool,
     useRoomTool,
     useDimensionTool,
+    useOffsetTool,
+    useTrimTool,
     RoomRenderer,
     DimensionRenderer,
     ObjectRenderer,
@@ -2012,6 +2014,21 @@ export function DrawingCanvas({
         gridSize: wallSettings.gridSize,
         wallThickness: wallSettings.defaultThickness,
         wallMaterial: wallSettings.defaultMaterial,
+        snapPoint: (scenePoint) => {
+            if (!resolvedSnapToGrid) {
+                return scenePoint;
+            }
+            const snapResult = snapWallPoint(
+                scenePoint,
+                null,
+                wallSettings,
+                walls,
+                false,
+                viewportZoom,
+                undefined
+            );
+            return snapResult.snappedPoint;
+        },
         createRoomWalls,
     });
     const {
@@ -2047,6 +2064,34 @@ export function DrawingCanvas({
         setHoveredElement,
         setProcessingStatus,
         saveToHistory,
+    });
+
+    // Offset tool hook
+    const offsetTool = useOffsetTool({
+        fabricRef,
+        walls,
+        selectedIds,
+        zoom: viewportZoom,
+        addWall,
+        setSelectedIds,
+        setTool,
+        detectRooms,
+        saveToHistory,
+        setProcessingStatus,
+    });
+
+    // Trim tool hook
+    const trimTool = useTrimTool({
+        fabricRef,
+        walls,
+        updateWall,
+        addWall,
+        deleteWall,
+        connectWalls,
+        setTool,
+        detectRooms,
+        saveToHistory,
+        setProcessingStatus,
     });
 
     const copySelectedWalls = useCallback(() => {
@@ -2349,6 +2394,18 @@ export function DrawingCanvas({
             cancelDimensionPlacement();
         }
     }, [tool, cancelDimensionPlacement]);
+
+    useEffect(() => {
+        if (tool !== 'offset') {
+            offsetTool.cleanup();
+        }
+    }, [tool, offsetTool]);
+
+    useEffect(() => {
+        if (tool !== 'trim') {
+            trimTool.cleanup();
+        }
+    }, [tool, trimTool]);
 
     useEffect(() => {
         roomRendererRef.current?.renderAllRooms(rooms);
@@ -2956,6 +3013,16 @@ export function DrawingCanvas({
                 return;
             }
 
+            if (tool === 'offset') {
+                offsetTool.handleMouseDown(rawPoint);
+                return;
+            }
+
+            if (tool === 'trim') {
+                trimTool.handleMouseDown(rawPoint);
+                return;
+            }
+
             if (isDrawingTool(tool)) {
                 const nextState: CanvasState = { ...canvasStateRef.current, isDrawing: true, drawingPoints: [point] };
                 canvasStateRef.current = nextState;
@@ -3095,9 +3162,24 @@ export function DrawingCanvas({
                     x: rawPoint.x / MM_TO_PX,
                     y: rawPoint.y / MM_TO_PX,
                 };
+                // Reuse wall-tool snap indicator rendering so room mode shows
+                // the same magnetic endpoint proposal marker.
+                if (resolvedSnapToGrid) {
+                    handleWallMouseMove(roomPoint);
+                }
                 handleRoomMouseMove(roomPoint);
                 if (isRoomDrawing && roomStartCorner) {
-                    const snappedEnd = snapWallGridPoint(roomPoint, wallSettings.gridSize);
+                    const snappedEnd = resolvedSnapToGrid
+                        ? snapWallPoint(
+                            roomPoint,
+                            null,
+                            wallSettings,
+                            walls,
+                            false,
+                            viewportZoom,
+                            undefined
+                        ).snappedPoint
+                        : roomPoint;
                     const minX = Math.min(roomStartCorner.x, snappedEnd.x);
                     const maxX = Math.max(roomStartCorner.x, snappedEnd.x);
                     const minY = Math.min(roomStartCorner.y, snappedEnd.y);
@@ -3136,6 +3218,16 @@ export function DrawingCanvas({
                 if (handled) {
                     return;
                 }
+            }
+
+            if (tool === 'offset') {
+                offsetTool.handleMouseMove(rawPoint);
+                return;
+            }
+
+            if (tool === 'trim') {
+                trimTool.handleMouseMove(rawPoint);
+                return;
             }
 
             if (tool === 'select') {
@@ -3230,6 +3322,8 @@ export function DrawingCanvas({
             resolveRoomIdFromTarget,
             resolveSectionLineIdFromTarget,
             findOpeningAtPoint,
+            walls,
+            viewportZoom,
             wallRenderer,
             wallSettings.gridSize,
             wallSettings.defaultThickness,
@@ -3442,6 +3536,18 @@ export function DrawingCanvas({
             }
             if (tool === 'dimension') {
                 const handled = handleDimensionKeyDown(e);
+                if (handled) {
+                    e.preventDefault();
+                }
+            }
+            if (tool === 'offset') {
+                const handled = offsetTool.handleKeyDown(e);
+                if (handled) {
+                    e.preventDefault();
+                }
+            }
+            if (tool === 'trim') {
+                const handled = trimTool.handleKeyDown(e);
                 if (handled) {
                     e.preventDefault();
                 }

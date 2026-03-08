@@ -691,6 +691,7 @@ export function buildTemporaryWall(
     startPoint: copyPoint(startPoint),
     endPoint: copyPoint(endPoint),
     thickness,
+    centerlineOffset: 0,
     material,
     layer: 'partition',
     interiorLine,

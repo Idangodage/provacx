@@ -91,6 +91,7 @@ type WallControlType =
   | 'wall-bevel-inner-end'
   | 'wall-thickness-interior'
   | 'wall-thickness-exterior'
+  | 'wall-offset-handle'
   | 'wall-rotation-handle';
 type WallControlObject = NamedObject & {
   isWallControl?: boolean;
@@ -151,6 +152,16 @@ export const VISUAL_CONFIG = {
   thicknessRadius: 5,
   thicknessFill: '#F0FDFA',
   thicknessStroke: '#1D4ED8',
+
+  // Wall offset handle
+  offsetHandleRadius: 6,
+  offsetHandleFill: '#FDE68A',
+  offsetHandleStroke: '#B45309',
+  offsetHandleStrokeWidth: 1.5,
+  offsetHitRadius: 14,
+  offsetReferenceDash: [4, 3],
+  offsetReferenceStroke: '#B45309',
+  offsetReferenceStrokeWidth: 1,
 
   centerHandleRadius: 10,
   centerHandleFill: '#EFF6FF',
@@ -762,6 +773,29 @@ export class WallRenderer {
     (centerLine as NamedObject).name = 'centerLine';
     this.annotateWallTarget(centerLine, wall.id);
 
+    // When wall is offset, show a dashed reference line at the original centerline position
+    const offsetRefLine = Math.abs(wall.centerlineOffset ?? 0) > 0.5
+      ? new fabric.Line(
+          [
+            wall.startPoint.x * MM_TO_PX, this.toCanvasY(wall.startPoint.y),
+            wall.endPoint.x * MM_TO_PX, this.toCanvasY(wall.endPoint.y),
+          ],
+          {
+            stroke: VISUAL_CONFIG.offsetReferenceStroke,
+            strokeWidth: VISUAL_CONFIG.offsetReferenceStrokeWidth,
+            strokeDashArray: [...VISUAL_CONFIG.offsetReferenceDash],
+            selectable: false,
+            evented: false,
+            visible: this.showCenterLines,
+            opacity: 0.5,
+          }
+        )
+      : null;
+    if (offsetRefLine) {
+      (offsetRefLine as NamedObject).name = 'offsetReferenceLine';
+      this.annotateWallTarget(offsetRefLine, wall.id);
+    }
+
     const selectionOutline = new fabric.Polygon(canvasVertices, {
       fill: VISUAL_CONFIG.selectionFill,
       stroke: VISUAL_CONFIG.selectionStroke,
@@ -853,7 +887,9 @@ export class WallRenderer {
 
     const objects: fabric.FabricObject[] = [
       fillPolygon, interiorBoundary, exteriorBoundary,
-      startCap, endCap, centerLine, selectionOutline, hoverOutline,
+      startCap, endCap, centerLine,
+      ...(offsetRefLine ? [offsetRefLine] : []),
+      selectionOutline, hoverOutline,
       ...indicators,
       ...openingObjects,
     ];
@@ -1576,6 +1612,84 @@ export class WallRenderer {
 
     const showRotation = showAdvancedControls && this.canRotateWall(wall);
 
+    // Offset handle: positioned at 1/4 along the wall on the centerline,
+    // shows current offset distance and allows perpendicular drag to adjust.
+    const offsetHandleObjects: fabric.FabricObject[] = [];
+    if (showAdvancedControls) {
+      const quarterPoint = {
+        x: wall.startPoint.x + (wall.endPoint.x - wall.startPoint.x) * 0.25,
+        y: wall.startPoint.y + (wall.endPoint.y - wall.startPoint.y) * 0.25,
+      };
+      const currentOffset = wall.centerlineOffset ?? 0;
+      // Offset handle sits on the actual wall body center (shifted by offset)
+      const offsetHandlePos = {
+        x: quarterPoint.x + (-unitDir.y) * currentOffset,
+        y: quarterPoint.y + unitDir.x * currentOffset,
+      };
+      const offsetRadius = this.toSceneSize(VISUAL_CONFIG.offsetHandleRadius);
+
+      // If offset is non-zero, draw a dashed reference line from reference point to handle
+      if (Math.abs(currentOffset) > 0.5) {
+        const refLineCanvas = new fabric.Line(
+          [
+            quarterPoint.x * MM_TO_PX, this.toCanvasY(quarterPoint.y),
+            offsetHandlePos.x * MM_TO_PX, this.toCanvasY(offsetHandlePos.y),
+          ],
+          {
+            stroke: VISUAL_CONFIG.offsetReferenceStroke,
+            strokeWidth: this.toSceneSize(VISUAL_CONFIG.offsetReferenceStrokeWidth),
+            strokeDashArray: VISUAL_CONFIG.offsetReferenceDash.map((v) => this.toSceneSize(v)),
+            selectable: false,
+            evented: false,
+          }
+        );
+        offsetHandleObjects.push(refLineCanvas);
+      }
+
+      const offsetHandle = new fabric.Circle({
+        left: offsetHandlePos.x * MM_TO_PX,
+        top: this.toCanvasY(offsetHandlePos.y),
+        radius: offsetRadius,
+        fill: VISUAL_CONFIG.offsetHandleFill,
+        stroke: VISUAL_CONFIG.offsetHandleStroke,
+        strokeWidth: this.toSceneSize(VISUAL_CONFIG.offsetHandleStrokeWidth),
+        originX: 'center',
+        originY: 'center',
+        hoverCursor: 'ns-resize',
+        lockMovementX: true,
+        lockMovementY: true,
+        selectable: false,
+        evented: false,
+        shadow: new fabric.Shadow({
+          color: 'rgba(180, 83, 9, 0.25)',
+          blur: this.toSceneSize(5),
+          offsetX: 0,
+          offsetY: this.toSceneSize(1),
+        }),
+      });
+      this.annotateControlTarget(offsetHandle, wallId, 'wall-offset-handle');
+
+      // Small "O" label inside handle
+      const offsetLabel = new fabric.Text('O', {
+        left: offsetHandlePos.x * MM_TO_PX,
+        top: this.toCanvasY(offsetHandlePos.y),
+        fill: VISUAL_CONFIG.offsetHandleStroke,
+        fontSize: this.toSceneSize(8),
+        fontFamily: 'Arial',
+        fontWeight: 'bold',
+        originX: 'center',
+        originY: 'center',
+        selectable: false,
+        evented: false,
+      });
+
+      const offsetHit = this.createControlHitTarget(
+        offsetHandlePos, wallId, 'wall-offset-handle', 'ns-resize', VISUAL_CONFIG.offsetHitRadius
+      );
+
+      offsetHandleObjects.push(offsetHit, offsetHandle, offsetLabel);
+    }
+
     const controls: fabric.FabricObject[] = [
       startHandleHit, startHandle,
       endHandleHit, endHandle,
@@ -1597,6 +1711,7 @@ export class WallRenderer {
           ...interiorThicknessVisuals,
           exteriorThicknessHit,
           ...exteriorThicknessVisuals,
+          ...offsetHandleObjects,
         ]
         : []),
       ...(showRotation ? [rotationStem, rotationHandleHit, rotationHandle, rotationLabel] : []),

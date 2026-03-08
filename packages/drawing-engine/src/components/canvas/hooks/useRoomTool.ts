@@ -19,6 +19,7 @@ export interface UseRoomToolOptions {
   gridSize: number;
   wallThickness: number;
   wallMaterial: WallMaterial;
+  snapPoint?: (scenePoint: Point2D) => Point2D;
   createRoomWalls: (config: RoomConfig, startCorner: Point2D) => string[];
   onRoomCreated?: (wallIds: string[]) => void;
 }
@@ -42,6 +43,7 @@ export function useRoomTool({
   gridSize,
   wallThickness,
   wallMaterial,
+  snapPoint,
   createRoomWalls,
   onRoomCreated,
 }: UseRoomToolOptions): UseRoomToolResult {
@@ -50,7 +52,9 @@ export function useRoomTool({
 
   const handleMouseDown = useCallback(
     (scenePoint: Point2D) => {
-      const snapped = snapToGrid(scenePoint, gridSize);
+      const snapped = snapPoint
+        ? snapPoint(scenePoint)
+        : snapToGrid(scenePoint, gridSize);
 
       if (!startCorner) {
         setStartCorner(snapped);
@@ -82,15 +86,18 @@ export function useRoomTool({
       setStartCorner(null);
       setCurrentCorner(null);
     },
-    [gridSize, startCorner, wallThickness, wallMaterial, createRoomWalls, onRoomCreated]
+    [gridSize, snapPoint, startCorner, wallThickness, wallMaterial, createRoomWalls, onRoomCreated]
   );
 
   const handleMouseMove = useCallback(
     (scenePoint: Point2D) => {
       if (!startCorner) return;
-      setCurrentCorner(snapToGrid(scenePoint, gridSize));
+      const snapped = snapPoint
+        ? snapPoint(scenePoint)
+        : snapToGrid(scenePoint, gridSize);
+      setCurrentCorner(snapped);
     },
-    [gridSize, startCorner]
+    [gridSize, snapPoint, startCorner]
   );
 
   const cancelRoomCreation = useCallback(() => {

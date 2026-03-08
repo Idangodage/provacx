@@ -17,6 +17,7 @@ import { WallRotationOperation } from '../../../operations';
 import type { Point2D, Room, Wall, WallSettings } from '../../../types';
 import {
   MAX_WALL_THICKNESS,
+  MAX_WALL_CENTERLINE_OFFSET,
   MIN_WALL_LENGTH,
   MIN_WALL_THICKNESS,
 } from '../../../types/wall';
@@ -41,6 +42,10 @@ const PERPENDICULAR_SNAP_TOLERANCE_DEG = 12;
 const ENDPOINT_BOND_TOLERANCE_MM = 2;
 const SEGMENT_BOND_TOLERANCE_MM = 2;
 const SEGMENT_ENDPOINT_T_THRESHOLD = 0.02;
+const ROOM_MAGNETIC_MIN_TOLERANCE_MM = 12;
+const ROOM_MAGNETIC_MAX_TOLERANCE_MM = 90;
+const ROOM_MAGNETIC_PARALLEL_DOT = 0.97;
+const ROOM_MAGNETIC_MIN_OVERLAP_MM = 120;
 
 type WallControlType =
   | 'wall-center-handle'
@@ -52,6 +57,7 @@ type WallControlType =
   | 'wall-bevel-inner-end'
   | 'wall-thickness-interior'
   | 'wall-thickness-exterior'
+  | 'wall-offset-handle'
   | 'wall-rotation-handle'
   | 'room-center-handle'
   | 'room-corner-handle'
@@ -214,6 +220,14 @@ interface BevelDragState {
   otherEndpoint: CornerEnd;
 }
 
+interface OffsetDragState {
+  mode: 'offset';
+  wallId: string;
+  startPointer: Point2D;
+  baselineWall: Wall;
+  normal: Point2D;
+}
+
 type DragState =
   | IdleDragState
   | ThicknessDragState
@@ -223,12 +237,23 @@ type DragState =
   | RoomCornerDragState
   | RoomScaleDragState
   | RotateDragState
-  | BevelDragState;
+  | BevelDragState
+  | OffsetDragState;
 
 interface DragApplyResult {
   label: string;
   point: Point2D;
   snapPoint?: Point2D;
+}
+
+interface RoomMagneticSnapResult {
+  delta: Point2D;
+  sourcePoint: Point2D;
+  targetPoint: Point2D;
+  movingWallId: string;
+  targetWallId: string;
+  kind: 'endpoint' | 'segment' | 'wall-line';
+  distance: number;
 }
 
 interface EndpointSnapMemory {
@@ -827,7 +852,9 @@ export function useSelectMode({
             ? 0.58
             : mode === 'thickness'
               ? 0.62
-              : 0.66;
+              : mode === 'offset'
+                ? 0.62
+                : 0.66;
     const jumpDistance = magnitude(subtract(point, previous));
     if (jumpDistance > 180) {
       smoothedPointerRef.current = { ...point };
@@ -849,6 +876,143 @@ export function useSelectMode({
   const findRoomById = useCallback((roomId: string): Room | undefined => {
     return optionsRef.current.rooms.find((room) => room.id === roomId);
   }, []);
+
+  const getRoomMagneticToleranceMm = useCallback((): number => {
+    const safeZoom = Math.max(optionsRef.current.zoom, 0.01);
+    const snapDistancePx = Math.max(
+      optionsRef.current.wallSettings.endpointSnapTolerance,
+      optionsRef.current.wallSettings.midpointSnapTolerance
+    );
+    const rawMm = (snapDistancePx * 1.35) / (MM_TO_PX * safeZoom);
+    return clamp(rawMm, ROOM_MAGNETIC_MIN_TOLERANCE_MM, ROOM_MAGNETIC_MAX_TOLERANCE_MM);
+  }, []);
+
+  const findRoomMagneticSnap = useCallback((
+    state: RoomMoveDragState,
+    translation: Point2D
+  ): RoomMagneticSnapResult | null => {
+    const movingWallIds = new Set(state.ghostWalls.map((wall) => wall.id));
+    const staticWalls = optionsRef.current.walls.filter((wall) => !movingWallIds.has(wall.id));
+    if (staticWalls.length === 0) {
+      return null;
+    }
+
+    const endpointTol = getRoomMagneticToleranceMm();
+    const segmentTol = endpointTol * 1.2;
+    const wallLineTol = endpointTol * 1.6;
+
+    const candidates: Array<RoomMagneticSnapResult & { priority: number }> = [];
+    const consider = (candidate: RoomMagneticSnapResult, priority: number) => {
+      if (candidate.distance > (
+        priority === 0
+          ? endpointTol
+          : priority === 1
+            ? segmentTol
+            : wallLineTol
+      )) {
+        return;
+      }
+      candidates.push({ ...candidate, priority });
+    };
+
+    for (const movingWall of state.ghostWalls) {
+      const movedStart = add(movingWall.startPoint, translation);
+      const movedEnd = add(movingWall.endPoint, translation);
+      const movedMid = midpoint(movedStart, movedEnd);
+      const movedDirection = wallDirection(movingWall);
+      const movingEndpoints = [
+        { point: movedStart, wallId: movingWall.id },
+        { point: movedEnd, wallId: movingWall.id },
+      ];
+
+      for (const endpoint of movingEndpoints) {
+        for (const targetWall of staticWalls) {
+          const targetEndpoints = [targetWall.startPoint, targetWall.endPoint];
+          for (const targetEndpoint of targetEndpoints) {
+            const delta = subtract(targetEndpoint, endpoint.point);
+            consider({
+              delta,
+              sourcePoint: endpoint.point,
+              targetPoint: targetEndpoint,
+              movingWallId: endpoint.wallId,
+              targetWallId: targetWall.id,
+              kind: 'endpoint',
+              distance: magnitude(delta),
+            }, 0);
+          }
+
+          const projection = projectPointToSegment(endpoint.point, targetWall.startPoint, targetWall.endPoint);
+          const nearEndpoint = (
+            projection.t <= SEGMENT_ENDPOINT_T_THRESHOLD
+            || projection.t >= 1 - SEGMENT_ENDPOINT_T_THRESHOLD
+          );
+          if (nearEndpoint) {
+            continue;
+          }
+
+          consider({
+            delta: subtract(projection.point, endpoint.point),
+            sourcePoint: endpoint.point,
+            targetPoint: projection.point,
+            movingWallId: endpoint.wallId,
+            targetWallId: targetWall.id,
+            kind: 'segment',
+            distance: projection.distance,
+          }, 1);
+        }
+      }
+
+      for (const targetWall of staticWalls) {
+        const targetDirection = wallDirection(targetWall);
+        if (Math.abs(dot(movedDirection, targetDirection)) < ROOM_MAGNETIC_PARALLEL_DOT) {
+          continue;
+        }
+
+        const overlap = projectionOverlap(
+          movedStart,
+          movedEnd,
+          targetWall.startPoint,
+          targetWall.endPoint,
+          targetDirection
+        );
+        if (overlap < ROOM_MAGNETIC_MIN_OVERLAP_MM) {
+          continue;
+        }
+
+        const projection = projectPointToSegment(movedMid, targetWall.startPoint, targetWall.endPoint);
+        consider({
+          delta: subtract(projection.point, movedMid),
+          sourcePoint: movedMid,
+          targetPoint: projection.point,
+          movingWallId: movingWall.id,
+          targetWallId: targetWall.id,
+          kind: 'wall-line',
+          distance: projection.distance,
+        }, 2);
+      }
+    }
+
+    if (candidates.length === 0) {
+      return null;
+    }
+    candidates.sort((left, right) => {
+      if (left.priority !== right.priority) {
+        return left.priority - right.priority;
+      }
+      return left.distance - right.distance;
+    });
+
+    const best = candidates[0];
+    return {
+      delta: best.delta,
+      sourcePoint: best.sourcePoint,
+      targetPoint: best.targetPoint,
+      movingWallId: best.movingWallId,
+      targetWallId: best.targetWallId,
+      kind: best.kind,
+      distance: best.distance,
+    };
+  }, [getRoomMagneticToleranceMm]);
 
   const buildEndpointConstraints = useCallback((
     wall: Wall,
@@ -1383,6 +1547,17 @@ export function useSelectMode({
       return true;
     }
 
+    if (meta.controlType === 'wall-offset-handle') {
+      dragStateRef.current = {
+        mode: 'offset',
+        wallId: wall.id,
+        startPointer: { ...point },
+        baselineWall: { ...wall },
+        normal: wallNormal(wall),
+      };
+      return true;
+    }
+
     if (meta.controlType === 'wall-center-handle') {
       const selectedWallIds = optionsRef.current.selectedIds.includes(wall.id)
         ? optionsRef.current.selectedIds.filter((id) => Boolean(findWallById(id)))
@@ -1658,6 +1833,35 @@ export function useSelectMode({
       };
     }
 
+    if (state.mode === 'offset') {
+      const baseline = state.baselineWall;
+      const normal = state.normal;
+      const pointerDelta = subtract(point, state.startPointer);
+      const projectedDelta = dot(pointerDelta, normal);
+      const baseOffset = baseline.centerlineOffset ?? 0;
+      const rawOffset = baseOffset + projectedDelta;
+
+      // Snap to 0 when close (makes it easy to reset)
+      const snapZeroThreshold = 10;
+      const snappedOffset = Math.abs(rawOffset) < snapZeroThreshold ? 0 : rawOffset;
+
+      const nextOffset = clamp(snappedOffset, -MAX_WALL_CENTERLINE_OFFSET, MAX_WALL_CENTERLINE_OFFSET);
+
+      updateWallsIfChanged(
+        [{ id: baseline.id, updates: { centerlineOffset: nextOffset } }],
+        { skipHistory: true, source: 'drag' }
+      );
+
+      const updatedCenter = midpoint(baseline.startPoint, baseline.endPoint);
+      const handlePoint = add(updatedCenter, scale(normal, nextOffset));
+
+      const sign = nextOffset >= 0 ? '+' : '';
+      return {
+        label: `Offset ${sign}${Math.round(nextOffset)} mm`,
+        point: handlePoint,
+      };
+    }
+
     if (state.mode === 'bevel') {
       const projection = projectPointToLine(point, state.origin, state.direction);
       const nextOffset = clampBevelOffset(projection.t, state.maxOffset);
@@ -1822,6 +2026,29 @@ export function useSelectMode({
         };
       }
 
+      let roomSnap: RoomMagneticSnapResult | null = null;
+      if (!modifierKeysRef.current.ctrl) {
+        roomSnap = findRoomMagneticSnap(state, translation);
+        if (roomSnap) {
+          translation = add(translation, roomSnap.delta);
+          showSnapIndicator(
+            roomSnap.targetPoint,
+            {
+              start: roomSnap.sourcePoint,
+              end: roomSnap.targetPoint,
+            },
+            {
+              color: '#0ea5e9',
+              indicator: roomSnap.kind === 'endpoint' ? 'square' : 'cross',
+            }
+          );
+        } else {
+          clearSnapIndicators();
+        }
+      } else {
+        clearSnapIndicators();
+      }
+
       const delta = {
         x: translation.x - state.lastAppliedDelta.x,
         y: translation.y - state.lastAppliedDelta.y,
@@ -1829,6 +2056,9 @@ export function useSelectMode({
       if (Math.abs(delta.x) > 0.0001 || Math.abs(delta.y) > 0.0001) {
         optionsRef.current.moveRoom(state.roomId, delta, { skipHistory: true });
         state.lastAppliedDelta = translation;
+        if (roomSnap) {
+          connectWallsIfNeeded(roomSnap.movingWallId, roomSnap.targetWallId);
+        }
       }
 
       const movedCentroid = add(room.centroid, translation);
@@ -1838,8 +2068,11 @@ export function useSelectMode({
       });
 
       return {
-        label: `${room.name} move ${Math.round(magnitude(translation))} mm`,
+        label: roomSnap
+          ? `${room.name} attached | ${Math.round(magnitude(translation))} mm`
+          : `${room.name} move ${Math.round(magnitude(translation))} mm`,
         point: movedCentroid,
+        snapPoint: roomSnap?.targetPoint,
       };
     }
 
@@ -2236,6 +2469,7 @@ export function useSelectMode({
     computePerpendicularSnap,
     findWallById,
     findRoomById,
+    findRoomMagneticSnap,
     getSnapReleaseDistanceMm,
     hasOverlapWithUnselectedWalls,
     setStatusFromRoom,
@@ -2319,19 +2553,21 @@ export function useSelectMode({
       const action =
         mode === 'thickness'
           ? 'Adjust wall thickness'
-          : mode === 'move'
-            ? 'Move wall'
-            : mode === 'rotate'
-              ? 'Rotate wall'
-              : mode === 'room-corner'
-                ? 'Edit room corner'
-                : mode === 'room-scale'
-                  ? 'Scale room'
-                  : mode === 'room-move'
-                    ? 'Move room'
-                    : mode === 'bevel'
-                      ? 'Adjust wall bevel'
-                      : 'Edit wall endpoint';
+          : mode === 'offset'
+            ? 'Adjust wall offset'
+            : mode === 'move'
+              ? 'Move wall'
+              : mode === 'rotate'
+                ? 'Rotate wall'
+                : mode === 'room-corner'
+                  ? 'Edit room corner'
+                  : mode === 'room-scale'
+                    ? 'Scale room'
+                    : mode === 'room-move'
+                      ? 'Move room'
+                      : mode === 'bevel'
+                        ? 'Adjust wall bevel'
+                        : 'Edit wall endpoint';
       optionsRef.current.detectRooms();
       optionsRef.current.saveToHistory(action);
     }

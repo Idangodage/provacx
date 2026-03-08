@@ -265,10 +265,11 @@ export interface Wall {
   startPoint: Point2D;           // center-line start (mm)
   endPoint: Point2D;             // center-line end (mm)
   thickness: number;             // in mm
+  centerlineOffset: number;      // perpendicular offset from reference line (mm), positive = interior direction
   material: WallMaterial;
   layer: WallLayer;
-  interiorLine: Line;            // computed from center + thickness/2
-  exteriorLine: Line;            // computed from center - thickness/2
+  interiorLine: Line;            // computed from center + thickness/2 + offset
+  exteriorLine: Line;            // computed from center - thickness/2 + offset
   startBevel: BevelControl;      // bevel controls at start endpoint
   endBevel: BevelControl;        // bevel controls at end endpoint
   connectedWalls: string[];      // IDs of walls sharing endpoints
@@ -306,6 +307,7 @@ export interface CreateWallParams {
   startPoint: Point2D;
   endPoint: Point2D;
   thickness?: number;
+  centerlineOffset?: number;
   material?: WallMaterial;
   layer?: WallLayer;
 }
@@ -445,6 +447,7 @@ export interface SnapResult {
 export const MIN_WALL_LENGTH = 100;
 export const MIN_WALL_THICKNESS = 50;
 export const MAX_WALL_THICKNESS = 500;
+export const MAX_WALL_CENTERLINE_OFFSET = 2000;
 export const MIN_WALL_HEIGHT = 100;
 export const MAX_WALL_HEIGHT = 10000;
 export const MIN_U_VALUE = 0.1;

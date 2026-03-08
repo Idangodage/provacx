@@ -31,3 +31,9 @@ export {
   type PlacementState,
   type WallSnapInfo,
 } from './useSymbolPlacementTool';
+
+// Offset tool
+export { useOffsetTool, type UseOffsetToolOptions, type UseOffsetToolResult } from './useOffsetTool';
+
+// Trim tool
+export { useTrimTool, type UseTrimToolOptions, type UseTrimToolResult } from './useTrimTool';

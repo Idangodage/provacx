@@ -92,6 +92,7 @@ export function refreshOffsetLines(wall: Wall): void {
     wall.startPoint,
     wall.endPoint,
     wall.thickness,
+    wall.centerlineOffset ?? 0,
   );
 
   wall.interiorLine = interiorLine;

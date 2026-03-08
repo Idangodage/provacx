@@ -25,6 +25,7 @@ import {
   DEFAULT_WALL_THICKNESS,
   MAX_WALL_HEIGHT,
   MAX_WALL_THICKNESS,
+  MAX_WALL_CENTERLINE_OFFSET,
   MIN_WALL_HEIGHT,
   MIN_WALL_LENGTH,
   MIN_WALL_THICKNESS,
@@ -93,7 +94,8 @@ function clampHeight(height: number): number {
 function computeOffsetLines(
   startPoint: Point2D,
   endPoint: Point2D,
-  thickness: number
+  thickness: number,
+  centerlineOffset: number = 0,
 ): { interiorLine: Line; exteriorLine: Line } {
   const dx = endPoint.x - startPoint.x;
   const dy = endPoint.y - startPoint.y;
@@ -105,27 +107,27 @@ function computeOffsetLines(
 
   const halfThickness = thickness / 2;
 
-  // Interior line (offset in positive perpendicular direction)
+  // Interior line (offset in positive perpendicular direction + centerlineOffset)
   const interiorLine: Line = {
     start: {
-      x: startPoint.x + perpX * halfThickness,
-      y: startPoint.y + perpY * halfThickness,
+      x: startPoint.x + perpX * (centerlineOffset + halfThickness),
+      y: startPoint.y + perpY * (centerlineOffset + halfThickness),
     },
     end: {
-      x: endPoint.x + perpX * halfThickness,
-      y: endPoint.y + perpY * halfThickness,
+      x: endPoint.x + perpX * (centerlineOffset + halfThickness),
+      y: endPoint.y + perpY * (centerlineOffset + halfThickness),
     },
   };
 
-  // Exterior line (offset in negative perpendicular direction)
+  // Exterior line (offset in negative perpendicular direction + centerlineOffset)
   const exteriorLine: Line = {
     start: {
-      x: startPoint.x - perpX * halfThickness,
-      y: startPoint.y - perpY * halfThickness,
+      x: startPoint.x + perpX * (centerlineOffset - halfThickness),
+      y: startPoint.y + perpY * (centerlineOffset - halfThickness),
     },
     end: {
-      x: endPoint.x - perpX * halfThickness,
-      y: endPoint.y - perpY * halfThickness,
+      x: endPoint.x + perpX * (centerlineOffset - halfThickness),
+      y: endPoint.y + perpY * (centerlineOffset - halfThickness),
     },
   };
 
@@ -142,10 +144,12 @@ function createWall(params: CreateWallParams): Wall {
   const material = params.material ?? 'brick';
   const layer = params.layer ?? 'partition';
 
+  const centerlineOffset = params.centerlineOffset ?? 0;
   const { interiorLine, exteriorLine } = computeOffsetLines(
     params.startPoint,
     params.endPoint,
-    thickness
+    thickness,
+    centerlineOffset,
   );
   const length = Math.sqrt(
     (params.endPoint.x - params.startPoint.x) ** 2 +
@@ -159,6 +163,7 @@ function createWall(params: CreateWallParams): Wall {
     startPoint: { ...params.startPoint },
     endPoint: { ...params.endPoint },
     thickness,
+    centerlineOffset,
     material,
     layer,
     interiorLine,
@@ -183,7 +188,8 @@ function recomputeWallGeometry(wall: Wall): Wall {
   const { interiorLine, exteriorLine } = computeOffsetLines(
     wall.startPoint,
     wall.endPoint,
-    wall.thickness
+    wall.thickness,
+    wall.centerlineOffset ?? 0,
   );
   const length = Math.sqrt(
     (wall.endPoint.x - wall.startPoint.x) ** 2 +
@@ -237,7 +243,8 @@ export const createWallSlice: StateCreator<WallSlice, [], [], WallSlice> = (set,
         if (
           updates.startPoint ||
           updates.endPoint ||
-          updates.thickness
+          updates.thickness ||
+          updates.centerlineOffset !== undefined
         ) {
           return recomputeWallGeometry(updatedWall);
         }

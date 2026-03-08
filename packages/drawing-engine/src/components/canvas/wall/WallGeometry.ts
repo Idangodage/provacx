@@ -158,19 +158,22 @@ export function projectPointToSegment(
 
 export function computeOffsetLines(
   startPoint: Point2D, endPoint: Point2D, thickness: number,
+  centerlineOffset: number = 0,
 ): { interiorLine: Line; exteriorLine: Line } {
   const dir = direction(startPoint, endPoint);
   const perp = perpendicular(dir);
   const halfThickness = thickness / 2;
 
+  // centerlineOffset shifts the entire wall body perpendicular to the reference line.
+  // Positive offset = interior (positive perpendicular) direction.
   return {
     interiorLine: {
-      start: add(startPoint, scale(perp, halfThickness)),
-      end: add(endPoint, scale(perp, halfThickness)),
+      start: add(startPoint, scale(perp, centerlineOffset + halfThickness)),
+      end: add(endPoint, scale(perp, centerlineOffset + halfThickness)),
     },
     exteriorLine: {
-      start: add(startPoint, scale(perp, -halfThickness)),
-      end: add(endPoint, scale(perp, -halfThickness)),
+      start: add(startPoint, scale(perp, centerlineOffset - halfThickness)),
+      end: add(endPoint, scale(perp, centerlineOffset - halfThickness)),
     },
   };
 }
@@ -199,7 +202,7 @@ export function refreshOffsetLines(wall: Wall): void {
   }
 
   const { interiorLine, exteriorLine } = computeOffsetLines(
-    wall.startPoint, wall.endPoint, wall.thickness,
+    wall.startPoint, wall.endPoint, wall.thickness, wall.centerlineOffset ?? 0,
   );
   wall.interiorLine = interiorLine;
   wall.exteriorLine = exteriorLine;
