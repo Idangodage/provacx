@@ -777,6 +777,48 @@ function createPlanGrid(points: Point2D[], elevation: number): THREE.GridHelper 
   return grid;
 }
 
+function mirrorXValue(x: number, pivotX: number): number {
+  return pivotX * 2 - x;
+}
+
+function mirrorLabelAnchors(
+  anchors: LabelAnchor[],
+  pivotX: number
+): LabelAnchor[] {
+  return anchors.map((anchor) => ({
+    ...anchor,
+    position: new THREE.Vector3(
+      mirrorXValue(anchor.position.x, pivotX),
+      anchor.position.y,
+      anchor.position.z
+    ),
+  }));
+}
+
+function applyMirroredPlanTransform(root: THREE.Group, pivotX: number): void {
+  root.position.set(pivotX * 2, 0, 0);
+  root.scale.set(-1, 1, 1);
+  root.updateMatrixWorld(true);
+}
+
+function ensureDoubleSidedMaterials(root: THREE.Object3D): void {
+  root.traverse((object) => {
+    if (!(object instanceof THREE.Mesh)) {
+      return;
+    }
+
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    materials.forEach((material) => {
+      if (!material || !('side' in material) || material.side === THREE.DoubleSide) {
+        return;
+      }
+
+      material.side = THREE.DoubleSide;
+      material.needsUpdate = true;
+    });
+  });
+}
+
 function definitionFallback(definitionId: string): ArchitecturalObjectDefinition {
   return {
     id: definitionId,
@@ -1061,6 +1103,10 @@ export function IsometricViewCanvas({
     }
 
     const { camera, controls, contentRoot, geometryRoot } = sceneState;
+    contentRoot.position.set(0, 0, 0);
+    contentRoot.scale.set(1, 1, 1);
+    contentRoot.rotation.set(0, 0, 0);
+    contentRoot.updateMatrixWorld(true);
     clearGroup(geometryRoot);
     [...contentRoot.children].forEach((child) => {
       if (child === geometryRoot) {
@@ -1245,9 +1291,9 @@ export function IsometricViewCanvas({
 
     const hasGeometry = geometryRoot.children.length > 0;
     setIsEmpty(!hasGeometry);
-    labelAnchorsRef.current = labelAnchors;
 
     if (!hasGeometry) {
+      labelAnchorsRef.current = [];
       boundsRef.current = null;
       hasAutoFitRef.current = false;
       controls.enabled = false;
@@ -1261,6 +1307,13 @@ export function IsometricViewCanvas({
 
     const grid = createPlanGrid(planPoints, lowestElevation - 1);
     contentRoot.add(grid);
+
+    const unmirroredBox = new THREE.Box3().setFromObject(geometryRoot);
+    const mirrorPivotX = (unmirroredBox.min.x + unmirroredBox.max.x) / 2;
+
+    applyMirroredPlanTransform(contentRoot, mirrorPivotX);
+    ensureDoubleSidedMaterials(geometryRoot);
+    labelAnchorsRef.current = mirrorLabelAnchors(labelAnchors, mirrorPivotX);
 
     const box = new THREE.Box3().setFromObject(geometryRoot);
     boundsRef.current = box.clone();
