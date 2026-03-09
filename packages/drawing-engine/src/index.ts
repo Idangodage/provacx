@@ -52,6 +52,38 @@ export {
 // Store
 export { useSmartDrawingStore, useRoomStore, type SmartDrawingState, type RoomStore } from './store';
 export { DEFAULT_DIMENSION_SETTINGS } from './types';
+export {
+  AlignedDimension,
+  type AlignedDimensionInput,
+  type AlignedDimensionRendererApi,
+  type AlignedDimensionGrip,
+  type AlignedDimensionSnapTargets,
+  type AlignedDimensionStyle,
+  AngularDimension,
+  type AngularDimensionInput,
+  type AngularDimensionRendererApi,
+  type AngularDimensionGrip,
+  ContinuousDimension,
+  type ContinuousDimensionInput,
+  type ContinuousDimensionSerialized,
+  type ContinuousDimensionOrientation,
+  OrdinateDimension,
+  type OrdinateDimensionInput,
+  type OrdinateDimensionGrip,
+  type OrdinateAxis,
+  RadiusDimension,
+  type RadiusDimensionInput,
+  type RadiusDimensionRendererApi,
+  type RadiusDimensionGrip,
+  type SnapEdge,
+  LinearDimension,
+  type DimensionEntity,
+  type DimensionBBox,
+  type LinearDimensionInput,
+  type LinearDimensionStyle,
+  type LinearDimensionUnit,
+  type LinearDimensionOrientation,
+} from './components/canvas/dimension';
 
 // Types
 export type {

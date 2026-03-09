@@ -63,9 +63,15 @@ export class DimensionRenderer {
   private walls: Wall[] = [];
   private rooms: Room[] = [];
   private settings: DimensionSettings = { ...DEFAULT_DIMENSION_SETTINGS };
+  private viewportZoom: number = 1;
+  private liveDimensionObjects: fabric.FabricObject[] = [];
 
   constructor(canvas: fabric.Canvas) {
     this.canvas = canvas;
+  }
+
+  setViewportZoom(zoom: number): void {
+    this.viewportZoom = Math.max(zoom, 0.0001);
   }
 
   setContext(walls: Wall[], rooms: Room[], settings: DimensionSettings): void {
@@ -102,6 +108,11 @@ export class DimensionRenderer {
     typed.hasBorders = false;
   }
 
+  /** Scale a screen-pixel size to canvas units, compensating for viewport zoom. */
+  private sp(screenPx: number): number {
+    return screenPx / this.viewportZoom;
+  }
+
   private createTerminator(
     point: { x: number; y: number },
     direction: { x: number; y: number },
@@ -113,7 +124,7 @@ export class DimensionRenderer {
     const normal = perpendicular(unit);
 
     if (kind === 'tick') {
-      const size = 12;
+      const size = this.sp(12);
       const a = {
         x: canvasPoint.x - unit.x * size * 0.5 + normal.x * size * 0.5,
         y: canvasPoint.y - unit.y * size * 0.5 + normal.y * size * 0.5,
@@ -124,7 +135,7 @@ export class DimensionRenderer {
       };
       const tick = new fabric.Line([a.x, a.y, b.x, b.y], {
         stroke: '#111827',
-        strokeWidth: 1.5,
+        strokeWidth: this.sp(1.5),
         selectable: false,
         evented: false,
       });
@@ -132,12 +143,13 @@ export class DimensionRenderer {
       return tick;
     }
 
-    const length = 14;
-    const width = 8;
+    // Classic CAD filled arrowhead.
+    const length = this.sp(12);
+    const width = this.sp(7);
     const tip = canvasPoint;
     const baseCenter = {
-      x: tip.x - unit.x * length,
-      y: tip.y - unit.y * length,
+      x: tip.x + unit.x * length,
+      y: tip.y + unit.y * length,
     };
     const left = {
       x: baseCenter.x + normal.x * width * 0.5,
@@ -148,15 +160,20 @@ export class DimensionRenderer {
       y: baseCenter.y - normal.y * width * 0.5,
     };
 
-    const triangle = new fabric.Polygon([tip, left, right], {
-      fill: '#111827',
-      stroke: '#111827',
-      strokeWidth: 1,
-      selectable: false,
-      evented: false,
-    });
-    this.annotate(triangle, dimensionId, 'terminator');
-    return triangle;
+    const arrowIcon = new fabric.Polygon(
+      [tip, left, right],
+      {
+        fill: '#111827',
+        stroke: '#111827',
+        strokeWidth: this.sp(0.7),
+        strokeLineJoin: 'miter',
+        selectable: false,
+        evented: false,
+        objectCaching: true,
+      }
+    );
+    this.annotate(arrowIcon, dimensionId, 'terminator');
+    return arrowIcon;
   }
 
   private createTextWithBackground(
@@ -166,21 +183,23 @@ export class DimensionRenderer {
     fontSize: number,
     dimensionId: string
   ): fabric.FabricObject[] {
+    const effectiveFontSize = this.sp(fontSize);
     const text = new fabric.Text(label, {
       left: toCanvas(x),
       top: toCanvas(y),
       fill: '#0F172A',
-      fontSize,
+      fontSize: effectiveFontSize,
       fontFamily: 'Arial',
       originX: 'center',
       originY: 'center',
       selectable: false,
       evented: true,
+      hoverCursor: 'move',
     });
     this.annotate(text, dimensionId, 'dimensionText');
 
-    const width = (text.width ?? 0) + 10;
-    const height = (text.height ?? fontSize) + 4;
+    const width = (text.width ?? 0) + this.sp(10);
+    const height = (text.height ?? effectiveFontSize) + this.sp(4);
     const bg = new fabric.Rect({
       left: toCanvas(x),
       top: toCanvas(y),
@@ -188,9 +207,9 @@ export class DimensionRenderer {
       height,
       fill: '#FFFFFF',
       stroke: '#94A3B8',
-      strokeWidth: 1.2,
-      rx: 2,
-      ry: 2,
+      strokeWidth: this.sp(1.2),
+      rx: this.sp(2),
+      ry: this.sp(2),
       originX: 'center',
       originY: 'center',
       selectable: false,
@@ -201,10 +220,10 @@ export class DimensionRenderer {
     const textHandle = new fabric.Circle({
       left: toCanvas(x),
       top: toCanvas(y),
-      radius: 6,
+      radius: this.sp(6),
       fill: '#EFF6FF',
       stroke: '#1D4ED8',
-      strokeWidth: 2.2,
+      strokeWidth: this.sp(2.2),
       originX: 'center',
       originY: 'center',
       selectable: false,
@@ -227,7 +246,7 @@ export class DimensionRenderer {
       lineCoords(geometry.extensionAStart, geometry.extensionAEnd),
       {
         stroke: '#111827',
-        strokeWidth: profile.extensionStrokeWidth,
+        strokeWidth: this.sp(profile.extensionStrokeWidth),
         selectable: false,
         evented: false,
       }
@@ -238,7 +257,7 @@ export class DimensionRenderer {
       lineCoords(geometry.extensionBStart, geometry.extensionBEnd),
       {
         stroke: '#111827',
-        strokeWidth: profile.extensionStrokeWidth,
+        strokeWidth: this.sp(profile.extensionStrokeWidth),
         selectable: false,
         evented: false,
       }
@@ -249,9 +268,10 @@ export class DimensionRenderer {
       lineCoords(geometry.dimensionStart, geometry.dimensionEnd),
       {
         stroke: '#111827',
-        strokeWidth: profile.dimensionStrokeWidth,
+        strokeWidth: this.sp(profile.dimensionStrokeWidth),
         selectable: false,
         evented: true,
+        hoverCursor: 'move',
       }
     );
     this.annotate(dimensionLine, dimension.id, 'dimensionLine');
@@ -260,7 +280,7 @@ export class DimensionRenderer {
       lineCoords(geometry.dimensionStart, geometry.dimensionEnd),
       {
         stroke: '#1D4ED8',
-        strokeWidth: 5,
+        strokeWidth: this.sp(5),
         selectable: false,
         evented: false,
         visible: this.selectedDimensionIds.has(dimension.id),
@@ -272,7 +292,7 @@ export class DimensionRenderer {
       lineCoords(geometry.dimensionStart, geometry.dimensionEnd),
       {
         stroke: '#059669',
-        strokeWidth: 3.5,
+        strokeWidth: this.sp(3.5),
         selectable: false,
         evented: false,
         visible: this.hoveredDimensionId === dimension.id && !this.selectedDimensionIds.has(dimension.id),
@@ -286,7 +306,7 @@ export class DimensionRenderer {
         x: geometry.direction.x,
         y: geometry.direction.y,
       },
-      profile.terminator,
+      'arrow',
       dimension.id
     );
     const terminatorB = this.createTerminator(
@@ -295,7 +315,7 @@ export class DimensionRenderer {
         x: -geometry.direction.x,
         y: -geometry.direction.y,
       },
-      profile.terminator,
+      'arrow',
       dimension.id
     );
 
@@ -310,10 +330,10 @@ export class DimensionRenderer {
     const offsetHandle = new fabric.Circle({
       left: toCanvas(geometry.midpoint.x),
       top: toCanvas(geometry.midpoint.y),
-      radius: 6,
+      radius: this.sp(6),
       fill: '#EFF6FF',
       stroke: '#1D4ED8',
-      strokeWidth: 2.2,
+      strokeWidth: this.sp(2.2),
       originX: 'center',
       originY: 'center',
       selectable: false,
@@ -345,6 +365,7 @@ export class DimensionRenderer {
         hasBorders: false,
         lockMovementX: true,
         lockMovementY: true,
+        hoverCursor: 'move',
         objectCaching: true,
       }
     ) as DimensionGroup;
@@ -373,7 +394,7 @@ export class DimensionRenderer {
 
     const legA = new fabric.Line(lineCoords(geometry.vertex, geometry.arcStart), {
       stroke: '#111827',
-      strokeWidth: profile.extensionStrokeWidth,
+      strokeWidth: this.sp(profile.extensionStrokeWidth),
       selectable: false,
       evented: false,
     });
@@ -381,7 +402,7 @@ export class DimensionRenderer {
 
     const legB = new fabric.Line(lineCoords(geometry.vertex, geometry.arcEnd), {
       stroke: '#111827',
-      strokeWidth: profile.extensionStrokeWidth,
+      strokeWidth: this.sp(profile.extensionStrokeWidth),
       selectable: false,
       evented: false,
     });
@@ -390,16 +411,17 @@ export class DimensionRenderer {
     const arc = new fabric.Path(this.createAngularArcPath(geometry), {
       fill: 'transparent',
       stroke: accent,
-      strokeWidth: profile.dimensionStrokeWidth,
+      strokeWidth: this.sp(profile.dimensionStrokeWidth),
       selectable: false,
       evented: true,
+      hoverCursor: 'move',
     });
     this.annotate(arc, dimension.id, 'angularArc');
 
     const selectionHalo = new fabric.Path(this.createAngularArcPath(geometry), {
       fill: 'transparent',
       stroke: '#1D4ED8',
-      strokeWidth: 5,
+      strokeWidth: this.sp(5),
       selectable: false,
       evented: false,
       visible: this.selectedDimensionIds.has(dimension.id),
@@ -409,7 +431,7 @@ export class DimensionRenderer {
     const hoverHalo = new fabric.Path(this.createAngularArcPath(geometry), {
       fill: 'transparent',
       stroke: '#059669',
-      strokeWidth: 3.5,
+      strokeWidth: this.sp(3.5),
       selectable: false,
       evented: false,
       visible: this.hoveredDimensionId === dimension.id && !this.selectedDimensionIds.has(dimension.id),
@@ -434,6 +456,7 @@ export class DimensionRenderer {
         hasBorders: false,
         lockMovementX: true,
         lockMovementY: true,
+        hoverCursor: 'move',
         objectCaching: true,
       }
     ) as DimensionGroup;
@@ -460,12 +483,12 @@ export class DimensionRenderer {
     const selectionHalo = new fabric.Rect({
       left: toCanvas(geometry.textPosition.x),
       top: toCanvas(geometry.textPosition.y),
-      width: (text.width ?? 0) + 16,
-      height: (text.height ?? 0) + 10,
+      width: (text.width ?? 0) + this.sp(16),
+      height: (text.height ?? 0) + this.sp(10),
       stroke: '#1D4ED8',
-      strokeWidth: 3,
+      strokeWidth: this.sp(3),
       fill: 'rgba(37,99,235,0.08)',
-      strokeDashArray: [6, 4],
+      strokeDashArray: [this.sp(6), this.sp(4)],
       originX: 'center',
       originY: 'center',
       selectable: false,
@@ -477,12 +500,12 @@ export class DimensionRenderer {
     const hoverHalo = new fabric.Rect({
       left: toCanvas(geometry.textPosition.x),
       top: toCanvas(geometry.textPosition.y),
-      width: (text.width ?? 0) + 14,
-      height: (text.height ?? 0) + 8,
+      width: (text.width ?? 0) + this.sp(14),
+      height: (text.height ?? 0) + this.sp(8),
       stroke: '#059669',
-      strokeWidth: 2.5,
+      strokeWidth: this.sp(2.5),
       fill: 'rgba(16,185,129,0.08)',
-      strokeDashArray: [5, 5],
+      strokeDashArray: [this.sp(5), this.sp(5)],
       originX: 'center',
       originY: 'center',
       selectable: false,
@@ -499,6 +522,7 @@ export class DimensionRenderer {
       hasBorders: false,
       lockMovementX: true,
       lockMovementY: true,
+      hoverCursor: 'move',
       objectCaching: true,
     }) as DimensionGroup;
 
@@ -606,7 +630,115 @@ export class DimensionRenderer {
     this.canvas.requestRenderAll();
   }
 
+  /**
+   * Render a live/elastic dimension preview while drawing a wall.
+   * startMm and endMm are in world mm coordinates.
+   * label is the pre-formatted measurement string.
+   */
+  renderLiveDimension(
+    startMm: { x: number; y: number },
+    endMm: { x: number; y: number },
+    label: string
+  ): void {
+    this.clearLiveDimension();
+
+    const startC = toCanvasPoint(startMm);
+    const endC = toCanvasPoint(endMm);
+    const dx = endC.x - startC.x;
+    const dy = endC.y - startC.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 0.001) return;
+
+    // Canonical direction: normalise so we always travel in the
+    // positive-X direction (or positive-Y for vertical walls).
+    // This ensures the perpendicular normal always points to the same
+    // side regardless of which endpoint the user started from.
+    const rawDirX = dx / len;
+    const rawDirY = dy / len;
+    const flip = rawDirX < 0 || (rawDirX === 0 && rawDirY < 0);
+    const dir = flip ? { x: -rawDirX, y: -rawDirY } : { x: rawDirX, y: rawDirY };
+
+    // Always use the true perpendicular to the wall direction.
+    // This guarantees extension lines are perpendicular to the wall regardless of its angle.
+    const normal: { x: number; y: number } = { x: -dir.y, y: dir.x };
+
+    const offsetDist = this.sp(70);
+    const gapDist = this.sp(4);
+    const beyondDist = this.sp(6);
+    const tickSize = this.sp(10);
+
+    const dimStart = { x: startC.x + normal.x * offsetDist, y: startC.y + normal.y * offsetDist };
+    const dimEnd   = { x: endC.x   + normal.x * offsetDist, y: endC.y   + normal.y * offsetDist };
+
+    // Dimension line (solid blue)
+    const dimLine = new fabric.Line([dimStart.x, dimStart.y, dimEnd.x, dimEnd.y], {
+      stroke: '#2563EB',
+      strokeWidth: this.sp(1.5),
+      selectable: false, evented: false,
+    });
+
+    // Extension lines
+    const extA = new fabric.Line([
+      startC.x + normal.x * gapDist, startC.y + normal.y * gapDist,
+      dimStart.x + normal.x * beyondDist, dimStart.y + normal.y * beyondDist,
+    ], { stroke: '#2563EB', strokeWidth: this.sp(1), selectable: false, evented: false });
+
+    const extB = new fabric.Line([
+      endC.x + normal.x * gapDist, endC.y + normal.y * gapDist,
+      dimEnd.x + normal.x * beyondDist, dimEnd.y + normal.y * beyondDist,
+    ], { stroke: '#2563EB', strokeWidth: this.sp(1), selectable: false, evented: false });
+
+    // Tick marks at dimension line endpoints
+    const makeTick = (pt: { x: number; y: number }): fabric.Line => {
+      const a = { x: pt.x - dir.x * tickSize * 0.5 + normal.x * tickSize * 0.5, y: pt.y - dir.y * tickSize * 0.5 + normal.y * tickSize * 0.5 };
+      const b = { x: pt.x + dir.x * tickSize * 0.5 - normal.x * tickSize * 0.5, y: pt.y + dir.y * tickSize * 0.5 - normal.y * tickSize * 0.5 };
+      return new fabric.Line([a.x, a.y, b.x, b.y], { stroke: '#2563EB', strokeWidth: this.sp(1.5), selectable: false, evented: false });
+    };
+    const tickA = makeTick(dimStart);
+    const tickB = makeTick(dimEnd);
+
+    // Text label at midpoint, pushed slightly further along normal
+    const textOffsetDist = offsetDist + this.sp(18);
+    const midC = { x: (startC.x + endC.x) / 2 + normal.x * textOffsetDist, y: (startC.y + endC.y) / 2 + normal.y * textOffsetDist };
+
+    const textObj = new fabric.FabricText(label, {
+      left: midC.x, top: midC.y,
+      fill: '#1E40AF',
+      fontSize: this.sp(13),
+      fontFamily: 'Arial',
+      fontWeight: '600',
+      originX: 'center', originY: 'center',
+      selectable: false, evented: false,
+    });
+
+    const bg = new fabric.Rect({
+      left: midC.x, top: midC.y,
+      width: (textObj.width ?? 0) + this.sp(10),
+      height: (textObj.height ?? this.sp(13)) + this.sp(6),
+      fill: '#EFF6FF',
+      stroke: '#2563EB',
+      strokeWidth: this.sp(1),
+      rx: this.sp(3), ry: this.sp(3),
+      originX: 'center', originY: 'center',
+      selectable: false, evented: false,
+    });
+
+    this.liveDimensionObjects = [extA, extB, dimLine, tickA, tickB, bg, textObj];
+    this.liveDimensionObjects.forEach((obj) => this.canvas.add(obj));
+    this.liveDimensionObjects.forEach((obj) => this.canvas.bringObjectToFront(obj));
+    this.canvas.requestRenderAll();
+  }
+
+  clearLiveDimension(): void {
+    if (this.liveDimensionObjects.length > 0) {
+      this.liveDimensionObjects.forEach((obj) => this.canvas.remove(obj));
+      this.liveDimensionObjects = [];
+      this.canvas.requestRenderAll();
+    }
+  }
+
   dispose(): void {
     this.clearAllDimensions();
+    this.clearLiveDimension();
   }
 }

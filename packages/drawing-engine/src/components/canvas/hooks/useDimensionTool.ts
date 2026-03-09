@@ -64,6 +64,14 @@ type DragState =
       dimensionId: string;
       startPointer: Point2D;
       baselineOffset: number;
+    }
+  | {
+      mode: 'body';
+      dimensionId: string;
+      startPointer: Point2D;
+      baselineOffset: number;
+      baselineTextPosition: Point2D;
+      textPositionLocked: boolean;
     };
 
 export interface UseDimensionToolOptions {
@@ -88,6 +96,30 @@ export interface UseDimensionToolOptions {
   saveToHistory: (action: string) => void;
 }
 
+export interface UseDimensionToolResult {
+  handlePlacementMouseDown: (point: Point2D, target?: FabricObject | null) => boolean;
+  handlePlacementMouseMove: (point: Point2D) => boolean;
+  handleSelectMouseDown: (
+    target: FabricObject | null | undefined,
+    point: Point2D,
+    addToSelection: boolean
+  ) => boolean;
+  handleSelectMouseMove: (point: Point2D, target: FabricObject | null | undefined) => boolean;
+  handleSelectMouseUp: () => boolean;
+  handleDoubleClick: (target: FabricObject | null | undefined) => boolean;
+  handleDeleteContext: (target: FabricObject | null | undefined) => boolean;
+  handleKeyDown: (event: KeyboardEvent) => boolean;
+  cancelPlacement: () => void;
+  getTargetMeta: (target: FabricObject | null | undefined) => {
+    dimensionId: string | undefined;
+    wallId: string | undefined;
+    roomId: string | undefined;
+    controlType: string | undefined;
+  };
+  isSelectDragActive: () => boolean;
+  isPlacingRef: MutableRefObject<PlacementState>;
+}
+
 function add(a: Point2D, b: Point2D): Point2D {
   return { x: a.x + b.x, y: a.y + b.y };
 }
@@ -98,6 +130,17 @@ function subtract(a: Point2D, b: Point2D): Point2D {
 
 function dot(a: Point2D, b: Point2D): number {
   return a.x * b.x + a.y * b.y;
+}
+
+function normalize(vector: Point2D): Point2D {
+  const length = Math.hypot(vector.x, vector.y);
+  if (length < 0.000001) {
+    return { x: 1, y: 0 };
+  }
+  return {
+    x: vector.x / length,
+    y: vector.y / length,
+  };
 }
 
 function detectPlacementType(settings: DimensionSettings): DimensionPlacementType {
@@ -153,7 +196,7 @@ function closestWallCorner(
   return best;
 }
 
-export function useDimensionTool(options: UseDimensionToolOptions) {
+export function useDimensionTool(options: UseDimensionToolOptions): UseDimensionToolResult {
   const optionsRef = useRef(options);
   optionsRef.current = options;
 
@@ -545,6 +588,8 @@ export function useDimensionTool(options: UseDimensionToolOptions) {
     clearPreview();
   }, [clearPreview]);
 
+  const isSelectDragActive = useCallback(() => dragStateRef.current.mode !== 'idle', []);
+
   const applyDrag = useCallback((point: Point2D) => {
     const dragState = dragStateRef.current;
     if (dragState.mode === 'idle') return;
@@ -558,6 +603,76 @@ export function useDimensionTool(options: UseDimensionToolOptions) {
         dragState.dimensionId,
         {
           textPosition: next,
+          textPositionLocked: true,
+        },
+        { skipHistory: true }
+      );
+      return;
+    }
+
+    if (dragState.mode === 'body') {
+      const delta = subtract(point, dragState.startPointer);
+      const geometry = resolveDimensionGeometry(
+        dimension,
+        optionsRef.current.walls,
+        optionsRef.current.rooms,
+        optionsRef.current.dimensionSettings
+      );
+      if (!geometry) return;
+
+      if (geometry.kind === 'linear') {
+        const deltaAlongNormal = dot(delta, geometry.normal);
+        const normalDelta = {
+          x: geometry.normal.x * deltaAlongNormal,
+          y: geometry.normal.y * deltaAlongNormal,
+        };
+        optionsRef.current.updateDimension(
+          dragState.dimensionId,
+          {
+            offset: dragState.baselineOffset + deltaAlongNormal,
+            ...(dragState.textPositionLocked
+              ? {
+                  textPosition: add(dragState.baselineTextPosition, normalDelta),
+                  textPositionLocked: true,
+                }
+              : {}),
+          },
+          { skipHistory: true }
+        );
+        return;
+      }
+
+      if (geometry.kind === 'angular') {
+        const midAngle = geometry.startAngle + geometry.deltaAngle / 2;
+        const radial = normalize({
+          x: Math.cos(midAngle),
+          y: Math.sin(midAngle),
+        });
+        const deltaAlongRadius = dot(delta, radial);
+        const radialDelta = {
+          x: radial.x * deltaAlongRadius,
+          y: radial.y * deltaAlongRadius,
+        };
+        optionsRef.current.updateDimension(
+          dragState.dimensionId,
+          {
+            offset: Math.max(20, dragState.baselineOffset + deltaAlongRadius),
+            ...(dragState.textPositionLocked
+              ? {
+                  textPosition: add(dragState.baselineTextPosition, radialDelta),
+                  textPositionLocked: true,
+                }
+              : {}),
+          },
+          { skipHistory: true }
+        );
+        return;
+      }
+
+      optionsRef.current.updateDimension(
+        dragState.dimensionId,
+        {
+          textPosition: add(dragState.baselineTextPosition, delta),
           textPositionLocked: true,
         },
         { skipHistory: true }
@@ -646,6 +761,17 @@ export function useDimensionTool(options: UseDimensionToolOptions) {
         optionsRef.current.setSelectedIds(Array.from(selection));
       } else {
         optionsRef.current.setSelectedIds([meta.dimensionId]);
+        const dimension = optionsRef.current.dimensions.find((entry) => entry.id === meta.dimensionId);
+        if (dimension) {
+          dragStateRef.current = {
+            mode: 'body',
+            dimensionId: meta.dimensionId,
+            startPointer: { ...point },
+            baselineOffset: dimension.offset ?? optionsRef.current.dimensionSettings.defaultOffset,
+            baselineTextPosition: { ...dimension.textPosition },
+            textPositionLocked: Boolean(dimension.textPositionLocked),
+          };
+        }
       }
       optionsRef.current.setHoveredElement(meta.dimensionId);
       return true;
@@ -735,6 +861,7 @@ export function useDimensionTool(options: UseDimensionToolOptions) {
     handleKeyDown,
     cancelPlacement,
     getTargetMeta,
+    isSelectDragActive,
     isPlacingRef: placementRef,
   };
 }

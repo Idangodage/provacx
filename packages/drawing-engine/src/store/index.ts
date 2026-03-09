@@ -810,100 +810,478 @@ function buildExteriorWallSet(walls: Wall[], rooms: Room[]): Set<string> {
   return exterior;
 }
 
+// Uniform gap (mm) from the wall exterior face to the dimension line.
+const AUTO_DIM_WALL_GAP = 350;
+// Minimum wall length (mm) to show a dimension — avoids clutter from tiny walls.
+const AUTO_DIM_MIN_WALL_LENGTH = 200;
+
 function buildAutoWallDimensions(
   walls: Wall[],
   rooms: Room[],
   settings: DimensionSettings
 ): Omit<Dimension2D, 'id'>[] {
   const exteriorWallIds = buildExteriorWallSet(walls, rooms);
-  const exteriorWalls = walls.filter((wall) => exteriorWallIds.has(wall.id));
+  // Filter to exterior walls above the minimum length threshold.
+  const exteriorWalls = walls.filter(
+    (wall) => exteriorWallIds.has(wall.id) && wallLength(wall) >= AUTO_DIM_MIN_WALL_LENGTH
+  );
   if (exteriorWalls.length === 0) return [];
 
-  const horizontal: Wall[] = [];
-  const vertical: Wall[] = [];
-  const aligned: Wall[] = [];
-
+  // Compute building bounding box from all exterior wall endpoints.
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
   exteriorWalls.forEach((wall) => {
-    const mode = wallLinearMode(wall);
-    if (mode === 'horizontal') horizontal.push(wall);
-    else if (mode === 'vertical') vertical.push(wall);
-    else aligned.push(wall);
+    for (const p of [wall.startPoint, wall.endPoint]) {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
   });
+  const bboxCenterX = (minX + maxX) / 2;
+  const bboxCenterY = (minY + maxY) / 2;
 
-  horizontal.sort((a, b) => wallMidpoint(a).y - wallMidpoint(b).y || wallMidpoint(a).x - wallMidpoint(b).x);
-  vertical.sort((a, b) => wallMidpoint(a).x - wallMidpoint(b).x || wallMidpoint(a).y - wallMidpoint(b).y);
-  aligned.sort((a, b) => wallLength(b) - wallLength(a));
+  // Classify walls by dominant direction.
+  const horizontal = exteriorWalls.filter((w) => wallLinearMode(w) === 'horizontal');
+  const vertical   = exteriorWalls.filter((w) => wallLinearMode(w) === 'vertical');
+  const aligned    = exteriorWalls.filter((w) => wallLinearMode(w) === 'aligned');
 
+  // Side buckets for axis-aligned walls.
+  const topWalls = horizontal
+    .filter((w) => wallMidpoint(w).y <= bboxCenterY)
+    .sort((a, b) => Math.min(a.startPoint.x, a.endPoint.x) - Math.min(b.startPoint.x, b.endPoint.x));
+  const bottomWalls = horizontal
+    .filter((w) => wallMidpoint(w).y > bboxCenterY)
+    .sort((a, b) => Math.min(a.startPoint.x, a.endPoint.x) - Math.min(b.startPoint.x, b.endPoint.x));
+  const leftWalls = vertical
+    .filter((w) => wallMidpoint(w).x <= bboxCenterX)
+    .sort((a, b) => Math.min(a.startPoint.y, a.endPoint.y) - Math.min(b.startPoint.y, b.endPoint.y));
+  const rightWalls = vertical
+    .filter((w) => wallMidpoint(w).x > bboxCenterX)
+    .sort((a, b) => Math.min(a.startPoint.y, a.endPoint.y) - Math.min(b.startPoint.y, b.endPoint.y));
+
+  const unit: Dimension2D['unit'] = settings.unitSystem === 'imperial' ? 'ft-in' : 'mm';
   const dimensions: Omit<Dimension2D, 'id'>[] = [];
-  const offsetBase = Math.max(120, settings.defaultOffset);
-  const offsetStep = 120;
 
-  horizontal.forEach((wall, index) => {
-    dimensions.push({
-      type: 'linear',
-      linearMode: 'horizontal',
-      points: [{ ...wall.startPoint }, { ...wall.endPoint }],
-      value: Math.abs(wall.endPoint.x - wall.startPoint.x),
-      unit: settings.unitSystem === 'imperial' ? 'ft-in' : 'mm',
-      textPosition: wallMidpoint(wall),
-      visible: true,
-      style: settings.style,
-      precision: settings.precision,
-      displayFormat: settings.displayFormat,
-      offset: offsetBase + index * offsetStep,
-      linkedWallIds: [wall.id],
-      anchors: [
-        { kind: 'wall-endpoint', wallId: wall.id, endpoint: 'start' },
-        { kind: 'wall-endpoint', wallId: wall.id, endpoint: 'end' },
-      ],
-      isAssociative: true,
-      chainGroupId: 'auto-horizontal',
-      baselineGroupId: 'auto-exterior',
+  const allWallsById = new Map(walls.map((w) => [w.id, w]));
+  const SNAP_TOLERANCE = 50; // mm - how close endpoints must be to count as connected
+  const FACE_PROBE_OFFSET = 10; // mm - nudge probes past wall face for room-side detection
+  const interiorRooms = rooms.filter((room) => !room.isExterior);
+  const interiorRoomsByWallId = new Map<string, Room[]>();
+  interiorRooms.forEach((room) => {
+    room.wallIds.forEach((wallId) => {
+      interiorRoomsByWallId.set(wallId, [...(interiorRoomsByWallId.get(wallId) ?? []), room]);
     });
   });
 
-  vertical.forEach((wall, index) => {
-    dimensions.push({
-      type: 'linear',
-      linearMode: 'vertical',
-      points: [{ ...wall.startPoint }, { ...wall.endPoint }],
-      value: Math.abs(wall.endPoint.y - wall.startPoint.y),
-      unit: settings.unitSystem === 'imperial' ? 'ft-in' : 'mm',
-      textPosition: wallMidpoint(wall),
-      visible: true,
-      style: settings.style,
-      precision: settings.precision,
-      displayFormat: settings.displayFormat,
-      offset: offsetBase + index * offsetStep,
-      linkedWallIds: [wall.id],
-      anchors: [
-        { kind: 'wall-endpoint', wallId: wall.id, endpoint: 'start' },
-        { kind: 'wall-endpoint', wallId: wall.id, endpoint: 'end' },
-      ],
-      isAssociative: true,
-      chainGroupId: 'auto-vertical',
-      baselineGroupId: 'auto-exterior',
-    });
-  });
+  function distance(a: Point2D, b: Point2D): number {
+    return Math.hypot(a.x - b.x, a.y - b.y);
+  }
 
-  aligned.forEach((wall, index) => {
+  function dot(a: Point2D, b: Point2D): number {
+    return a.x * b.x + a.y * b.y;
+  }
+
+  function normalize(vector: Point2D): Point2D {
+    const length = Math.hypot(vector.x, vector.y);
+    if (length < 0.000001) {
+      return { x: 1, y: 0 };
+    }
+    return { x: vector.x / length, y: vector.y / length };
+  }
+
+  function add(a: Point2D, b: Point2D): Point2D {
+    return { x: a.x + b.x, y: a.y + b.y };
+  }
+
+  function scale(vector: Point2D, amount: number): Point2D {
+    return { x: vector.x * amount, y: vector.y * amount };
+  }
+
+  function wallDirection(wall: Wall): Point2D {
+    return normalize({
+      x: wall.endPoint.x - wall.startPoint.x,
+      y: wall.endPoint.y - wall.startPoint.y,
+    });
+  }
+
+  function wallLeftNormal(wall: Wall): Point2D {
+    const direction = wallDirection(wall);
+    return { x: -direction.y, y: direction.x };
+  }
+
+  function orientFaceLineWithWall(
+    wall: Wall,
+    line: { start: Point2D; end: Point2D }
+  ): { start: Point2D; end: Point2D } {
+    const centerDirection = {
+      x: wall.endPoint.x - wall.startPoint.x,
+      y: wall.endPoint.y - wall.startPoint.y,
+    };
+    const lineDirection = {
+      x: line.end.x - line.start.x,
+      y: line.end.y - line.start.y,
+    };
+    if (dot(centerDirection, lineDirection) >= 0) {
+      return {
+        start: { ...line.start },
+        end: { ...line.end },
+      };
+    }
+    return {
+      start: { ...line.end },
+      end: { ...line.start },
+    };
+  }
+
+  function lineIntersection(
+    a1: Point2D,
+    a2: Point2D,
+    b1: Point2D,
+    b2: Point2D
+  ): Point2D | null {
+    const dax = a2.x - a1.x;
+    const day = a2.y - a1.y;
+    const dbx = b2.x - b1.x;
+    const dby = b2.y - b1.y;
+    const denominator = dax * dby - day * dbx;
+    if (Math.abs(denominator) < 0.000001) {
+      return null;
+    }
+    const t = ((b1.x - a1.x) * dby - (b1.y - a1.y) * dbx) / denominator;
+    return {
+      x: a1.x + dax * t,
+      y: a1.y + day * t,
+    };
+  }
+
+  interface WallFaceSelection {
+    inner: { start: Point2D; end: Point2D };
+    outer: { start: Point2D; end: Point2D };
+    insideSign: -1 | 1;
+    outsideSign: -1 | 1;
+  }
+
+  type WallFaceKind = 'inner' | 'outer';
+
+  const wallFaceCache = new Map<string, WallFaceSelection>();
+  function resolveWallFaces(wall: Wall): WallFaceSelection {
+    const cached = wallFaceCache.get(wall.id);
+    if (cached) return cached;
+
+    const midpoint = wallMidpoint(wall);
+    const normal = wallLeftNormal(wall);
+    const halfThickness = Math.max(0, wall.thickness / 2);
+    const probeDistance = halfThickness + FACE_PROBE_OFFSET;
+    const positiveProbe = add(midpoint, scale(normal, probeDistance));
+    const negativeProbe = add(midpoint, scale(normal, -probeDistance));
+    const attachedRooms = interiorRoomsByWallId.get(wall.id) ?? [];
+
+    let choosePositiveSide: boolean | null = null;
+    if (attachedRooms.length > 0) {
+      const positiveHits = attachedRooms.some((room) => GeometryEngine.pointInRoom(positiveProbe, room));
+      const negativeHits = attachedRooms.some((room) => GeometryEngine.pointInRoom(negativeProbe, room));
+      if (positiveHits !== negativeHits) {
+        choosePositiveSide = positiveHits;
+      }
+    }
+
+    if (choosePositiveSide === null && attachedRooms.length > 0) {
+      const averageSigned = attachedRooms.reduce((sum, room) => (
+        sum + dot({ x: room.centroid.x - midpoint.x, y: room.centroid.y - midpoint.y }, normal)
+      ), 0) / attachedRooms.length;
+      if (Math.abs(averageSigned) > 0.0001) {
+        choosePositiveSide = averageSigned > 0;
+      }
+    }
+
+    if (choosePositiveSide === null) {
+      const positiveHitsAny = interiorRooms.some((room) => GeometryEngine.pointInRoom(positiveProbe, room));
+      const negativeHitsAny = interiorRooms.some((room) => GeometryEngine.pointInRoom(negativeProbe, room));
+      if (positiveHitsAny !== negativeHitsAny) {
+        choosePositiveSide = positiveHitsAny;
+      }
+    }
+
+    if (choosePositiveSide === null) {
+      const toBboxCenter = {
+        x: bboxCenterX - midpoint.x,
+        y: bboxCenterY - midpoint.y,
+      };
+      if (Math.hypot(toBboxCenter.x, toBboxCenter.y) > 0.001) {
+        choosePositiveSide = dot(toBboxCenter, normal) >= 0;
+      }
+    }
+
+    if (choosePositiveSide === null) {
+      choosePositiveSide = true;
+    }
+
+    const insideSign: -1 | 1 = choosePositiveSide ? 1 : -1;
+    const outsideSign: -1 | 1 = insideSign === 1 ? -1 : 1;
+    const innerRaw = choosePositiveSide
+      ? { start: wall.interiorLine.start, end: wall.interiorLine.end }
+      : { start: wall.exteriorLine.start, end: wall.exteriorLine.end };
+    const outerRaw = choosePositiveSide
+      ? { start: wall.exteriorLine.start, end: wall.exteriorLine.end }
+      : { start: wall.interiorLine.start, end: wall.interiorLine.end };
+    const resolved: WallFaceSelection = {
+      inner: orientFaceLineWithWall(wall, innerRaw),
+      outer: orientFaceLineWithWall(wall, outerRaw),
+      insideSign,
+      outsideSign,
+    };
+    wallFaceCache.set(wall.id, resolved);
+    return resolved;
+  }
+
+  function wallsNearEndpoint(endpoint: Point2D, sourceWallId: string): Wall[] {
+    const nearWalls = walls.filter((candidate) => {
+      if (candidate.id === sourceWallId) return false;
+      return (
+        distance(endpoint, candidate.startPoint) <= SNAP_TOLERANCE ||
+        distance(endpoint, candidate.endPoint) <= SNAP_TOLERANCE
+      );
+    });
+    const nearExterior = nearWalls.filter((candidate) => exteriorWallIds.has(candidate.id));
+    return nearExterior.length > 0 ? nearExterior : nearWalls;
+  }
+
+  function resolveSpanCorner(
+    wall: Wall,
+    endpoint: 'start' | 'end',
+    face: { start: Point2D; end: Point2D },
+    faceKind: WallFaceKind
+  ): Point2D {
+    const centerEndpoint = endpoint === 'start' ? wall.startPoint : wall.endPoint;
+    const faceEndpoint = endpoint === 'start' ? face.start : face.end;
+    const explicitlyConnected = wall.connectedWalls
+      .map((connectedId) => allWallsById.get(connectedId))
+      .filter((candidate): candidate is Wall => Boolean(candidate))
+      .filter((candidate) => (
+        distance(centerEndpoint, candidate.startPoint) <= SNAP_TOLERANCE ||
+        distance(centerEndpoint, candidate.endPoint) <= SNAP_TOLERANCE
+      ));
+    const nearbyWalls = wallsNearEndpoint(centerEndpoint, wall.id);
+    const connected = explicitlyConnected.length > 0 ? explicitlyConnected : nearbyWalls;
+    const connectedExterior = connected.filter((candidate) => exteriorWallIds.has(candidate.id));
+    const candidates = connectedExterior.length > 0 ? connectedExterior : connected;
+
+    let bestPoint: Point2D | null = null;
+    let bestScore = Number.POSITIVE_INFINITY;
+    for (const candidate of candidates) {
+      const candidateFaces = resolveWallFaces(candidate);
+      const candidateFace = faceKind === 'inner' ? candidateFaces.inner : candidateFaces.outer;
+      const intersection = lineIntersection(
+        face.start,
+        face.end,
+        candidateFace.start,
+        candidateFace.end
+      );
+      if (!intersection) continue;
+      const score = distance(intersection, faceEndpoint);
+      if (score < bestScore) {
+        bestScore = score;
+        bestPoint = intersection;
+      }
+    }
+
+    return bestPoint ?? { ...faceEndpoint };
+  }
+
+  function wallOutsideOffsetSign(wall: Wall): -1 | 1 {
+    return resolveWallFaces(wall).outsideSign;
+  }
+
+  function spanOnFace(wall: Wall, faceKind: WallFaceKind): { start: Point2D; end: Point2D; length: number } {
+    const faces = resolveWallFaces(wall);
+    const face = faceKind === 'inner' ? faces.inner : faces.outer;
+    const start = resolveSpanCorner(wall, 'start', face, faceKind);
+    const end = resolveSpanCorner(wall, 'end', face, faceKind);
+    return {
+      start,
+      end,
+      length: Math.max(0, distance(start, end)),
+    };
+  }
+
+  function pointInAnyInteriorRoom(point: Point2D): boolean {
+    return interiorRooms.some((room) => GeometryEngine.pointInRoom(point, room));
+  }
+
+  function segmentIntersectionPoint(
+    a1: Point2D,
+    a2: Point2D,
+    b1: Point2D,
+    b2: Point2D
+  ): Point2D | null {
+    const candidate = lineIntersection(a1, a2, b1, b2);
+    if (!candidate) return null;
+
+    const within = (value: number, edgeA: number, edgeB: number): boolean => {
+      const min = Math.min(edgeA, edgeB) - 0.001;
+      const max = Math.max(edgeA, edgeB) + 0.001;
+      return value >= min && value <= max;
+    };
+
+    if (
+      within(candidate.x, a1.x, a2.x) &&
+      within(candidate.y, a1.y, a2.y) &&
+      within(candidate.x, b1.x, b2.x) &&
+      within(candidate.y, b1.y, b2.y)
+    ) {
+      return candidate;
+    }
+    return null;
+  }
+
+  function offsetOverlapsRoomsOrWalls(
+    wall: Wall,
+    span: { start: Point2D; end: Point2D; length: number },
+    signedOffset: number
+  ): boolean {
+    if (span.length < 0.001) return false;
+
+    const faceDirection = normalize({
+      x: span.end.x - span.start.x,
+      y: span.end.y - span.start.y,
+    });
+    const faceNormal = { x: -faceDirection.y, y: faceDirection.x };
+    const dimStart = add(span.start, scale(faceNormal, signedOffset));
+    const dimEnd = add(span.end, scale(faceNormal, signedOffset));
+
+    const samples = [0, 0.25, 0.5, 0.75, 1];
+    for (const t of samples) {
+      const samplePoint = {
+        x: dimStart.x + (dimEnd.x - dimStart.x) * t,
+        y: dimStart.y + (dimEnd.y - dimStart.y) * t,
+      };
+      if (pointInAnyInteriorRoom(samplePoint)) {
+        return true;
+      }
+    }
+
+    const endpointTolerance = Math.max(40, wall.thickness * 0.25);
+    for (const candidate of walls) {
+      if (candidate.id === wall.id) continue;
+      const hit = segmentIntersectionPoint(dimStart, dimEnd, candidate.startPoint, candidate.endPoint);
+      if (!hit) continue;
+      if (
+        distance(hit, wall.startPoint) <= endpointTolerance ||
+        distance(hit, wall.endPoint) <= endpointTolerance
+      ) {
+        continue;
+      }
+      return true;
+    }
+
+    return false;
+  }
+
+  function resolveSafeSignedOffset(
+    wall: Wall,
+    span: { start: Point2D; end: Point2D; length: number },
+    baseOffsetAbs: number,
+    preferredSign: -1 | 1
+  ): number {
+    const preferredOffset = preferredSign * baseOffsetAbs;
+    if (!offsetOverlapsRoomsOrWalls(wall, span, preferredOffset)) {
+      return preferredOffset;
+    }
+    const flippedSign: -1 | 1 = preferredSign === 1 ? -1 : 1;
+    const flippedOffset = flippedSign * baseOffsetAbs;
+    if (!offsetOverlapsRoomsOrWalls(wall, span, flippedOffset)) {
+      return flippedOffset;
+    }
+    return preferredOffset;
+  }
+
+  function uniformOffsetFromInnerFace(wall: Wall): number {
+    return Math.max(80, wall.thickness + AUTO_DIM_WALL_GAP);
+  }
+
+  /**
+   * Adds one dimension per wall on a building side, all aligned to the same
+   * dim-line level so they form a single clean row outside the building.
+   * Measured value uses the inner clear span, while extension points are on
+   * the outer wall face so dimensions stay outside and avoid wall overlap.
+   */
+  function addSideDimensions(
+    sideWalls: Wall[],
+    chainId: string
+  ): void {
+    if (sideWalls.length === 0) return;
+    sideWalls.forEach((wall) => {
+      const measureSpan = spanOnFace(wall, 'inner');
+      if (measureSpan.length < 1) return;
+
+      const spanMid = {
+        x: (measureSpan.start.x + measureSpan.end.x) / 2,
+        y: (measureSpan.start.y + measureSpan.end.y) / 2,
+      };
+      const outsideSign = wallOutsideOffsetSign(wall);
+      const offset = resolveSafeSignedOffset(
+        wall,
+        measureSpan,
+        uniformOffsetFromInnerFace(wall),
+        outsideSign
+      );
+
+      dimensions.push({
+        type: 'aligned',
+        linearMode: 'aligned',
+        points: [measureSpan.start, measureSpan.end],
+        value: measureSpan.length,
+        unit,
+        textPosition: { ...spanMid },
+        visible: true,
+        style: settings.style,
+        precision: settings.precision,
+        displayFormat: settings.displayFormat,
+        offset,
+        linkedWallIds: [wall.id],
+        isAssociative: true,
+        chainGroupId: chainId,
+        baselineGroupId: 'auto-exterior',
+      });
+    });
+  }
+
+  addSideDimensions(topWalls, 'auto-top');
+  addSideDimensions(bottomWalls, 'auto-bottom');
+  addSideDimensions(leftWalls, 'auto-left');
+  addSideDimensions(rightWalls, 'auto-right');
+
+  // Diagonal walls: offset outward from the building centre along the wall's
+  // own perpendicular, ensuring the dim always appears outside the building.
+  aligned.sort((a, b) => wallLength(b) - wallLength(a));
+  aligned.forEach((wall) => {
+    const measureSpan = spanOnFace(wall, 'inner');
+    if (measureSpan.length < 1) return;
+
+    const spanMid = {
+      x: (measureSpan.start.x + measureSpan.end.x) / 2,
+      y: (measureSpan.start.y + measureSpan.end.y) / 2,
+    };
+    const outsideSign = wallOutsideOffsetSign(wall);
+    const offset = resolveSafeSignedOffset(
+      wall,
+      measureSpan,
+      uniformOffsetFromInnerFace(wall),
+      outsideSign
+    );
     dimensions.push({
       type: 'aligned',
       linearMode: 'aligned',
-      points: [{ ...wall.startPoint }, { ...wall.endPoint }],
-      value: wallLength(wall),
-      unit: settings.unitSystem === 'imperial' ? 'ft-in' : 'mm',
-      textPosition: wallMidpoint(wall),
+      points: [measureSpan.start, measureSpan.end],
+      value: measureSpan.length,
+      unit,
+      textPosition: { ...spanMid },
       visible: true,
       style: settings.style,
       precision: settings.precision,
       displayFormat: settings.displayFormat,
-      offset: offsetBase + index * offsetStep,
+      offset,
       linkedWallIds: [wall.id],
-      anchors: [
-        { kind: 'wall-endpoint', wallId: wall.id, endpoint: 'start' },
-        { kind: 'wall-endpoint', wallId: wall.id, endpoint: 'end' },
-      ],
       isAssociative: true,
       baselineGroupId: 'auto-exterior',
     });
@@ -1059,6 +1437,7 @@ export interface DrawingState {
   deleteDimension: (id: string) => void;
   setDimensionSettings: (settings: Partial<DimensionSettings>) => void;
   autoDimensionExteriorWalls: () => void;
+  syncAutoDimensions: () => void;
   addAreaDimensions: () => void;
 
   // Actions - Annotations
@@ -1434,6 +1813,26 @@ export const useDrawingStore = create<DrawingState>()(
         });
         get().saveToHistory('Auto dimension exterior walls');
         get().setProcessingStatus('Auto dimensions added (walls + room areas).', false);
+      },
+
+      /**
+       * Silently rebuild all auto-generated dimensions without touching history.
+       * Called automatically whenever walls/rooms/settings change so dimensions
+       * are always visible without requiring a manual trigger.
+       */
+      syncAutoDimensions: () => {
+        const { walls, rooms, dimensionSettings, dimensions } = get();
+        if (walls.length === 0 && rooms.length === 0) return;
+        const autoLinear = buildAutoWallDimensions(walls, rooms, dimensionSettings);
+        const autoArea = buildRoomAreaDimensions(rooms, dimensionSettings);
+        const preserved = dimensions.filter((d) => !d.baselineGroupId && !d.linkedRoomId);
+        set({
+          dimensions: [
+            ...preserved,
+            ...autoLinear.map((d) => ({ ...normalizeDimensionPayload(d, dimensionSettings), id: generateId() })),
+            ...autoArea.map((d) => ({ ...normalizeDimensionPayload(d, dimensionSettings), id: generateId() })),
+          ],
+        });
       },
 
       addAreaDimensions: () => {

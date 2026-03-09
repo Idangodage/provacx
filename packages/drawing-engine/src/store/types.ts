@@ -118,6 +118,7 @@ export interface AnnotationActions {
     deleteDimension: (id: string) => void;
     setDimensionSettings: (settings: Partial<DimensionSettings>) => void;
     autoDimensionExteriorWalls: () => void;
+    syncAutoDimensions: () => void;
     addAreaDimensions: () => void;
     setHvacDesignConditions: (updates: Partial<HvacDesignConditions>) => void;
     applyRoomTemplateToSelectedRooms: (templateId: string) => void;

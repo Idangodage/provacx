@@ -43,6 +43,7 @@ import {
     ObjectRenderer,
     SectionLineRenderer,
     HvacPlanRenderer,
+    formatDimensionLength,
 } from './canvas';
 
 // =============================================================================
@@ -243,6 +244,7 @@ export function DrawingCanvas({
     const openingResizeHandlesRef = useRef<fabric.Object[]>([]);
     const openingPointerInteractionRef = useRef<OpeningPointerInteraction | null>(null);
     const suppressFabricSelectionSyncRef = useRef(0);
+    const dimensionRefreshFrameRef = useRef<number | null>(null);
 
     // ── Drag-performance refs ──
     // Tracks the last position where collision was checked (in mm) to avoid per-pixel checks
@@ -346,6 +348,7 @@ export function DrawingCanvas({
         createRoomWalls,
         moveRoom,
         hvacElements,
+        syncAutoDimensions,
     } = useSmartDrawingStore();
 
     // Derived values
@@ -2084,6 +2087,7 @@ export function DrawingCanvas({
         handleDoubleClick: handleDimensionDoubleClick,
         handleKeyDown: handleDimensionKeyDown,
         cancelPlacement: cancelDimensionPlacement,
+        isSelectDragActive: isDimensionSelectDragActive,
     } = useDimensionTool({
         fabricRef,
         walls,
@@ -2101,6 +2105,68 @@ export function DrawingCanvas({
         setProcessingStatus,
         saveToHistory,
     });
+
+    const restackInteractiveOverlays = useCallback((canvas: fabric.Canvas) => {
+        const roomControlDecorations: fabric.Object[] = [];
+        const roomControls: fabric.Object[] = [];
+        const dimensionControlDecorations: fabric.Object[] = [];
+        const dimensionControls: fabric.Object[] = [];
+        const wallControlDecorations: fabric.Object[] = [];
+        const wallControls: fabric.Object[] = [];
+        const openingResizeHandles: fabric.Object[] = [];
+
+        canvas.getObjects().forEach((obj) => {
+            const typed = obj as fabric.Object & {
+                isWallControl?: boolean;
+                isWallControlDecoration?: boolean;
+                isRoomControl?: boolean;
+                isRoomControlDecoration?: boolean;
+                isDimensionControl?: boolean;
+                isDimensionControlDecoration?: boolean;
+                isOpeningResizeHandle?: boolean;
+            };
+
+            if (typed.isRoomControlDecoration) {
+                roomControlDecorations.push(obj);
+                return;
+            }
+            if (typed.isRoomControl) {
+                roomControls.push(obj);
+                return;
+            }
+            if (typed.isDimensionControlDecoration) {
+                dimensionControlDecorations.push(obj);
+                return;
+            }
+            if (typed.isDimensionControl) {
+                dimensionControls.push(obj);
+                return;
+            }
+            if (typed.isWallControlDecoration) {
+                wallControlDecorations.push(obj);
+                return;
+            }
+            if (typed.isWallControl) {
+                wallControls.push(obj);
+                return;
+            }
+            if (typed.isOpeningResizeHandle) {
+                openingResizeHandles.push(obj);
+            }
+        });
+
+        [
+            roomControlDecorations,
+            roomControls,
+            dimensionControlDecorations,
+            dimensionControls,
+            wallControlDecorations,
+            wallControls,
+            openingResizeHandles,
+        ].forEach((objects) => {
+            objects.forEach((obj) => canvas.bringObjectToFront(obj));
+        });
+    }, []);
 
     // Offset tool hook
     const offsetTool = useOffsetTool({
@@ -2421,6 +2487,7 @@ export function DrawingCanvas({
         canvas.setViewportTransform(viewportTransform);
         roomRendererRef.current?.setViewportZoom(viewportZoom);
         wallRenderer?.setViewportZoom(viewportZoom);
+        dimensionRendererRef.current?.setViewportZoom(viewportZoom);
         hideActiveSelectionChrome(canvas);
         canvas.requestRenderAll();
         zoomRef.current = viewportZoom;
@@ -2461,9 +2528,77 @@ export function DrawingCanvas({
         }
     }, [tool, extendTool]);
 
+    // Live elastic dimension shown while drawing a wall.
+    useEffect(() => {
+        const renderer = dimensionRendererRef.current;
+        if (!renderer) return;
+        if (
+            tool === 'wall' &&
+            wallDrawingState.isDrawing &&
+            wallDrawingState.startPoint &&
+            wallDrawingState.currentPoint
+        ) {
+            const start = wallDrawingState.startPoint;
+            const end = wallDrawingState.currentPoint;
+            const lengthMm = Math.hypot(end.x - start.x, end.y - start.y);
+            const label = formatDimensionLength(lengthMm, dimensionSettings);
+            renderer.setViewportZoom(viewportZoom);
+            renderer.renderLiveDimension(start, end, label);
+        } else {
+            renderer.clearLiveDimension();
+        }
+    }, [tool, wallDrawingState, dimensionSettings, viewportZoom]);
+
+    const refreshDimensionLayer = useCallback(() => {
+        const renderer = dimensionRendererRef.current;
+        const canvas = fabricRef.current;
+        if (!renderer || !canvas) return;
+        renderer.setViewportZoom(viewportZoom);
+        renderer.setContext(walls, rooms, dimensionSettings);
+        renderer.renderAllDimensions(dimensions);
+        restackInteractiveOverlays(canvas);
+        canvas.requestRenderAll();
+    }, [walls, rooms, dimensionSettings, dimensions, viewportZoom, restackInteractiveOverlays]);
+
+    // Automatically rebuild all auto-generated dimensions whenever walls, rooms,
+    // or dimension settings change — so dimensions are always visible without
+    // requiring a manual "Auto Dimension" button press.
+    // Skip while a wall is actively being drawn to avoid mid-draw flicker.
+    useEffect(() => {
+        if (wallDrawingState.isDrawing) return;
+        if (walls.length === 0 && rooms.length === 0) return;
+        syncAutoDimensions();
+    }, [walls, rooms, dimensionSettings, wallDrawingState.isDrawing, syncAutoDimensions]);
+
+    const scheduleDimensionLayerRefresh = useCallback(() => {
+        if (typeof window === 'undefined') {
+            refreshDimensionLayer();
+            return;
+        }
+        if (dimensionRefreshFrameRef.current !== null) return;
+        dimensionRefreshFrameRef.current = window.requestAnimationFrame(() => {
+            dimensionRefreshFrameRef.current = null;
+            refreshDimensionLayer();
+        });
+    }, [refreshDimensionLayer]);
+
     useEffect(() => {
         roomRendererRef.current?.renderAllRooms(rooms);
-    }, [rooms, fabricCanvas]);
+        // Rebuild dimensions after room re-renders, then restore edit-handle priority.
+        refreshDimensionLayer();
+    }, [rooms, fabricCanvas, refreshDimensionLayer]);
+
+    useEffect(() => {
+        return () => {
+            if (
+                dimensionRefreshFrameRef.current !== null &&
+                typeof window !== 'undefined'
+            ) {
+                window.cancelAnimationFrame(dimensionRefreshFrameRef.current);
+                dimensionRefreshFrameRef.current = null;
+            }
+        };
+    }, []);
 
     useEffect(() => {
         roomRendererRef.current?.setShowTemperatureIcons(wallSettings.showRoomTemperatureIcons);
@@ -2471,10 +2606,8 @@ export function DrawingCanvas({
     }, [wallSettings.showRoomTemperatureIcons, wallSettings.showRoomVentilationBadges, fabricCanvas]);
 
     useEffect(() => {
-        if (!dimensionRendererRef.current) return;
-        dimensionRendererRef.current.setContext(walls, rooms, dimensionSettings);
-        dimensionRendererRef.current.renderAllDimensions(dimensions);
-    }, [walls, rooms, dimensions, dimensionSettings, fabricCanvas]);
+        refreshDimensionLayer();
+    }, [refreshDimensionLayer, fabricCanvas]);
 
     useEffect(() => {
         const roomIdSet = new Set(rooms.map((room) => room.id));
@@ -2521,7 +2654,9 @@ export function DrawingCanvas({
         });
         wallRenderer.setOpeningSymbolInstances(openingSymbols);
         wallRenderer.renderAllWalls(walls);
-    }, [wallRenderer, walls, doorWindowSymbolsSignature, objectDefinitionsById]);
+        // Rebuild dimensions after wall re-renders, then restore edit-handle priority.
+        refreshDimensionLayer();
+    }, [wallRenderer, walls, doorWindowSymbolsSignature, objectDefinitionsById, refreshDimensionLayer]);
 
     useEffect(() => {
         if (walls.length === 0 || symbols.length === 0) return;
@@ -3215,6 +3350,7 @@ export function DrawingCanvas({
                     y: rawPoint.y / MM_TO_PX,
                 };
                 handleWallMouseMove(wallPoint);
+                scheduleDimensionLayerRefresh();
                 if (!isWallDrawing) {
                     // Don't return early — allow other handlers below to still fire
                     // But snap indicators are already rendered by handleWallMouseMove
@@ -3233,6 +3369,7 @@ export function DrawingCanvas({
                     handleWallMouseMove(roomPoint);
                 }
                 handleRoomMouseMove(roomPoint);
+                scheduleDimensionLayerRefresh();
                 if (isRoomDrawing && roomStartCorner) {
                     const snappedEnd = resolvedSnapToGrid
                         ? snapWallPoint(
@@ -3311,6 +3448,11 @@ export function DrawingCanvas({
                     x: rawPoint.x / MM_TO_PX,
                     y: rawPoint.y / MM_TO_PX,
                 };
+                const prioritizedWallOrRoomTarget =
+                    candidateTargets.find((target) => {
+                        const meta = getTargetMeta(target as fabric.Object | null | undefined);
+                        return Boolean(meta.isWallControl || meta.isRoomControl);
+                    }) ?? null;
                 const hoveredObjectId =
                     candidateTargets
                         .map((target) => resolveObjectIdFromTarget(target))
@@ -3333,6 +3475,31 @@ export function DrawingCanvas({
                     setHoveredElement(hoveredSectionLineId);
                     return;
                 }
+                if (isDimensionSelectDragActive()) {
+                    const dimensionHandled = handleDimensionSelectMouseMove(
+                        selectPoint,
+                        hitTarget
+                    );
+                    if (dimensionHandled) {
+                        return;
+                    }
+                }
+                if (prioritizedWallOrRoomTarget) {
+                    const prioritizedMeta = getTargetMeta(
+                        prioritizedWallOrRoomTarget as fabric.Object | null | undefined
+                    );
+                    wallRenderer?.setHoveredWall(prioritizedMeta.wallId ?? null);
+                    handleSelectMouseMove(selectPoint, prioritizedWallOrRoomTarget);
+                    return;
+                }
+
+                const hoveredWallId = wallRenderer?.getWallIdAtPoint(selectPoint) ?? null;
+                wallRenderer?.setHoveredWall(hoveredWallId);
+                if (hoveredWallId) {
+                    setHoveredElement(hoveredWallId);
+                    return;
+                }
+
                 const dimensionHandled = handleDimensionSelectMouseMove(
                     selectPoint,
                     hitTarget
@@ -3344,20 +3511,12 @@ export function DrawingCanvas({
                 if (handled) {
                     return;
                 }
-
                 const hoveredRoomId =
                     roomRendererRef.current?.getRoomIdAtPoint(selectPoint) ??
                     resolveRoomIdFromTarget(hitTarget);
                 if (hoveredRoomId) {
                     wallRenderer?.setHoveredWall(null);
                     setHoveredElement(hoveredRoomId);
-                    return;
-                }
-
-                const hoveredWallId = wallRenderer?.getWallIdAtPoint(selectPoint) ?? null;
-                wallRenderer?.setHoveredWall(hoveredWallId);
-                if (hoveredWallId) {
-                    setHoveredElement(hoveredWallId);
                     return;
                 }
             }
@@ -3385,9 +3544,11 @@ export function DrawingCanvas({
             handleRoomMouseMove,
             handleDimensionPlacementMouseMove,
             handleDimensionSelectMouseMove,
+            isDimensionSelectDragActive,
             handleSelectMouseMove,
             sectionLineDrawingState.isDrawing,
             updateSectionLinePreview,
+            getTargetMeta,
             resolveObjectIdFromTarget,
             resolveRoomIdFromTarget,
             resolveSectionLineIdFromTarget,
@@ -3398,6 +3559,7 @@ export function DrawingCanvas({
             offsetTool,
             trimTool,
             extendTool,
+            scheduleDimensionLayerRefresh,
             wallSettings.gridSize,
             wallSettings.defaultThickness,
             setHoveredElement,
@@ -3925,16 +4087,12 @@ export function DrawingCanvas({
                 x: scenePoint.x / MM_TO_PX,
                 y: scenePoint.y / MM_TO_PX,
             };
-            const dimensionHandled = handleDimensionSelectMouseDown(
-                hitTarget,
-                wallPointMm,
-                addToSelection
-            );
-            if (dimensionHandled) {
-                suppressNextFabricSelectionSync();
-                return;
-            }
-            const targetMeta = getTargetMeta(hitTarget);
+            const prioritizedWallOrRoomTarget =
+                candidateTargets.find((target) => {
+                    const meta = getTargetMeta(target as fabric.Object | null | undefined);
+                    return Boolean(meta.isWallControl || meta.isRoomControl);
+                }) ?? null;
+            const targetMeta = getTargetMeta(prioritizedWallOrRoomTarget ?? hitTarget);
             const directWallId =
                 candidateTargets
                     .map((target) => resolveWallIdFromTarget(target))
@@ -3957,9 +4115,34 @@ export function DrawingCanvas({
                 ? Math.max(10, Math.min(28, Math.min(...roomWallThicknesses) * 0.35))
                 : 14;
             const isRoomAreaClick = roomInteriorDistance > roomInteriorThreshold;
+            if (prioritizedWallOrRoomTarget) {
+                suppressNextFabricSelectionSync();
+                handleSelectMouseDown(prioritizedWallOrRoomTarget, wallPointMm, addToSelection);
+                return;
+            }
+            if (clickedWallId) {
+                suppressNextFabricSelectionSync();
+                if (addToSelection) {
+                    canvas.discardActiveObject();
+                    toggleSelectedId(clickedWallId);
+                } else {
+                    setSelectedIds([clickedWallId]);
+                }
+                wallRenderer?.setHoveredWall(clickedWallId);
+                setHoveredElement(clickedWallId);
+                return;
+            }
+            const dimensionHandled = handleDimensionSelectMouseDown(
+                hitTarget,
+                wallPointMm,
+                addToSelection
+            );
+            if (dimensionHandled) {
+                suppressNextFabricSelectionSync();
+                return;
+            }
             if (
                 clickedRoomId &&
-                !clickedWallId &&
                 isRoomAreaClick &&
                 !targetMeta.isRoomControl &&
                 !targetMeta.isWallControl &&
@@ -3978,27 +4161,7 @@ export function DrawingCanvas({
                     return;
                 }
             }
-            if (
-                targetMeta.isWallControl ||
-                targetMeta.isRoomControl
-            ) {
-                suppressNextFabricSelectionSync();
-                handleSelectMouseDown(hitTarget, wallPointMm, addToSelection);
-                return;
-            }
-            if (clickedWallId) {
-                suppressNextFabricSelectionSync();
-                if (addToSelection) {
-                    canvas.discardActiveObject();
-                    toggleSelectedId(clickedWallId);
-                } else {
-                    setSelectedIds([clickedWallId]);
-                }
-                wallRenderer?.setHoveredWall(clickedWallId);
-                setHoveredElement(clickedWallId);
-                return;
-            }
-            handleSelectMouseDown(hitTarget, wallPointMm, addToSelection);
+            handleSelectMouseDown(prioritizedWallOrRoomTarget ?? hitTarget, wallPointMm, addToSelection);
         };
 
         const handleCanvasContextMenu = (event: MouseEvent) => {
@@ -4011,6 +4174,30 @@ export function DrawingCanvas({
             }
 
             const target = canvas.findTarget(event as unknown as fabric.TPointerEvent);
+            const scenePoint = canvas.getScenePoint(event as unknown as fabric.TPointerEvent);
+            const wallPointMm = scenePoint
+                ? {
+                    x: scenePoint.x / MM_TO_PX,
+                    y: scenePoint.y / MM_TO_PX,
+                }
+                : null;
+            const targetSectionLineId = resolveSectionLineIdFromTarget(target ?? null);
+            const targetObjectId = resolveObjectIdFromTarget(target ?? null);
+            const clickedWallId = wallPointMm ? wallRenderer?.getWallIdAtPoint(wallPointMm) ?? null : null;
+            if (!targetSectionLineId && !targetObjectId && clickedWallId) {
+                event.preventDefault();
+                event.stopPropagation();
+                setSelectedIds([clickedWallId]);
+                closeDimensionContextMenu();
+                closeSectionLineContextMenu();
+                closeObjectContextMenu();
+
+                const outerRect = outerRef.current?.getBoundingClientRect();
+                const x = outerRect ? event.clientX - outerRect.left : event.clientX;
+                const y = outerRect ? event.clientY - outerRect.top : event.clientY;
+                setWallContextMenu({ wallId: clickedWallId, x, y });
+                return;
+            }
             const dimensionId = resolveDimensionIdFromTarget(target ?? null);
             if (dimensionId) {
                 event.preventDefault();
@@ -4027,7 +4214,7 @@ export function DrawingCanvas({
                 return;
             }
 
-            const sectionLineId = resolveSectionLineIdFromTarget(target ?? null);
+            const sectionLineId = targetSectionLineId;
             if (sectionLineId) {
                 event.preventDefault();
                 event.stopPropagation();
@@ -4043,7 +4230,7 @@ export function DrawingCanvas({
                 return;
             }
 
-            const objectId = resolveObjectIdFromTarget(target ?? null);
+            const objectId = targetObjectId;
             if (objectId) {
                 event.preventDefault();
                 event.stopPropagation();

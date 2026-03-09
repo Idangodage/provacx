@@ -238,7 +238,8 @@ function resolveDimensionPoints(
 function buildLinearGeometry(
   dimension: Dimension2D,
   points: Point2D[],
-  settings: DimensionSettings
+  settings: DimensionSettings,
+  wallsById: Map<string, Wall>
 ): ResolvedLinearDimensionGeometry | null {
   if (points.length < 2) return null;
   const p1 = points[0];
@@ -250,7 +251,19 @@ function buildLinearGeometry(
   const offsetSigned = dimension.offset ?? settings.defaultOffset;
   const offsetDirection = offsetSigned >= 0 ? 1 : -1;
   const offsetAbs = Math.abs(offsetSigned);
-  const extensionGap = Math.max(0, settings.extensionGap);
+  const linkedWallThickness = Array.isArray(dimension.linkedWallIds)
+    ? dimension.linkedWallIds.reduce((maxThickness, wallId) => {
+      const thickness = wallsById.get(wallId)?.thickness ?? 0;
+      return Math.max(maxThickness, Number.isFinite(thickness) ? thickness : 0);
+    }, 0)
+    : 0;
+  const isAutoExteriorDimension =
+    dimension.baselineGroupId === 'auto-exterior' ||
+    dimension.baselineGroupId === 'auto-exterior-overall';
+  const wallClearanceGap = isAutoExteriorDimension && linkedWallThickness > 0
+    ? linkedWallThickness + 100
+    : 0;
+  const extensionGap = Math.max(0, settings.extensionGap, wallClearanceGap);
   const extensionBeyond = Math.max(0, settings.extensionBeyond);
 
   let dimensionStart: Point2D;
@@ -291,10 +304,19 @@ function buildLinearGeometry(
   const mid = midpoint(dimensionStart, dimensionEnd);
   const textPosition = dimension.textPositionLocked
     ? { ...dimension.textPosition }
-    : dimension.textPosition ?? mid;
-  const label = dimension.isDesignValue && dimension.text
-    ? dimension.text
-    : formatDimensionLength(valueMm, settings, dimension.displayFormat);
+    : { ...mid };
+  const designValueLabel = dimension.isDesignValue
+    ? (
+      dimension.text && dimension.text.trim().length > 0
+        ? dimension.text
+        : formatDimensionLength(
+          Number.isFinite(dimension.value) ? Math.max(0, dimension.value) : valueMm,
+          settings,
+          dimension.displayFormat
+        )
+    )
+    : null;
+  const label = designValueLabel ?? formatDimensionLength(valueMm, settings, dimension.displayFormat);
 
   return {
     kind: 'linear',
@@ -342,8 +364,12 @@ function buildAngularGeometry(
   const textPosition = dimension.textPositionLocked
     ? { ...dimension.textPosition }
     : dimension.textPosition ?? textDefault;
-  const label = dimension.isDesignValue && dimension.text
-    ? dimension.text
+  const label = dimension.isDesignValue
+    ? (
+      dimension.text && dimension.text.trim().length > 0
+        ? dimension.text
+        : `${(Number.isFinite(dimension.value) ? Math.max(0, dimension.value) : valueDeg).toFixed(settings.precision)}deg`
+    )
     : `${valueDeg.toFixed(settings.precision)}deg`;
 
   return {
@@ -412,7 +438,7 @@ export function resolveDimensionGeometry(
   }
 
   if (dimension.type === 'linear' || dimension.type === 'aligned') {
-    return buildLinearGeometry(dimension, points, settings);
+    return buildLinearGeometry(dimension, points, settings, wallsById);
   }
 
   return null;
