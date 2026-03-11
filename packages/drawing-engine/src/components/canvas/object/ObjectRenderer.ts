@@ -49,6 +49,8 @@ const DOOR_ARC_STROKE_WIDTH = 1.2;
 const DOOR_LEAF_ACCENT = '#2b160b';
 const WALL_SEGMENT_FILL = '#000007';
 const WALL_SEGMENT_STROKE = '#111827';
+const MAX_BITMAP_SYMBOL_SIDE_PX = 384;
+const BITMAP_SYMBOL_DPR = 2;
 
 function makeLine(
   coords: [number, number, number, number],
@@ -409,26 +411,33 @@ function graphicsForDefinition(
   if (hasRenderer(definition.renderType)) {
     const renderType = definition.renderType!;
     const canvasEl = document.createElement('canvas');
-    const w = Math.max(8, Math.ceil(widthPx));
-    const h = Math.max(8, Math.ceil(depthPx));
-    canvasEl.width = w * 2;
-    canvasEl.height = h * 2;
+    const targetW = Math.max(8, Math.ceil(widthPx));
+    const targetH = Math.max(8, Math.ceil(depthPx));
+    const targetMax = Math.max(targetW, targetH);
+    const downscale = targetMax > MAX_BITMAP_SYMBOL_SIDE_PX
+      ? MAX_BITMAP_SYMBOL_SIDE_PX / targetMax
+      : 1;
+    const renderW = Math.max(16, Math.round(targetW * downscale));
+    const renderH = Math.max(16, Math.round(targetH * downscale));
+    canvasEl.width = renderW * BITMAP_SYMBOL_DPR;
+    canvasEl.height = renderH * BITMAP_SYMBOL_DPR;
     const ctx2d = canvasEl.getContext('2d');
     if (ctx2d) {
-      ctx2d.scale(2, 2);
-      renderFurniturePlan(ctx2d, renderType, w / 2, h / 2, w, h, instance.properties);
+      ctx2d.scale(BITMAP_SYMBOL_DPR, BITMAP_SYMBOL_DPR);
+      renderFurniturePlan(ctx2d, renderType, renderW / 2, renderH / 2, renderW, renderH, instance.properties);
     }
     const img = new fabric.FabricImage(canvasEl, {
       left: 0,
       top: 0,
-      width: w * 2,
-      height: h * 2,
-      scaleX: 0.5,
-      scaleY: 0.5,
+      width: renderW * BITMAP_SYMBOL_DPR,
+      height: renderH * BITMAP_SYMBOL_DPR,
+      scaleX: targetW / (renderW * BITMAP_SYMBOL_DPR),
+      scaleY: targetH / (renderH * BITMAP_SYMBOL_DPR),
       originX: 'center',
       originY: 'center',
       selectable: false,
       evented: false,
+      objectCaching: false,
     });
     return [img];
   }
@@ -602,6 +611,7 @@ export class ObjectRenderer {
     const previewOpacity = isPreview
       ? (isOpening ? 1 : (previewValid ? 0.75 : 0.35))
       : 1;
+    const usesBitmapRenderer = hasRenderer(definition.renderType);
     const group = new fabric.Group([...previewExtras, ...body, ...invisibleHitArea, hoverOutline, selectionOutline], {
       left: instance.position.x * MM_TO_PX,
       top: instance.position.y * MM_TO_PX,
@@ -614,7 +624,7 @@ export class ObjectRenderer {
       lockScalingX: true,
       lockScalingY: true,
       transparentCorners: false,
-      objectCaching: true,
+      objectCaching: !usesBitmapRenderer,
       selectable: !isPreview,
       evented: !isPreview,
       subTargetCheck: false,

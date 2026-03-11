@@ -246,12 +246,7 @@ export function DrawingCanvas({
     const suppressFabricSelectionSyncRef = useRef(0);
     const dimensionRefreshFrameRef = useRef<number | null>(null);
 
-    // ── Drag-performance refs ──
-    // Tracks the last position where collision was checked (in mm) to avoid per-pixel checks
-    const lastCollisionCheckPosRef = useRef<Point2D | null>(null);
-    // Last collision result – reused when the object hasn't moved far enough to warrant re-check
-    const lastCollisionResultRef = useRef<boolean>(false);
-    // Whether we are currently dragging a furniture/fixture object
+    // Drag interaction state
     const isDraggingObjectRef = useRef(false);
 
     // State
@@ -810,7 +805,7 @@ export function DrawingCanvas({
             let placementPoint = { ...point };
             let rotationDeg = placementRotationDeg;
             let snappedWall: (ReturnType<typeof findWallPlacementSnap> & { positionAlongWall: number }) | null = null;
-            let alignmentPoint: Point2D | null = null;
+            const alignmentPoint: Point2D | null = null;
             let openingPlacementValid = true;
 
             if (definition.category === 'doors' || definition.category === 'windows') {
@@ -856,57 +851,13 @@ export function DrawingCanvas({
                     openingPlacementValid = false;
                 }
             } else if (definition.category === 'furniture' || definition.category === 'fixtures') {
-                const nearestRoom = rooms.reduce(
-                    (best, room) => {
-                        const distance = Math.hypot(room.centroid.x - point.x, room.centroid.y - point.y);
-                        if (distance > 300) return best;
-                        if (!best || distance < best.distance) {
-                            return { room, distance };
-                        }
-                        return best;
-                    },
-                    null as { room: (typeof rooms)[number]; distance: number } | null
-                );
-                if (nearestRoom) {
-                    placementPoint = { ...nearestRoom.room.centroid };
-                } else {
-                    const wallSnap = findWallPlacementSnap(point);
-                    if (wallSnap) {
-                        const dot = (point.x - wallSnap.point.x) * wallSnap.normal.x + (point.y - wallSnap.point.y) * wallSnap.normal.y;
-                        const side = dot >= 0 ? 1 : -1;
-                        placementPoint = {
-                            x: wallSnap.point.x + wallSnap.normal.x * 50 * side,
-                            y: wallSnap.point.y + wallSnap.normal.y * 50 * side,
-                        };
-                    }
-                }
-
-                const alignmentSnap = symbols.reduce(
-                    (best, instance) => {
-                        const instanceDefinition = objectDefinitionsById.get(instance.symbolId);
-                        if (!instanceDefinition) return best;
-                        if (instanceDefinition.category !== 'furniture' && instanceDefinition.category !== 'fixtures') {
-                            return best;
-                        }
-                        const dx = Math.abs(instance.position.x - placementPoint.x);
-                        const dy = Math.abs(instance.position.y - placementPoint.y);
-                        if (dx <= 40 || dy <= 40) {
-                            return {
-                                x: dx <= dy ? instance.position.x : placementPoint.x,
-                                y: dy < dx ? instance.position.y : placementPoint.y,
-                            };
-                        }
-                        return best;
-                    },
-                    null as Point2D | null
-                );
-                if (alignmentSnap) {
-                    placementPoint = alignmentSnap;
-                    alignmentPoint = alignmentSnap;
-                }
+                // Keep furniture/fixture placement free-form to avoid sticky cursor behavior.
+                placementPoint = { ...point };
             }
 
-            if (resolvedSnapToGrid && !snappedWall) {
+            const isFurnitureLike =
+                definition.category === 'furniture' || definition.category === 'fixtures';
+            if (resolvedSnapToGrid && !snappedWall && !isFurnitureLike) {
                 const gridStep = Math.max(1, wallSettings.gridSize);
                 placementPoint = {
                     x: Math.round(placementPoint.x / gridStep) * gridStep,
@@ -3575,8 +3526,6 @@ export function DrawingCanvas({
         // ── Safety cleanup for drag optimisation state ──
         if (isDraggingObjectRef.current) {
             isDraggingObjectRef.current = false;
-            lastCollisionCheckPosRef.current = null;
-            lastCollisionResultRef.current = false;
             canvas.skipTargetFind = false;
         }
 
@@ -4278,13 +4227,18 @@ export function DrawingCanvas({
                 // ── Drag-start optimisation: skip target-find while dragging ──
                 if (!isDraggingObjectRef.current) {
                     isDraggingObjectRef.current = true;
-                    lastCollisionCheckPosRef.current = null;
-                    lastCollisionResultRef.current = false;
                     // Tell Fabric not to hit-test other objects on every mouse move
                     if (canvas) canvas.skipTargetFind = true;
                 }
 
-                if (resolvedSnapToGrid) {
+                const instance = symbols.find((entry) => entry.id === objectId);
+                const definition = instance
+                    ? objectDefinitionsById.get(instance.symbolId)
+                    : undefined;
+                const isFurnitureLike =
+                    definition?.category === 'furniture' || definition?.category === 'fixtures';
+
+                if (resolvedSnapToGrid && !isFurnitureLike) {
                     const center = target.getCenterPoint();
                     const snappedPx = snapPointToGrid(
                         { x: center.x, y: center.y },
@@ -4299,10 +4253,6 @@ export function DrawingCanvas({
                     y: movedCenter.y / MM_TO_PX,
                 };
 
-                const instance = symbols.find((entry) => entry.id === objectId);
-                const definition = instance
-                    ? objectDefinitionsById.get(instance.symbolId)
-                    : undefined;
                 if (instance && definition) {
                     const isOpening =
                         definition.category === 'doors' || definition.category === 'windows';
@@ -4331,32 +4281,6 @@ export function DrawingCanvas({
                         return;
                     }
 
-                    // ── Throttled collision detection ──
-                    // Only re-check when the object has moved ≥ 10 mm from the last check position.
-                    // This avoids iterating *all* symbols on every single mouse-move pixel.
-                    const COLLISION_CHECK_THRESHOLD_MM = 10;
-                    let collides = lastCollisionResultRef.current;
-                    const lastPos = lastCollisionCheckPosRef.current;
-                    const needsCheck =
-                        !lastPos ||
-                        Math.abs(movedPositionMm.x - lastPos.x) > COLLISION_CHECK_THRESHOLD_MM ||
-                        Math.abs(movedPositionMm.y - lastPos.y) > COLLISION_CHECK_THRESHOLD_MM;
-
-                    if (needsCheck) {
-                        collides = hasFurnitureCollision(movedPositionMm, definition, {
-                            ignoreSymbolId: objectId,
-                        });
-                        lastCollisionCheckPosRef.current = { ...movedPositionMm };
-                        lastCollisionResultRef.current = collides;
-                    }
-
-                    if (collides) {
-                        target.set({
-                            left: instance.position.x * MM_TO_PX,
-                            top: instance.position.y * MM_TO_PX,
-                        });
-                        setProcessingStatus('Movement blocked: furniture overlap detected.', false);
-                    }
                 }
                 return;
             }
@@ -4368,8 +4292,6 @@ export function DrawingCanvas({
             // ── Drag-end cleanup: restore canvas interactive behaviour ──
             if (isDraggingObjectRef.current) {
                 isDraggingObjectRef.current = false;
-                lastCollisionCheckPosRef.current = null;
-                lastCollisionResultRef.current = false;
                 if (canvas) canvas.skipTargetFind = false;
             }
 
@@ -4469,6 +4391,18 @@ export function DrawingCanvas({
                         });
                         fabricRef.current?.requestRenderAll();
                         return;
+                    }
+
+                    if (
+                        definition &&
+                        (definition.category === 'furniture' || definition.category === 'fixtures')
+                    ) {
+                        const collides = hasFurnitureCollision(position, definition, {
+                            ignoreSymbolId: objectId,
+                        });
+                        if (collides) {
+                            setProcessingStatus('Warning: furniture overlap detected.', false);
+                        }
                     }
                 }
 
