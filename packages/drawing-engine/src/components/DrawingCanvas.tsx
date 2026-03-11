@@ -261,6 +261,7 @@ export function DrawingCanvas({
     const [placementRotationDeg, setPlacementRotationDeg] = useState(0);
     const [placementValid, setPlacementValid] = useState(true);
     const [openingInteractionActive, setOpeningInteractionActive] = useState(false);
+    const [isHandleDragging, setIsHandleDragging] = useState(false);
     const [canvasState, setCanvasState] = useState<CanvasState>({
         isPanning: false,
         lastPanPoint: null,
@@ -345,6 +346,10 @@ export function DrawingCanvas({
         hvacElements,
         syncAutoDimensions,
     } = useSmartDrawingStore();
+    const wallsRef = useRef<Wall[]>(walls);
+    const symbolsRef = useRef<SymbolInstance2D[]>(symbols);
+    wallsRef.current = walls;
+    symbolsRef.current = symbols;
 
     // Derived values
     const resolvedRealWorldUnit = realWorldUnit ?? displayUnit;
@@ -1941,6 +1946,7 @@ export function DrawingCanvas({
         detectRooms,
         saveToHistory,
         setProcessingStatus,
+        onDragStateChange: setIsHandleDragging,
         originOffset,
     });
     const {
@@ -1986,6 +1992,7 @@ export function DrawingCanvas({
         walls,
         rooms,
         selectedIds,
+        isHandleDragging,
         wallDrawingState,
         wallSettings,
         zoom: viewportZoom,
@@ -2599,15 +2606,16 @@ export function DrawingCanvas({
 
     useEffect(() => {
         if (!wallRenderer) return;
-        const openingSymbols = symbols.filter((instance) => {
+        const openingSymbols = symbolsRef.current.filter((instance) => {
             const definition = objectDefinitionsById.get(instance.symbolId);
             return definition?.category === 'doors' || definition?.category === 'windows';
         });
         wallRenderer.setOpeningSymbolInstances(openingSymbols);
-        wallRenderer.renderAllWalls(walls);
+        // Keep wall visuals identical while dragging and idle.
+        wallRenderer.renderAllWalls(wallsRef.current);
         // Rebuild dimensions after wall re-renders, then restore edit-handle priority.
         refreshDimensionLayer();
-    }, [wallRenderer, walls, doorWindowSymbolsSignature, objectDefinitionsById, refreshDimensionLayer]);
+    }, [wallRenderer, doorWindowSymbolsSignature, objectDefinitionsById, refreshDimensionLayer]);
 
     useEffect(() => {
         if (walls.length === 0 || symbols.length === 0) return;

@@ -245,6 +245,7 @@ export class WallRenderer {
 
   // [NEW] Track dirty walls for incremental updates
   private dirtyWallIds: Set<string> = new Set();
+  private dragOptimizedMode: boolean = false;
 
   constructor(canvas: fabric.Canvas, pageHeight: number = 3000) {
     this.canvas = canvas;
@@ -331,6 +332,66 @@ export class WallRenderer {
 
   private midpoint(a: Point2D, b: Point2D): Point2D {
     return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  }
+
+  private pointsEqual(a: Point2D, b: Point2D, epsilon = 0.0001): boolean {
+    return Math.abs(a.x - b.x) <= epsilon && Math.abs(a.y - b.y) <= epsilon;
+  }
+
+  private stringArraysEqual(left: string[], right: string[]): boolean {
+    if (left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index += 1) {
+      if (left[index] !== right[index]) return false;
+    }
+    return true;
+  }
+
+  private wallOpeningsEqual(left: Wall['openings'], right: Wall['openings']): boolean {
+    if (left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index += 1) {
+      const current = left[index];
+      const next = right[index];
+      if (current.id !== next.id) return false;
+      if (current.type !== next.type) return false;
+      if (Math.abs(current.position - next.position) > 0.0001) return false;
+      if (Math.abs(current.width - next.width) > 0.0001) return false;
+    }
+    return true;
+  }
+
+  private wallBevelEqual(
+    left: Wall['startBevel'] | Wall['endBevel'],
+    right: Wall['startBevel'] | Wall['endBevel']
+  ): boolean {
+    return (
+      Math.abs((left?.outerOffset ?? 0) - (right?.outerOffset ?? 0)) <= 0.0001 &&
+      Math.abs((left?.innerOffset ?? 0) - (right?.innerOffset ?? 0)) <= 0.0001
+    );
+  }
+
+  private wallNeedsRerender(previousWall: Wall | undefined, nextWall: Wall): boolean {
+    if (!previousWall) return true;
+    if (previousWall === nextWall) return false;
+    if (!this.pointsEqual(previousWall.startPoint, nextWall.startPoint)) return true;
+    if (!this.pointsEqual(previousWall.endPoint, nextWall.endPoint)) return true;
+    if (Math.abs(previousWall.thickness - nextWall.thickness) > 0.0001) return true;
+    if (Math.abs((previousWall.centerlineOffset ?? 0) - (nextWall.centerlineOffset ?? 0)) > 0.0001) return true;
+    if (previousWall.material !== nextWall.material || previousWall.layer !== nextWall.layer) return true;
+    if (!this.stringArraysEqual(previousWall.connectedWalls, nextWall.connectedWalls)) return true;
+    if (!this.wallBevelEqual(previousWall.startBevel, nextWall.startBevel)) return true;
+    if (!this.wallBevelEqual(previousWall.endBevel, nextWall.endBevel)) return true;
+    if (!this.wallOpeningsEqual(previousWall.openings, nextWall.openings)) return true;
+
+    const previous3D = previousWall.properties3D;
+    const next3D = nextWall.properties3D;
+    return (
+      previous3D.height !== next3D.height ||
+      previous3D.layerCount !== next3D.layerCount ||
+      previous3D.materialId !== next3D.materialId ||
+      previous3D.overallUValue !== next3D.overallUValue ||
+      previous3D.exposureDirection !== next3D.exposureDirection ||
+      previous3D.exposureOverride !== next3D.exposureOverride
+    );
   }
 
   // ─── [NEW] Viewport Culling ─────────────────────────────────────────────
@@ -438,6 +499,45 @@ export class WallRenderer {
     this.openingSymbolInstances = next;
   }
 
+  setDragOptimizedMode(enabled: boolean): void {
+    if (this.dragOptimizedMode === enabled) return;
+    this.dragOptimizedMode = enabled;
+
+    if (enabled) {
+      // During live dragging, keep per-wall objects and skip expensive merged overlays.
+      this.clearMergedComponents();
+      this.clearSelectionComponents();
+      this.clearHoverComponents();
+      this.clearDimensionLabels();
+      this.hoveredWallId = null;
+      this.wallObjects.forEach((group) => {
+        const selection = group.getObjects().find((obj) => (obj as NamedObject).name === 'selectionOutline');
+        const hover = group.getObjects().find((obj) => (obj as NamedObject).name === 'hoverOutline');
+        if (selection) selection.set('visible', false);
+        if (hover) hover.set('visible', false);
+        group.set('dirty', true);
+      });
+      // Controls are expensive to rebuild per frame; hide during drag and restore after.
+      this.controlPointObjects.forEach((controls) => {
+        controls.forEach((control) => this.canvas.remove(control));
+      });
+      this.controlPointObjects.clear();
+      this.canvas.requestRenderAll();
+      return;
+    }
+
+    // Drag ended: rebuild full merged/textured wall rendering.
+    const allWalls = Array.from(this.wallData.values());
+    if (allWalls.length > 0) {
+      this.renderAllWalls(allWalls);
+      return;
+    }
+
+    // Nothing to rebuild; just restore overlays.
+    this.setSelectedWalls([...this.selectedWallIds]);
+    this.canvas.requestRenderAll();
+  }
+
   /**
    * React to zoom-level changes by refreshing all zoom-dependent visuals:
    * control point sizes, selection/hover outlines, dimension labels.
@@ -454,8 +554,17 @@ export class WallRenderer {
     this.wallObjects.forEach((group) => {
       const selOutline = group.getObjects().find((obj) => (obj as NamedObject).name === 'selectionOutline');
       const hovOutline = group.getObjects().find((obj) => (obj as NamedObject).name === 'hoverOutline');
+      const centerLine = group.getObjects().find((obj) => (obj as NamedObject).name === 'centerLine');
+      const offsetReferenceLine = group.getObjects().find((obj) => (obj as NamedObject).name === 'offsetReferenceLine');
       if (selOutline) selOutline.set('strokeWidth', this.toSceneSize(VISUAL_CONFIG.selectionStrokeWidth));
       if (hovOutline) hovOutline.set('strokeWidth', this.toSceneSize(VISUAL_CONFIG.hoverStrokeWidth));
+      if (centerLine) centerLine.set('strokeWidth', this.toSceneSize(VISUAL_CONFIG.centerLineWidth));
+      if (offsetReferenceLine) {
+        offsetReferenceLine.set({
+          strokeWidth: this.toSceneSize(VISUAL_CONFIG.offsetReferenceStrokeWidth),
+          strokeDashArray: VISUAL_CONFIG.offsetReferenceDash.map((value) => this.toSceneSize(value)),
+        });
+      }
       group.getObjects().forEach((obj) => {
         const typed = obj as NamedObject;
         if (!typed.isDoorArc) return;
@@ -478,6 +587,17 @@ export class WallRenderer {
         obj.set('strokeWidth', this.toSceneSize(VISUAL_CONFIG.hoverStrokeWidth));
       }
     });
+
+    // Keep merged wall outlines crisp at any zoom level.
+    this.componentObjects.forEach((obj) => {
+      const typed = obj as NamedObject;
+      if (typed.name === 'wall-component-outline') {
+        obj.set('strokeWidth', this.toSceneSize(VISUAL_CONFIG.wallStrokeWidth));
+      } else {
+        obj.set('dirty', true);
+      }
+    });
+    this.wallObjects.forEach((group) => group.set('dirty', true));
 
     // Recreate control points at current zoom (only if there's a selection)
     if (this.selectedWallIds.size > 0) {
@@ -549,19 +669,19 @@ export class WallRenderer {
     const pathData = this.wallComponentPathData(component);
     if (!pathData) return;
 
-    const mergedPath = new fabric.Path(pathData, {
+    const mergedFillPath = new fabric.Path(pathData, {
       fill: this.resolveWallVisualFill(representativeWall),
       fillRule: 'evenodd',
-      stroke: VISUAL_CONFIG.wallStroke,
-      strokeWidth: VISUAL_CONFIG.wallStrokeWidth,
-      strokeLineJoin: 'miter',
+      stroke: 'transparent',
+      strokeWidth: 0,
       selectable: false,
       evented: false,
       objectCaching: true,
     });
+    (mergedFillPath as NamedObject).name = 'wall-component-fill';
 
-    this.canvas.add(mergedPath);
-    this.componentObjects.push(mergedPath);
+    this.canvas.add(mergedFillPath);
+    this.componentObjects.push(mergedFillPath);
 
     const overlayPathData = this.componentPolygonsPathData(component.junctionOverlays);
     if (overlayPathData) {
@@ -582,9 +702,24 @@ export class WallRenderer {
         objectCaching: true,
         clipPath: overlayClip,
       });
+      (overlayPath as NamedObject).name = 'wall-component-overlay';
       this.canvas.add(overlayPath);
       this.componentObjects.push(overlayPath);
     }
+
+    const mergedOutlinePath = new fabric.Path(pathData, {
+      fill: 'transparent',
+      fillRule: 'evenodd',
+      stroke: VISUAL_CONFIG.wallStroke,
+      strokeWidth: this.toSceneSize(VISUAL_CONFIG.wallStrokeWidth),
+      strokeLineJoin: 'miter',
+      selectable: false,
+      evented: false,
+      objectCaching: false,
+    });
+    (mergedOutlinePath as NamedObject).name = 'wall-component-outline';
+    this.canvas.add(mergedOutlinePath);
+    this.componentObjects.push(mergedOutlinePath);
   }
 
   private clearMergedComponents(): void {
@@ -698,7 +833,15 @@ export class WallRenderer {
   // ─── Individual Wall Rendering ──────────────────────────────────────────
 
   renderWall(wall: Wall, joins?: JoinData[], componentWalls?: Wall[]): WallGroup {
+    const wasSelected = this.selectedWallIds.has(wall.id);
+    const wasHovered = this.hoveredWallId === wall.id;
     this.removeWall(wall.id);
+    if (wasSelected) {
+      this.selectedWallIds.add(wall.id);
+    }
+    if (wasHovered) {
+      this.hoveredWallId = wall.id;
+    }
     this.wallData.set(wall.id, wall);
 
     let interactionVertices = componentWalls && componentWalls.length > 0
@@ -715,8 +858,9 @@ export class WallRenderer {
     );
     const canvasVertices = interactionVertices.map((v) => this.toCanvasPoint(v));
 
+    const dragEdgeStrokeWidth = this.toSceneSize(VISUAL_CONFIG.wallStrokeWidth);
     const fillPolygon = new fabric.Polygon(canvasVertices, {
-      fill: 'rgba(0,0,0,0.001)',
+      fill: this.dragOptimizedMode ? 'rgba(148,163,184,0.18)' : 'rgba(0,0,0,0.001)',
       stroke: 'transparent',
       strokeWidth: 0,
       selectable: false,
@@ -732,28 +876,52 @@ export class WallRenderer {
 
     const interiorBoundary = new fabric.Line(
       [interiorStart.x, interiorStart.y, interiorEnd.x, interiorEnd.y],
-      { stroke: '#000000', strokeWidth: 2, selectable: false, evented: false, visible: false }
+      {
+        stroke: VISUAL_CONFIG.wallStroke,
+        strokeWidth: dragEdgeStrokeWidth,
+        selectable: false,
+        evented: false,
+        visible: this.dragOptimizedMode,
+      }
     );
     (interiorBoundary as NamedObject).name = 'interiorBoundary';
     this.annotateWallTarget(interiorBoundary, wall.id);
 
     const exteriorBoundary = new fabric.Line(
       [exteriorStart.x, exteriorStart.y, exteriorEnd.x, exteriorEnd.y],
-      { stroke: '#000000', strokeWidth: 2, selectable: false, evented: false, visible: false }
+      {
+        stroke: VISUAL_CONFIG.wallStroke,
+        strokeWidth: dragEdgeStrokeWidth,
+        selectable: false,
+        evented: false,
+        visible: this.dragOptimizedMode,
+      }
     );
     (exteriorBoundary as NamedObject).name = 'exteriorBoundary';
     this.annotateWallTarget(exteriorBoundary, wall.id);
 
     const startCap = new fabric.Line(
       [interiorStart.x, interiorStart.y, exteriorStart.x, exteriorStart.y],
-      { stroke: '#000000', strokeWidth: 2, selectable: false, evented: false, visible: false }
+      {
+        stroke: VISUAL_CONFIG.wallStroke,
+        strokeWidth: dragEdgeStrokeWidth,
+        selectable: false,
+        evented: false,
+        visible: this.dragOptimizedMode,
+      }
     );
     (startCap as NamedObject).name = 'startCap';
     this.annotateWallTarget(startCap, wall.id);
 
     const endCap = new fabric.Line(
       [interiorEnd.x, interiorEnd.y, exteriorEnd.x, exteriorEnd.y],
-      { stroke: '#000000', strokeWidth: 2, selectable: false, evented: false, visible: false }
+      {
+        stroke: VISUAL_CONFIG.wallStroke,
+        strokeWidth: dragEdgeStrokeWidth,
+        selectable: false,
+        evented: false,
+        visible: this.dragOptimizedMode,
+      }
     );
     (endCap as NamedObject).name = 'endCap';
     this.annotateWallTarget(endCap, wall.id);
@@ -765,7 +933,7 @@ export class WallRenderer {
       ],
       {
         stroke: VISUAL_CONFIG.centerLineStroke,
-        strokeWidth: VISUAL_CONFIG.centerLineWidth,
+        strokeWidth: this.toSceneSize(VISUAL_CONFIG.centerLineWidth),
         selectable: false, evented: false,
         visible: this.showCenterLines,
       }
@@ -782,8 +950,8 @@ export class WallRenderer {
           ],
           {
             stroke: VISUAL_CONFIG.offsetReferenceStroke,
-            strokeWidth: VISUAL_CONFIG.offsetReferenceStrokeWidth,
-            strokeDashArray: [...VISUAL_CONFIG.offsetReferenceDash],
+            strokeWidth: this.toSceneSize(VISUAL_CONFIG.offsetReferenceStrokeWidth),
+            strokeDashArray: VISUAL_CONFIG.offsetReferenceDash.map((value) => this.toSceneSize(value)),
             selectable: false,
             evented: false,
             visible: this.showCenterLines,
@@ -812,7 +980,7 @@ export class WallRenderer {
       strokeWidth: this.toSceneSize(VISUAL_CONFIG.hoverStrokeWidth),
       strokeLineJoin: 'round',
       selectable: false, evented: false,
-      visible: this.hoveredWallId === wall.id && !this.selectedWallIds.has(wall.id),
+      visible: !this.dragOptimizedMode && this.hoveredWallId === wall.id && !this.selectedWallIds.has(wall.id),
     });
     (hoverOutline as NamedObject).name = 'hoverOutline';
     this.annotateWallTarget(hoverOutline, wall.id);
@@ -895,10 +1063,13 @@ export class WallRenderer {
     ];
 
     const group: WallGroup = new fabric.Group(objects, {
-      selectable: true, evented: true, subTargetCheck: true,
+      selectable: !this.dragOptimizedMode,
+      evented: !this.dragOptimizedMode,
+      subTargetCheck: !this.dragOptimizedMode,
       hasControls: false, hasBorders: false,
       lockMovementX: true, lockMovementY: true,
-      transparentCorners: false, objectCaching: true,
+      transparentCorners: false,
+      objectCaching: !this.dragOptimizedMode,
     }) as WallGroup;
 
     group.wallId = wall.id;
@@ -907,6 +1078,9 @@ export class WallRenderer {
 
     this.canvas.add(group);
     this.wallObjects.set(wall.id, group);
+    if (wasSelected && !this.dragOptimizedMode) {
+      this.createControlPoints(wall.id);
+    }
 
     return group;
   }
@@ -1192,7 +1366,11 @@ export class WallRenderer {
     const joinsMap = refreshAfterPointMove(wall.id, allWalls); // [PATCH APPLIED]
 
     // Re-render with fresh joins
-    this.renderAllWalls(allWalls, joinsMap); // [PATCH APPLIED]
+    if (this.dragOptimizedMode) {
+      this.renderWallsIncremental(allWalls);
+    } else {
+      this.renderAllWalls(allWalls, joinsMap); // [PATCH APPLIED]
+    }
     this.dirtyWallIds.clear();
   }
 
@@ -1774,6 +1952,12 @@ export class WallRenderer {
   }
 
   setHoveredWall(wallId: string | null): void {
+    if (this.dragOptimizedMode) {
+      if (this.hoveredWallId !== null) {
+        this.hoveredWallId = null;
+      }
+      return;
+    }
     if (this.hoveredWallId === wallId) return;
     this.hoveredWallId = wallId;
     this.syncHoverPreview();
@@ -1859,6 +2043,78 @@ export class WallRenderer {
     }
   }
 
+  renderWallsIncremental(walls: Wall[]): void {
+    if (!this.dragOptimizedMode) {
+      this.renderAllWalls(walls);
+      return;
+    }
+
+    const previousRenderOnAdd = (this.canvas as any).renderOnAddRemove;
+    (this.canvas as any).renderOnAddRemove = false;
+
+    try {
+      if (this.componentObjects.length > 0) {
+        this.clearMergedComponents();
+      }
+
+      const nextWallsById = new Map(walls.map((wall) => [wall.id, wall]));
+      const dirtyWallIds = new Set<string>();
+      const removedWallIds: string[] = [];
+
+      for (const [wallId, existingWall] of this.wallData.entries()) {
+        if (!nextWallsById.has(wallId)) {
+          removedWallIds.push(wallId);
+          dirtyWallIds.add(wallId);
+        }
+      }
+
+      for (const wall of walls) {
+        const previousWall = this.wallData.get(wall.id);
+        if (!this.wallNeedsRerender(previousWall, wall)) {
+          continue;
+        }
+        dirtyWallIds.add(wall.id);
+      }
+
+      if (removedWallIds.length === 0 && dirtyWallIds.size === 0) {
+        return;
+      }
+
+      for (const wallId of removedWallIds) {
+        this.removeWall(wallId);
+      }
+
+      if (dirtyWallIds.size > 0) {
+        // Drag path: skip full join-network recomputation for smoother interaction.
+        // Final release render restores exact merged/joined geometry.
+        for (const wallId of dirtyWallIds) {
+          const wall = nextWallsById.get(wallId);
+          if (!wall) continue;
+          this.renderWall(wall);
+        }
+      }
+
+      for (const wall of walls) {
+        if (!this.wallData.has(wall.id)) {
+          this.wallData.set(wall.id, wall);
+        }
+      }
+
+      if (this.hoveredWallId && !nextWallsById.has(this.hoveredWallId)) {
+        this.hoveredWallId = null;
+      }
+
+      const nextSelection = Array.from(this.selectedWallIds).filter((wallId) => nextWallsById.has(wallId));
+      if (nextSelection.length !== this.selectedWallIds.size) {
+        this.selectedWallIds = new Set(nextSelection);
+      }
+
+      this.canvas.requestRenderAll();
+    } finally {
+      (this.canvas as any).renderOnAddRemove = previousRenderOnAdd ?? true;
+    }
+  }
+
   highlightWall(wallId: string, highlight: boolean): void {
     const nextSelection = new Set(this.selectedWallIds);
     if (highlight) nextSelection.add(wallId);
@@ -1931,6 +2187,7 @@ export class WallRenderer {
   }
 
   clearAllWalls(): void {
+    this.dragOptimizedMode = false;
     this.clearMergedComponents();
     this.clearSelectionComponents();
     this.clearHoverComponents();

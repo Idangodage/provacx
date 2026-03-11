@@ -46,6 +46,8 @@ const ROOM_MAGNETIC_MIN_TOLERANCE_MM = 12;
 const ROOM_MAGNETIC_MAX_TOLERANCE_MM = 90;
 const ROOM_MAGNETIC_PARALLEL_DOT = 0.97;
 const ROOM_MAGNETIC_MIN_OVERLAP_MM = 120;
+const STATUS_UPDATE_MIN_INTERVAL_MS = 60;
+const OVERLAP_CHECK_MIN_INTERVAL_MS = 80;
 
 type WallControlType =
   | 'wall-center-handle'
@@ -105,6 +107,7 @@ export interface UseSelectModeOptions {
   detectRooms: (options?: { debounce?: boolean }) => void;
   saveToHistory: (action: string) => void;
   setProcessingStatus: (status: string, isProcessing: boolean) => void;
+  onDragStateChange?: (isDragging: boolean) => void;
   originOffset: { x: number; y: number };
 }
 
@@ -526,6 +529,7 @@ export function useSelectMode({
   detectRooms,
   saveToHistory,
   setProcessingStatus,
+  onDragStateChange,
 }: UseSelectModeOptions) {
   const isWallHandleDraggingRef = useRef(false);
   const dragStateRef = useRef<DragState>({ mode: 'idle' });
@@ -536,6 +540,9 @@ export function useSelectMode({
   const ghostObjectsRef = useRef<fabric.FabricObject[]>([]);
   const snapObjectsRef = useRef<fabric.FabricObject[]>([]);
   const lastAppliedStatusRef = useRef<string>('');
+  const lastStatusAtRef = useRef(0);
+  const lastOverlapCheckAtRef = useRef(0);
+  const lastOverlapWarningRef = useRef(false);
   const snapManagerRef = useRef(new SnapManager());
   const smoothedPointerRef = useRef<Point2D | null>(null);
   const endpointSnapMemoryRef = useRef<EndpointSnapMemory | null>(null);
@@ -562,6 +569,7 @@ export function useSelectMode({
     detectRooms,
     saveToHistory,
     setProcessingStatus,
+    onDragStateChange,
   });
 
   const canRotateWall = useCallback((wall: Wall): boolean => {
@@ -591,6 +599,7 @@ export function useSelectMode({
       detectRooms,
       saveToHistory,
       setProcessingStatus,
+      onDragStateChange,
     };
   }, [
     walls,
@@ -610,6 +619,7 @@ export function useSelectMode({
     detectRooms,
     saveToHistory,
     setProcessingStatus,
+    onDragStateChange,
   ]);
 
   useEffect(() => {
@@ -836,37 +846,20 @@ export function useSelectMode({
     return Math.max(6, (snapDistancePx * 1.8) / (MM_TO_PX * safeZoom));
   }, []);
 
-  const smoothDragPoint = useCallback((point: Point2D, mode: DragState['mode']): Point2D => {
-    const previous = smoothedPointerRef.current;
-    if (!previous) {
-      smoothedPointerRef.current = { ...point };
-      return point;
+  const withDragPerfOptions = useCallback((options?: WallUpdateOptions): WallUpdateOptions | undefined => {
+    if (!options || options.source !== 'drag' || options.skipRoomDetection !== undefined) {
+      return options;
     }
-
-    const alpha =
-      mode === 'endpoint'
-        ? 0.72
-        : mode === 'bevel'
-          ? 0.68
-          : mode === 'move'
-            ? 0.58
-            : mode === 'thickness'
-              ? 0.62
-              : mode === 'offset'
-                ? 0.62
-                : 0.66;
-    const jumpDistance = magnitude(subtract(point, previous));
-    if (jumpDistance > 180) {
-      smoothedPointerRef.current = { ...point };
-      return point;
-    }
-
-    const next = {
-      x: previous.x + (point.x - previous.x) * alpha,
-      y: previous.y + (point.y - previous.y) * alpha,
+    return {
+      ...options,
+      skipRoomDetection: true,
     };
-    smoothedPointerRef.current = next;
-    return next;
+  }, []);
+
+  const smoothDragPoint = useCallback((point: Point2D, _mode: DragState['mode']): Point2D => {
+    // Keep drag interaction 1:1 with the pointer for maximum responsiveness.
+    smoothedPointerRef.current = { ...point };
+    return point;
   }, []);
 
   const findWallById = useCallback((wallId: string): Wall | undefined => {
@@ -1168,7 +1161,15 @@ export function useSelectMode({
       wall.thickness
     )}mm, Angle: ${wallAngleDegrees(wall).toFixed(1)}deg`;
     if (lastAppliedStatusRef.current !== status) {
+      const now =
+        typeof performance !== 'undefined' && typeof performance.now === 'function'
+          ? performance.now()
+          : Date.now();
+      if (now - lastStatusAtRef.current < STATUS_UPDATE_MIN_INTERVAL_MS) {
+        return;
+      }
       lastAppliedStatusRef.current = status;
+      lastStatusAtRef.current = now;
       optionsRef.current.setProcessingStatus(status, false);
     }
   }, []);
@@ -1176,13 +1177,22 @@ export function useSelectMode({
   const setStatusFromRoom = useCallback((room: Room) => {
     const status = `Room: ${room.name}, Area: ${(room.area / 1_000_000).toFixed(1)}m², Perimeter: ${Math.round(room.perimeter)}mm`;
     if (lastAppliedStatusRef.current !== status) {
+      const now =
+        typeof performance !== 'undefined' && typeof performance.now === 'function'
+          ? performance.now()
+          : Date.now();
+      if (now - lastStatusAtRef.current < STATUS_UPDATE_MIN_INTERVAL_MS) {
+        return;
+      }
       lastAppliedStatusRef.current = status;
+      lastStatusAtRef.current = now;
       optionsRef.current.setProcessingStatus(status, false);
     }
   }, []);
 
   const updateWallIfChanged = useCallback(
     (wallId: string, updates: Partial<Wall>, options?: WallUpdateOptions) => {
+      const effectiveOptions = withDragPerfOptions(options);
       const cacheKey = [
         `s:${pointCacheKey(updates.startPoint)}`,
         `e:${pointCacheKey(updates.endPoint)}`,
@@ -1195,7 +1205,7 @@ export function useSelectMode({
 
       const current = findWallById(wallId);
       if (!current) {
-        optionsRef.current.updateWall(wallId, updates, options);
+        optionsRef.current.updateWall(wallId, updates, effectiveOptions);
         wallUpdateCacheRef.current.set(wallId, cacheKey);
         return;
       }
@@ -1216,14 +1226,15 @@ export function useSelectMode({
         wallUpdateCacheRef.current.set(wallId, cacheKey);
         return;
       }
-      optionsRef.current.updateWall(wallId, updates, options);
+      optionsRef.current.updateWall(wallId, updates, effectiveOptions);
       wallUpdateCacheRef.current.set(wallId, cacheKey);
     },
-    [findWallById]
+    [findWallById, withDragPerfOptions]
   );
 
   const updateWallsIfChanged = useCallback(
     (entries: Array<{ id: string; updates: Partial<Wall> }>, options?: WallUpdateOptions) => {
+      const effectiveOptions = withDragPerfOptions(options);
       if (entries.length === 0) {
         return;
       }
@@ -1284,9 +1295,9 @@ export function useSelectMode({
         return;
       }
 
-      optionsRef.current.updateWalls(changedEntries, options);
+      optionsRef.current.updateWalls(changedEntries, effectiveOptions);
     },
-    [findWallById]
+    [findWallById, withDragPerfOptions]
   );
 
   const updateWallBevelIfChanged = useCallback(
@@ -1296,6 +1307,7 @@ export function useSelectMode({
       bevel: Partial<{ outerOffset: number; innerOffset: number }>,
       options?: WallUpdateOptions
     ) => {
+      const effectiveOptions = withDragPerfOptions(options);
       const cacheKey = [
         end,
         `o:${bevel.outerOffset !== undefined ? bevel.outerOffset.toFixed(3) : ''}`,
@@ -1308,7 +1320,7 @@ export function useSelectMode({
 
       const current = findWallById(wallId);
       if (!current) {
-        optionsRef.current.updateWallBevel(wallId, end, bevel, options);
+        optionsRef.current.updateWallBevel(wallId, end, bevel, effectiveOptions);
         wallBevelUpdateCacheRef.current.set(bevelCacheKey, cacheKey);
         return;
       }
@@ -1325,10 +1337,10 @@ export function useSelectMode({
         wallBevelUpdateCacheRef.current.set(bevelCacheKey, cacheKey);
         return;
       }
-      optionsRef.current.updateWallBevel(wallId, end, bevel, options);
+      optionsRef.current.updateWallBevel(wallId, end, bevel, effectiveOptions);
       wallBevelUpdateCacheRef.current.set(bevelCacheKey, cacheKey);
     },
-    [findWallById]
+    [findWallById, withDragPerfOptions]
   );
 
   const connectWallsIfNeeded = useCallback((wallId: string, otherWallId: string) => {
@@ -1357,6 +1369,8 @@ export function useSelectMode({
     wallUpdateCacheRef.current.clear();
     wallBevelUpdateCacheRef.current.clear();
     connectedPairCacheRef.current.clear();
+    lastOverlapCheckAtRef.current = 0;
+    lastOverlapWarningRef.current = false;
   }, []);
 
   const beginControlDrag = useCallback((meta: TargetMeta, point: Point2D) => {
@@ -1611,7 +1625,6 @@ export function useSelectMode({
         constrainedNormal,
         endpointConstraints,
       };
-      showGhostWalls(Array.from(baselineWalls.values()));
       return true;
     }
 
@@ -1649,7 +1662,6 @@ export function useSelectMode({
             }),
         }),
       };
-      showGhostWalls([{ ...wall }]);
       return true;
     }
 
@@ -1882,11 +1894,9 @@ export function useSelectMode({
         }
       );
 
-      const updatedCorner = optionsRef.current.getCornerBevelDots(state.cornerPoint);
-      const handlePoint =
-        state.kind === 'outer'
-          ? updatedCorner?.outerDotPosition ?? fallbackPoint
-          : updatedCorner?.innerDotPosition ?? fallbackPoint;
+      // Use projected control point directly during drag to avoid an O(n)
+      // corner recomputation pass each frame.
+      const handlePoint = fallbackPoint;
 
       return {
         label: `${state.kind === 'outer' ? 'Outer' : 'Inner'} bevel ${Math.round(nextOffset)} mm`,
@@ -1958,7 +1968,15 @@ export function useSelectMode({
         }
       }
 
-      if (hasOverlapWithUnselectedWalls(candidates)) {
+      const now =
+        typeof performance !== 'undefined' && typeof performance.now === 'function'
+          ? performance.now()
+          : Date.now();
+      if (now - lastOverlapCheckAtRef.current >= OVERLAP_CHECK_MIN_INTERVAL_MS) {
+        lastOverlapCheckAtRef.current = now;
+        lastOverlapWarningRef.current = hasOverlapWithUnselectedWalls(candidates);
+      }
+      if (lastOverlapWarningRef.current) {
         optionsRef.current.setProcessingStatus('Overlap warning: wall intersects other walls.', false);
       }
 
@@ -2319,6 +2337,7 @@ export function useSelectMode({
         walls: optionsRef.current.walls,
         zoom: optionsRef.current.zoom,
         gridSizeMm: optionsRef.current.wallSettings.gridSize,
+        enableGridSnap: false,
         snapDistancePx: Math.max(
           optionsRef.current.wallSettings.endpointSnapTolerance,
           optionsRef.current.wallSettings.midpointSnapTolerance
@@ -2580,6 +2599,7 @@ export function useSelectMode({
     wallUpdateCacheRef.current.clear();
     wallBevelUpdateCacheRef.current.clear();
     connectedPairCacheRef.current.clear();
+    optionsRef.current.onDragStateChange?.(false);
     clearEditVisuals();
   }, [applyDrag, clearEditVisuals, setDimensionLabel]);
 
@@ -2631,6 +2651,7 @@ export function useSelectMode({
       const meta = getTargetMeta(target);
 
       if ((meta.isWallControl || meta.isRoomControl) && beginControlDrag(meta, scenePoint)) {
+        optionsRef.current.onDragStateChange?.(true);
         const selectedPrimaryId = meta.wallId ?? meta.roomId;
         if (selectedPrimaryId && !optionsRef.current.selectedIds.includes(selectedPrimaryId)) {
           optionsRef.current.setSelectedIds([selectedPrimaryId]);
@@ -2684,6 +2705,7 @@ export function useSelectMode({
       if (frameRef.current !== null && typeof window !== 'undefined') {
         window.cancelAnimationFrame(frameRef.current);
       }
+      optionsRef.current.onDragStateChange?.(false);
       clearEditVisuals();
     };
   }, [clearEditVisuals]);

@@ -27,6 +27,7 @@ export interface SnapContext {
   walls: Wall[];
   zoom: number;
   gridSizeMm: number;
+  enableGridSnap?: boolean;
   snapDistancePx: number;
   excludeWallId?: string;
   referencePoint?: Point2D;
@@ -42,7 +43,9 @@ export class SnapManager {
 
   collectCandidates(context: SnapContext): SnapTarget[] {
     const candidates: SnapTarget[] = [];
-    candidates.push(...this.getGridSnap(context));
+    if (context.enableGridSnap !== false) {
+      candidates.push(...this.getGridSnap(context));
+    }
     candidates.push(...this.getEndpointSnaps(context));
     candidates.push(...this.getMidpointSnaps(context));
     candidates.push(...this.getIntersectionSnaps(context));
@@ -191,4 +194,3 @@ export class SnapManager {
     return snaps;
   }
 }
-

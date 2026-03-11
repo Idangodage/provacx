@@ -29,6 +29,7 @@ export interface UseWallToolOptions {
   walls: Wall[];
   rooms: Room[];
   selectedIds: string[];
+  isHandleDragging?: boolean;
   wallDrawingState: WallDrawingState;
   wallSettings: WallSettings;
   zoom: number;
@@ -69,6 +70,7 @@ export function useWallTool({
   walls,
   rooms,
   selectedIds,
+  isHandleDragging = false,
   wallDrawingState,
   wallSettings,
   zoom,
@@ -98,7 +100,10 @@ export function useWallTool({
   const snapIndicatorRef = useRef<WallSnapIndicatorRenderer | null>(null); // [SNAP WIRE]
   const chainWallIdsRef = useRef<string[]>([]); // [SNAP WIRE] track wall chain for room close
   const panOffsetRef = useRef(panOffset); // keep current pan offset for snap indicator coordinate conversion
+  const selectedWallSignatureRef = useRef<string>('');
+  const wallsRef = useRef(walls);
   panOffsetRef.current = panOffset; // always sync
+  wallsRef.current = walls;
 
   // Initialize instances when canvas is available
   useEffect(() => {
@@ -107,6 +112,7 @@ export function useWallTool({
     // Create instances if not already created
     if (!wallRendererRef.current) {
       wallRendererRef.current = new WallRenderer(canvas, pageHeight);
+      selectedWallSignatureRef.current = '';
     }
     if (!wallPreviewRef.current) {
       wallPreviewRef.current = new WallPreview(canvas, pageHeight);
@@ -117,6 +123,7 @@ export function useWallTool({
 
     // Update page height
     wallRendererRef.current.setPageHeight(pageHeight);
+    wallRendererRef.current.setDragOptimizedMode(false);
     wallPreviewRef.current.setPageHeight(pageHeight);
 
     // [SNAP WIRE] Initialize snap indicator renderer on overlay canvas
@@ -138,8 +145,14 @@ export function useWallTool({
       wallRendererRef.current = null;
       wallManagerRef.current = null;
       snapIndicatorRef.current = null; // [SNAP WIRE]
+      selectedWallSignatureRef.current = '';
     };
   }, [canvas, pageHeight]);
+
+  useEffect(() => {
+    if (!wallRendererRef.current) return;
+    wallRendererRef.current.setDragOptimizedMode(false);
+  }, [isHandleDragging, canvas]);
 
   // Update wall manager when walls change
   useEffect(() => {
@@ -149,19 +162,27 @@ export function useWallTool({
     wallPreviewRef.current?.setWalls(walls);
   }, [walls]);
 
-  // Update renderer when walls change (canvas dep ensures re-render on remount)
+  // Rooms are lower-frequency than wall drag updates; keep this separate from
+  // wall geometry rendering to avoid repeated room cloning work per frame.
   useEffect(() => {
     if (wallRendererRef.current && canvas) {
       wallRendererRef.current.setRooms(rooms);
       wallRendererRef.current.setRoomWallIds(rooms.flatMap((room) => room.wallIds));
+    }
+  }, [rooms, canvas]);
+
+  // Update renderer when wall geometry changes.
+  useEffect(() => {
+    if (wallRendererRef.current && canvas) {
+      wallRendererRef.current.setDragOptimizedMode(false);
       wallRendererRef.current.renderAllWalls(walls);
     }
-  }, [walls, rooms, canvas]);
+  }, [walls, canvas, isHandleDragging]);
 
   // Update selected wall highlights + control points
   useEffect(() => {
     if (!wallRendererRef.current) return;
-    const wallIdSet = new Set(walls.map((wall) => wall.id));
+    const wallIdSet = new Set(wallsRef.current.map((wall) => wall.id));
     const roomById = new Map(rooms.map((room) => [room.id, room]));
     const selectedWallIds = new Set<string>();
 
@@ -180,8 +201,14 @@ export function useWallTool({
       }
     });
 
-    wallRendererRef.current.setSelectedWalls([...selectedWallIds]);
-  }, [walls, rooms, selectedIds]);
+    const nextSelectedWallIds = Array.from(selectedWallIds).sort();
+    const signature = nextSelectedWallIds.join('|');
+    if (selectedWallSignatureRef.current === signature) {
+      return;
+    }
+    selectedWallSignatureRef.current = signature;
+    wallRendererRef.current.setSelectedWalls(nextSelectedWallIds);
+  }, [rooms, selectedIds, canvas]);
 
   // Update center lines visibility
   useEffect(() => {

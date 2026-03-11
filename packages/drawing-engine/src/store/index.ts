@@ -2364,7 +2364,7 @@ export const useDrawingStore = create<DrawingState>()(
 
           return { walls: cleanedWalls };
         });
-        if (nextValue) {
+        if (nextValue && options?.source !== 'drag') {
           attributeChangeObserver.notify({
             entity: 'wall',
             entityId: id,
@@ -2454,21 +2454,23 @@ export const useDrawingStore = create<DrawingState>()(
           return { walls: nextWalls };
         });
 
-        const currentWalls = get().walls;
-        mergedUpdates.forEach((_wallUpdates, wallId) => {
-          const nextWall = currentWalls.find((wall) => wall.id === wallId);
-          const previousValue = previousValues.get(wallId);
-          if (nextWall && previousValue) {
-            attributeChangeObserver.notify({
-              entity: 'wall',
-              entityId: wallId,
-              previousValue,
-              nextValue: nextWall.properties3D,
-              source: options?.source ?? 'ui',
-              timestamp: Date.now(),
-            });
-          }
-        });
+        if (options?.source !== 'drag') {
+          const currentWalls = get().walls;
+          mergedUpdates.forEach((_wallUpdates, wallId) => {
+            const nextWall = currentWalls.find((wall) => wall.id === wallId);
+            const previousValue = previousValues.get(wallId);
+            if (nextWall && previousValue) {
+              attributeChangeObserver.notify({
+                entity: 'wall',
+                entityId: wallId,
+                previousValue,
+                nextValue: nextWall.properties3D,
+                source: options?.source ?? 'ui',
+                timestamp: Date.now(),
+              });
+            }
+          });
+        }
 
         if (!options?.skipHistory) {
           get().saveToHistory('Update walls');
@@ -2791,13 +2793,14 @@ export const useDrawingStore = create<DrawingState>()(
       moveRoom: (id, delta, options) => {
         const room = get().rooms.find((entry) => entry.id === id);
         if (!room) return;
-
+        const wallsById = new Map(get().walls.map((wall) => [wall.id, wall]));
+        const updates: Array<{ id: string; updates: Partial<Wall> }> = [];
         room.wallIds.forEach((wallId) => {
-          const wall = get().walls.find((entry) => entry.id === wallId);
+          const wall = wallsById.get(wallId);
           if (!wall) return;
-          get().updateWall(
-            wallId,
-            {
+          updates.push({
+            id: wallId,
+            updates: {
               startPoint: {
                 x: wall.startPoint.x + delta.x,
                 y: wall.startPoint.y + delta.y,
@@ -2807,16 +2810,19 @@ export const useDrawingStore = create<DrawingState>()(
                 y: wall.endPoint.y + delta.y,
               },
             },
-            {
-              skipHistory: true,
-              source: 'drag',
-              skipRoomDetection: true,
-            }
-          );
+          });
         });
 
-        get().detectRooms({ debounce: options?.skipHistory });
+        if (updates.length > 0) {
+          get().updateWalls(updates, {
+            skipHistory: true,
+            source: 'drag',
+            skipRoomDetection: true,
+          });
+        }
+
         if (!options?.skipHistory) {
+          get().detectRooms();
           get().saveToHistory('Move room');
         }
       },
