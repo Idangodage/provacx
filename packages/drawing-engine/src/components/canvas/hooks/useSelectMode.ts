@@ -32,8 +32,9 @@ import {
   type CornerBevelKind,
   type CornerEnd,
 } from '../../../utils/wallBevel';
+import { endDragPerfTimer, startDragPerfTimer } from '../perf/dragPerf';
 import { MM_TO_PX } from '../scale';
- import { computeWallBodyPolygon } from '../wall/WallGeometry';
+import { computeWallBodyPolygon } from '../wall/WallGeometry';
 import { snapToGrid } from '../wall/WallSnapping';
 
 const THICKNESS_PRESETS_MM = [100, 150, 200, 250];
@@ -48,6 +49,13 @@ const ROOM_MAGNETIC_PARALLEL_DOT = 0.97;
 const ROOM_MAGNETIC_MIN_OVERLAP_MM = 120;
 const STATUS_UPDATE_MIN_INTERVAL_MS = 60;
 const OVERLAP_CHECK_MIN_INTERVAL_MS = 80;
+const DRAG_UPDATE_MAX_THRESHOLD_MM = 0.08;
+const DRAG_UPDATE_MIN_THRESHOLD_MM = 0.001;
+const DRAG_UPDATE_PIXEL_THRESHOLD_PX = 0.2;
+const ENDPOINT_DEFAULT_SNAP_DISTANCE_FACTOR = 0.2;
+const ENDPOINT_DEFAULT_SNAP_SEARCH_RADIUS_FACTOR = 1.1;
+const ENDPOINT_DEFAULT_SNAP_RELEASE_FACTOR = 0.55;
+const ENDPOINT_MIN_SNAP_DISTANCE_PX = 5;
 
 type WallControlType =
   | 'wall-center-handle'
@@ -856,6 +864,20 @@ export function useSelectMode({
     };
   }, []);
 
+  const getWallUpdateThreshold = useCallback((options?: WallUpdateOptions): number => {
+    if (options?.source !== 'drag') {
+      return DRAG_UPDATE_MAX_THRESHOLD_MM;
+    }
+
+    const safeZoom = Math.max(optionsRef.current.zoom, 0.01);
+    const thresholdFromPixels = DRAG_UPDATE_PIXEL_THRESHOLD_PX / (MM_TO_PX * safeZoom);
+    return clamp(
+      thresholdFromPixels,
+      DRAG_UPDATE_MIN_THRESHOLD_MM,
+      DRAG_UPDATE_MAX_THRESHOLD_MM
+    );
+  }, []);
+
   const smoothDragPoint = useCallback((point: Point2D, _mode: DragState['mode']): Point2D => {
     // Keep drag interaction 1:1 with the pointer for maximum responsiveness.
     smoothedPointerRef.current = { ...point };
@@ -1210,7 +1232,7 @@ export function useSelectMode({
         return;
       }
 
-      const threshold = 0.08;
+      const threshold = getWallUpdateThreshold(effectiveOptions);
       const startChanged = updates.startPoint
         ? magnitude(subtract(updates.startPoint, current.startPoint)) > threshold
         : false;
@@ -1229,7 +1251,7 @@ export function useSelectMode({
       optionsRef.current.updateWall(wallId, updates, effectiveOptions);
       wallUpdateCacheRef.current.set(wallId, cacheKey);
     },
-    [findWallById, withDragPerfOptions]
+    [findWallById, getWallUpdateThreshold, withDragPerfOptions]
   );
 
   const updateWallsIfChanged = useCallback(
@@ -1251,7 +1273,7 @@ export function useSelectMode({
       });
 
       const changedEntries: Array<{ id: string; updates: Partial<Wall> }> = [];
-      const threshold = 0.08;
+      const threshold = getWallUpdateThreshold(effectiveOptions);
 
       merged.forEach((updates, wallId) => {
         const cacheKey = [
@@ -1297,7 +1319,7 @@ export function useSelectMode({
 
       optionsRef.current.updateWalls(changedEntries, effectiveOptions);
     },
-    [findWallById, withDragPerfOptions]
+    [findWallById, getWallUpdateThreshold, withDragPerfOptions]
   );
 
   const updateWallBevelIfChanged = useCallback(
@@ -2331,20 +2353,49 @@ export function useSelectMode({
     const canReuseSnapMemory =
       snapMemory?.mode === 'endpoint' && snapMemory.wallId === endpointState.wallId;
 
+    const preciseSnapMode = modifierKeysRef.current.alt;
     if (!modifierKeysRef.current.ctrl) {
-      const snap = snapManagerRef.current.findBestSnap({
-        point: snappedPoint,
-        walls: optionsRef.current.walls,
-        zoom: optionsRef.current.zoom,
-        gridSizeMm: optionsRef.current.wallSettings.gridSize,
-        enableGridSnap: false,
-        snapDistancePx: Math.max(
-          optionsRef.current.wallSettings.endpointSnapTolerance,
-          optionsRef.current.wallSettings.midpointSnapTolerance
-        ),
-        excludeWallId: endpointState.wallId,
-        referencePoint: endpointState.fixedPoint,
+      const safeZoom = Math.max(optionsRef.current.zoom, 0.01);
+      const baseSnapDistancePx = Math.max(
+        optionsRef.current.wallSettings.endpointSnapTolerance,
+        optionsRef.current.wallSettings.midpointSnapTolerance
+      );
+      // Endpoint drags are smoother with a tighter default magnet and no heavy
+      // intersection/perpendicular scan each frame. Hold Alt for full precision snaps.
+      const workingSnapDistancePx = preciseSnapMode
+        ? baseSnapDistancePx
+        : Math.max(ENDPOINT_MIN_SNAP_DISTANCE_PX, baseSnapDistancePx * ENDPOINT_DEFAULT_SNAP_DISTANCE_FACTOR);
+      const snapSearchRadiusMm = Math.max(
+        8,
+        (workingSnapDistancePx * ENDPOINT_DEFAULT_SNAP_SEARCH_RADIUS_FACTOR) / (MM_TO_PX * safeZoom)
+      );
+      const nearbyWalls = optionsRef.current.walls.filter((candidateWall) => {
+        if (candidateWall.id === endpointState.wallId) return false;
+        if (magnitude(subtract(candidateWall.startPoint, snappedPoint)) <= snapSearchRadiusMm) return true;
+        if (magnitude(subtract(candidateWall.endPoint, snappedPoint)) <= snapSearchRadiusMm) return true;
+        return distancePointToSegment(
+          snappedPoint,
+          candidateWall.startPoint,
+          candidateWall.endPoint
+        ) <= snapSearchRadiusMm;
       });
+
+      const snap = nearbyWalls.length > 0
+        ? snapManagerRef.current.findBestSnap({
+          point: snappedPoint,
+          walls: nearbyWalls,
+          zoom: optionsRef.current.zoom,
+          gridSizeMm: optionsRef.current.wallSettings.gridSize,
+          enableGridSnap: false,
+          includeMidpointSnap: preciseSnapMode,
+          includeIntersectionSnap: preciseSnapMode,
+          includePerpendicularSnap: preciseSnapMode,
+          snapDistancePx: workingSnapDistancePx,
+          excludeWallId: endpointState.wallId,
+          referencePoint: endpointState.fixedPoint,
+        })
+        : null;
+
       if (snap) {
         snappedPoint = snap.point;
         snappedWallId = snap.wallId;
@@ -2364,8 +2415,11 @@ export function useSelectMode({
           indicator: snap.visual.indicator,
         });
       } else if (canReuseSnapMemory && snapMemory) {
+        const releaseDistanceMm = preciseSnapMode
+          ? snapReleaseDistanceMm
+          : Math.max(4, snapReleaseDistanceMm * ENDPOINT_DEFAULT_SNAP_RELEASE_FACTOR);
         const distanceToMemory = magnitude(subtract(snappedPoint, snapMemory.point));
-        if (distanceToMemory <= snapReleaseDistanceMm) {
+        if (distanceToMemory <= releaseDistanceMm) {
           snappedPoint = { ...snapMemory.point };
           snapPoint = { ...snapMemory.point };
           snappedWallId = snapMemory.snappedWallId;
@@ -2391,7 +2445,7 @@ export function useSelectMode({
       });
     }
 
-    const perpendicularSnap = modifierKeysRef.current.ctrl
+    const perpendicularSnap = (modifierKeysRef.current.ctrl || !preciseSnapMode)
       ? { snapped: snappedPoint as Point2D }
       : computePerpendicularSnap(endpointState, snappedPoint);
     if (!snapPoint && perpendicularSnap.line) {
@@ -2500,15 +2554,34 @@ export function useSelectMode({
   ]);
 
   const flushDragFrame = useCallback(() => {
+    const framePerfStart = startDragPerfTimer();
     frameRef.current = null;
     const point = pendingPointRef.current;
     pendingPointRef.current = null;
-    if (!point) return;
+    if (!point) {
+      endDragPerfTimer('select.flushDragFrame', framePerfStart, {
+        changed: 0,
+      });
+      return;
+    }
 
+    const mode = dragStateRef.current.mode;
+    const applyPerfStart = startDragPerfTimer();
     const result = applyDrag(point);
-    if (!result) return;
+    endDragPerfTimer(`select.applyDrag.${mode}`, applyPerfStart, {
+      changed: result ? 1 : 0,
+    });
+    if (!result) {
+      endDragPerfTimer('select.flushDragFrame', framePerfStart, {
+        changed: 0,
+      });
+      return;
+    }
     dragChangedRef.current = true;
     setDimensionLabel(result.label, result.point);
+    endDragPerfTimer('select.flushDragFrame', framePerfStart, {
+      changed: 1,
+    });
   }, [applyDrag, setDimensionLabel]);
 
   const scheduleDragFrame = useCallback((point: Point2D) => {

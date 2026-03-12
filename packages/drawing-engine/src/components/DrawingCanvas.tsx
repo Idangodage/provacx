@@ -45,6 +45,7 @@ import {
     HvacPlanRenderer,
     formatDimensionLength,
 } from './canvas';
+import { endDragPerfTimer, startDragPerfTimer } from './canvas/perf/dragPerf';
 
 // =============================================================================
 // Types & Constants
@@ -2508,14 +2509,27 @@ export function DrawingCanvas({
     }, [tool, wallDrawingState, dimensionSettings, viewportZoom]);
 
     const refreshDimensionLayer = useCallback(() => {
+        const perfStart = startDragPerfTimer();
         const renderer = dimensionRendererRef.current;
         const canvas = fabricRef.current;
-        if (!renderer || !canvas) return;
+        if (!renderer || !canvas) {
+            endDragPerfTimer('canvas.refreshDimensionLayer', perfStart, {
+                dimensions: dimensions.length,
+                walls: walls.length,
+                rooms: rooms.length,
+            });
+            return;
+        }
         renderer.setViewportZoom(viewportZoom);
         renderer.setContext(walls, rooms, dimensionSettings);
         renderer.renderAllDimensions(dimensions);
         restackInteractiveOverlays(canvas);
         canvas.requestRenderAll();
+        endDragPerfTimer('canvas.refreshDimensionLayer', perfStart, {
+            dimensions: dimensions.length,
+            walls: walls.length,
+            rooms: rooms.length,
+        });
     }, [walls, rooms, dimensionSettings, dimensions, viewportZoom, restackInteractiveOverlays]);
 
     // Automatically rebuild all auto-generated dimensions whenever walls, rooms,
@@ -2523,10 +2537,11 @@ export function DrawingCanvas({
     // requiring a manual "Auto Dimension" button press.
     // Skip while a wall is actively being drawn to avoid mid-draw flicker.
     useEffect(() => {
+        if (isHandleDragging) return;
         if (wallDrawingState.isDrawing) return;
         if (walls.length === 0 && rooms.length === 0) return;
         syncAutoDimensions();
-    }, [walls, rooms, dimensionSettings, wallDrawingState.isDrawing, syncAutoDimensions]);
+    }, [walls, rooms, dimensionSettings, wallDrawingState.isDrawing, isHandleDragging, syncAutoDimensions]);
 
     const scheduleDimensionLayerRefresh = useCallback(() => {
         if (typeof window === 'undefined') {
@@ -2601,8 +2616,9 @@ export function DrawingCanvas({
     }, [objectDefinitions, fabricCanvas]);
 
     useEffect(() => {
-        objectRendererRef.current?.renderAll(symbols);
-    }, [symbols, objectDefinitions, fabricCanvas]);
+        if (isHandleDragging) return;
+        objectRendererRef.current?.renderIncremental(symbols);
+    }, [symbols, objectDefinitions, fabricCanvas, isHandleDragging]);
 
     useEffect(() => {
         if (!wallRenderer) return;
@@ -2611,13 +2627,17 @@ export function DrawingCanvas({
             return definition?.category === 'doors' || definition?.category === 'windows';
         });
         wallRenderer.setOpeningSymbolInstances(openingSymbols);
+        if (isHandleDragging) {
+            return;
+        }
         // Keep wall visuals identical while dragging and idle.
         wallRenderer.renderAllWalls(wallsRef.current);
         // Rebuild dimensions after wall re-renders, then restore edit-handle priority.
         refreshDimensionLayer();
-    }, [wallRenderer, doorWindowSymbolsSignature, objectDefinitionsById, refreshDimensionLayer]);
+    }, [wallRenderer, doorWindowSymbolsSignature, objectDefinitionsById, refreshDimensionLayer, isHandleDragging]);
 
     useEffect(() => {
+        if (isHandleDragging) return;
         if (walls.length === 0 || symbols.length === 0) return;
 
         let adjustedAnyWall = false;
@@ -2735,6 +2755,7 @@ export function DrawingCanvas({
         resolveOpeningSillHeightMm,
         updateWall,
         updateSymbol,
+        isHandleDragging,
     ]);
 
     useEffect(() => {
@@ -3229,6 +3250,15 @@ export function DrawingCanvas({
 
             const currentState = canvasStateRef.current;
             if (middlePanRef.current.active) return;
+
+            if (tool === 'select' && isWallHandleDraggingRef.current) {
+                const selectPoint = {
+                    x: rawPoint.x / MM_TO_PX,
+                    y: rawPoint.y / MM_TO_PX,
+                };
+                handleSelectMouseMove(selectPoint, null);
+                return;
+            }
 
             if (currentState.isPanning && currentState.lastPanPoint) {
                 const dx = viewportPoint.x - currentState.lastPanPoint.x;
@@ -4447,6 +4477,9 @@ export function DrawingCanvas({
         const handleSelectDragMouseMove = (event: MouseEvent) => {
             if (tool !== 'select') return;
             if (!isWallHandleDraggingRef.current) return;
+            if (upperCanvasEl && event.target instanceof Node && upperCanvasEl.contains(event.target)) {
+                return;
+            }
             const scenePoint = canvas.getScenePoint(event as unknown as fabric.TPointerEvent);
             const selectPoint = {
                 x: scenePoint.x / MM_TO_PX,

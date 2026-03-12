@@ -30,12 +30,10 @@ export default function DrawingEditorWrapper({
       })
     );
     // TODO: Implement save to database via tRPC
-    console.log("Saving drawing...", data);
   };
 
-  const handleDataChange = (data: unknown) => {
+  const handleDataChange = (_data: unknown) => {
     // Auto-save could be implemented here with debouncing
-    console.log("Drawing data changed", data);
   };
 
   return (

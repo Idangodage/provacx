@@ -41,6 +41,7 @@ import {
   computeDeadEndBevelDotsForEndpoint,
   countWallsTouchingEndpoint,
 } from '../../../utils/wallBevel';
+import { endDragPerfTimer, startDragPerfTimer } from '../perf/dragPerf';
 import { MM_TO_PX } from '../scale';
 
 import { renderWallOpenings } from './OpeningRenderer';
@@ -60,6 +61,7 @@ import { computeWallUnionRenderData, type WallUnionComponent } from './WallUnion
 import {
   refreshAllWalls, // [PATCH APPLIED]
   refreshAfterPointMove, // [PATCH APPLIED]
+  refreshPartialWallGeometry,
   validateWallPolygon, // [PATCH APPLIED]
 } from './WallUpdatePipeline';
 
@@ -725,6 +727,33 @@ export class WallRenderer {
   private clearMergedComponents(): void {
     this.componentObjects.forEach((object) => this.canvas.remove(object));
     this.componentObjects = [];
+  }
+
+  private rebuildMergedComponents(walls: Wall[]): Map<string, Wall[]> {
+    this.clearMergedComponents();
+
+    const renderData = computeWallUnionRenderData(walls);
+    const wallsById = new Map(walls.map((wall) => [wall.id, wall]));
+    const componentWallsByWallId = new Map<string, Wall[]>();
+
+    renderData.components.forEach((component) => {
+      const componentWalls = component.wallIds
+        .map((wallId) => wallsById.get(wallId))
+        .filter((componentWall): componentWall is Wall => Boolean(componentWall));
+      component.wallIds.forEach((wallId) => {
+        componentWallsByWallId.set(wallId, componentWalls);
+      });
+    });
+
+    for (const component of renderData.components) {
+      const representativeWall = component.wallIds
+        .map((wallId) => wallsById.get(wallId))
+        .find((wall): wall is Wall => Boolean(wall));
+      if (!representativeWall) continue;
+      this.renderMergedComponent(component, representativeWall);
+    }
+
+    return componentWallsByWallId;
   }
 
   private clearSelectionComponents(): void {
@@ -2008,26 +2037,7 @@ export class WallRenderer {
 
       // [PATCH APPLIED] Use pre-computed joins if available, otherwise compute fresh
       const joinsMap = precomputedJoinsMap ?? refreshAllWalls(walls); // [PATCH APPLIED]
-
-      const renderData = computeWallUnionRenderData(walls);
-      const wallsById = new Map(walls.map((wall) => [wall.id, wall]));
-      const componentWallsByWallId = new Map<string, Wall[]>();
-      renderData.components.forEach((component) => {
-        const componentWalls = component.wallIds
-          .map((wallId) => wallsById.get(wallId))
-          .filter((componentWall): componentWall is Wall => Boolean(componentWall));
-        component.wallIds.forEach((wallId) => {
-          componentWallsByWallId.set(wallId, componentWalls);
-        });
-      });
-
-      for (const component of renderData.components) {
-        const representativeWall = component.wallIds
-          .map((wallId) => wallsById.get(wallId))
-          .find((wall): wall is Wall => Boolean(wall));
-        if (!representativeWall) continue;
-        this.renderMergedComponent(component, representativeWall);
-      }
+      const componentWallsByWallId = this.rebuildMergedComponents(walls);
 
       for (const wall of walls) {
         const joins = joinsMap.get(wall.id) || []; // [PATCH APPLIED]
@@ -2040,6 +2050,104 @@ export class WallRenderer {
       // [PERF] Restore and do a single repaint
       (this.canvas as any).renderOnAddRemove = previousRenderOnAdd ?? true;
       this.canvas.requestRenderAll();
+    }
+  }
+
+  /**
+   * Incremental wall updates for handle dragging while preserving full visuals.
+   * Rebuilds merged component fills/outlines each frame, but only re-renders
+   * walls in affected components instead of rebuilding every wall object.
+   */
+  renderWallsInteractive(walls: Wall[]): void {
+    const perfStart = startDragPerfTimer();
+    const previousRenderOnAdd = (this.canvas as any).renderOnAddRemove;
+    (this.canvas as any).renderOnAddRemove = false;
+    let dirtyCount = 0;
+    let rerenderCount = 0;
+    let removedCount = 0;
+
+    try {
+      const nextWallsById = new Map(walls.map((wall) => [wall.id, wall]));
+      const dirtyWallIds = new Set<string>();
+      const removedWallIds: string[] = [];
+
+      for (const [wallId, existingWall] of this.wallData.entries()) {
+        if (!nextWallsById.has(wallId)) {
+          removedWallIds.push(wallId);
+          dirtyWallIds.add(wallId);
+          existingWall.connectedWalls.forEach((connectedId) => dirtyWallIds.add(connectedId));
+        }
+      }
+
+      for (const wall of walls) {
+        const previousWall = this.wallData.get(wall.id);
+        if (!this.wallNeedsRerender(previousWall, wall)) {
+          continue;
+        }
+        dirtyWallIds.add(wall.id);
+        wall.connectedWalls.forEach((connectedId) => dirtyWallIds.add(connectedId));
+      }
+
+      dirtyCount = dirtyWallIds.size;
+      removedCount = removedWallIds.length;
+      if (removedWallIds.length === 0 && dirtyWallIds.size === 0) {
+        return;
+      }
+
+      const selectedWallIds = Array.from(this.selectedWallIds).filter((wallId) => nextWallsById.has(wallId));
+
+      for (const wallId of removedWallIds) {
+        this.removeWall(wallId);
+      }
+
+      const componentWallsByWallId = this.rebuildMergedComponents(walls);
+      const rerenderWallIds = new Set<string>();
+
+      dirtyWallIds.forEach((wallId) => {
+        const componentWalls = componentWallsByWallId.get(wallId);
+        if (componentWalls && componentWalls.length > 0) {
+          componentWalls.forEach((componentWall) => rerenderWallIds.add(componentWall.id));
+          return;
+        }
+        if (nextWallsById.has(wallId)) {
+          rerenderWallIds.add(wallId);
+        }
+      });
+      rerenderCount = rerenderWallIds.size;
+
+      const changedWallIds = new Set<string>();
+      dirtyWallIds.forEach((wallId) => {
+        if (nextWallsById.has(wallId)) {
+          changedWallIds.add(wallId);
+        }
+      });
+      const joinsMap = refreshPartialWallGeometry(changedWallIds, rerenderWallIds, walls);
+
+      rerenderWallIds.forEach((wallId) => {
+        const wall = nextWallsById.get(wallId);
+        if (!wall) return;
+        const joins = joinsMap.get(wallId) || [];
+        this.renderWall(wall, joins, componentWallsByWallId.get(wallId));
+      });
+
+      this.wallData.clear();
+      walls.forEach((wall) => this.wallData.set(wall.id, wall));
+
+      this.selectedWallIds = new Set(selectedWallIds);
+      if (selectedWallIds.length > 0 || this.selectionComponentObjects.length > 0 || this.controlPointObjects.size > 0) {
+        this.setSelectedWalls(selectedWallIds);
+      } else {
+        this.syncHoverPreview();
+        this.canvas.requestRenderAll();
+      }
+    } finally {
+      endDragPerfTimer('wall.renderInteractive', perfStart, {
+        walls: walls.length,
+        dirty: dirtyCount,
+        rerender: rerenderCount,
+        removed: removedCount,
+      });
+      (this.canvas as any).renderOnAddRemove = previousRenderOnAdd ?? true;
     }
   }
 
@@ -2061,7 +2169,7 @@ export class WallRenderer {
       const dirtyWallIds = new Set<string>();
       const removedWallIds: string[] = [];
 
-      for (const [wallId, existingWall] of this.wallData.entries()) {
+      for (const [wallId] of this.wallData.entries()) {
         if (!nextWallsById.has(wallId)) {
           removedWallIds.push(wallId);
           dirtyWallIds.add(wallId);

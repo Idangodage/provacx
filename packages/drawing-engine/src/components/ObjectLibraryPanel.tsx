@@ -539,13 +539,22 @@ export function ObjectLibraryPanel({
             const isSelected = selectedDefinition?.id === definition.id;
             const isPending = pendingObjectId === definition.id;
             const hasFurnitureRenderer = hasRenderer(definition.renderType);
+            const handleSelect = () => {
+              setSelectedId(definition.id);
+              onStartPlacement(definition);
+            };
             return (
-              <button
+              <div
                 key={definition.id}
-                type="button"
-                onClick={() => {
-                  setSelectedId(definition.id);
-                  onStartPlacement(definition);
+                role="button"
+                tabIndex={0}
+                onClick={handleSelect}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter' && event.key !== ' ') {
+                    return;
+                  }
+                  event.preventDefault();
+                  handleSelect();
                 }}
                 className={`rounded-lg border px-2 py-2 text-left transition-colors ${
                   isPending
@@ -553,7 +562,7 @@ export function ObjectLibraryPanel({
                     : isSelected
                       ? 'border-amber-400 bg-amber-100/70'
                       : 'border-amber-200/80 bg-white hover:bg-amber-50'
-                }`}
+                } cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300`}
               >
                 {hasFurnitureRenderer ? (
                   <div className="relative">
@@ -596,7 +605,7 @@ export function ObjectLibraryPanel({
                 )}
                 <p className="mt-1 truncate text-[11px] font-medium text-slate-800">{definition.name}</p>
                 <p className="text-[10px] text-slate-500">{formatSize(definition)}</p>
-              </button>
+              </div>
             );
           })}
         </div>

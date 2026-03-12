@@ -22,14 +22,14 @@
  * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  */
 
-import type { Point2D, Wall, Line, JoinData } from '../../../types';
+import type { Point2D, Wall, JoinData } from '../../../types';
+
 import {
   normalize,
   perpendicular,
   direction,
   add,
   subtract,
-  scale,
   dot,
   cross,
   distance,
@@ -596,10 +596,51 @@ export function refreshAllWallGeometry(
     }
   }
 
-  // Step 2: Compute joins for ALL walls (joins depend on pairwise relationships)
+  return computeJoinMapForWalls(new Set(allWalls.map((wall) => wall.id)), allWalls);
+}
+
+/**
+ * Refresh offset lines for changed walls and compute joins only for a target subset.
+ * Useful during interactive dragging where only a few walls are re-rendered.
+ */
+export function refreshPartialWallGeometry(
+  changedWallIds: Set<string>,
+  targetWallIds: Set<string>,
+  allWalls: Wall[],
+): Map<string, JoinData[]> {
+  if (targetWallIds.size === 0 || allWalls.length === 0) {
+    return new Map<string, JoinData[]>();
+  }
+
+  const wallsToRefresh = new Set<string>(changedWallIds);
+  for (const wall of allWalls) {
+    if (changedWallIds.has(wall.id)) {
+      for (const connectedId of wall.connectedWalls) {
+        wallsToRefresh.add(connectedId);
+      }
+    }
+  }
+
+  for (const wall of allWalls) {
+    if (wallsToRefresh.has(wall.id)) {
+      refreshOffsetLines(wall);
+    }
+  }
+
+  return computeJoinMapForWalls(targetWallIds, allWalls);
+}
+
+function computeJoinMapForWalls(
+  targetWallIds: Set<string>,
+  allWalls: Wall[],
+): Map<string, JoinData[]> {
   const joinsMap = new Map<string, JoinData[]>();
 
   for (const wall of allWalls) {
+    if (!targetWallIds.has(wall.id)) {
+      continue;
+    }
+
     const matches = findJoinMatchesForWall(wall, allWalls);
 
     // Pick best match per endpoint (highest angle wins)

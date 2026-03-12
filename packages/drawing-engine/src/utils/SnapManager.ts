@@ -28,6 +28,10 @@ export interface SnapContext {
   zoom: number;
   gridSizeMm: number;
   enableGridSnap?: boolean;
+  includeEndpointSnap?: boolean;
+  includeMidpointSnap?: boolean;
+  includeIntersectionSnap?: boolean;
+  includePerpendicularSnap?: boolean;
   snapDistancePx: number;
   excludeWallId?: string;
   referencePoint?: Point2D;
@@ -46,10 +50,18 @@ export class SnapManager {
     if (context.enableGridSnap !== false) {
       candidates.push(...this.getGridSnap(context));
     }
-    candidates.push(...this.getEndpointSnaps(context));
-    candidates.push(...this.getMidpointSnaps(context));
-    candidates.push(...this.getIntersectionSnaps(context));
-    candidates.push(...this.getPerpendicularSnaps(context));
+    if (context.includeEndpointSnap !== false) {
+      candidates.push(...this.getEndpointSnaps(context));
+    }
+    if (context.includeMidpointSnap !== false) {
+      candidates.push(...this.getMidpointSnaps(context));
+    }
+    if (context.includeIntersectionSnap !== false) {
+      candidates.push(...this.getIntersectionSnaps(context));
+    }
+    if (context.includePerpendicularSnap !== false) {
+      candidates.push(...this.getPerpendicularSnaps(context));
+    }
     return candidates.filter((candidate) => candidate.distance <= this.snapDistanceMm(context));
   }
 

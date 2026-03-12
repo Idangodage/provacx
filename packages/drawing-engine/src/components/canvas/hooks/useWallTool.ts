@@ -9,15 +9,14 @@ import type { Canvas as FabricCanvas } from 'fabric';
 import { useRef, useCallback, useEffect } from 'react';
 
 import type { Point2D, Room, Wall, WallSettings, WallDrawingState } from '../../../types';
+import { MM_TO_PX } from '../scale'; // [SNAP WIRE]
+import { buildTemporaryWall } from '../wall/WallJoinNetwork';
 import { WallManager } from '../wall/WallManager';
 import { WallPreview } from '../wall/WallPreview';
 import { WallRenderer } from '../wall/WallRenderer';
-import { buildTemporaryWall } from '../wall/WallJoinNetwork';
+import { WallSnapIndicatorRenderer } from '../wall/WallSnapIndicatorRenderer'; // [SNAP WIRE]
 import { snapWallPoint } from '../wall/WallSnapping';
 import type { EnhancedSnapResult } from '../wall/WallSnapping'; // [SNAP WIRE]
-import { WallSnapIndicatorRenderer } from '../wall/WallSnapIndicatorRenderer'; // [SNAP WIRE]
-import { generateId } from '../../../utils/geometry'; // [SNAP WIRE]
-import { MM_TO_PX } from '../scale'; // [SNAP WIRE]
 
 // =============================================================================
 // Types
@@ -175,6 +174,10 @@ export function useWallTool({
   useEffect(() => {
     if (wallRendererRef.current && canvas) {
       wallRendererRef.current.setDragOptimizedMode(false);
+      if (isHandleDragging) {
+        wallRendererRef.current.renderWallsInteractive(walls);
+        return;
+      }
       wallRendererRef.current.renderAllWalls(walls);
     }
   }, [walls, canvas, isHandleDragging]);
@@ -310,9 +313,6 @@ export function useWallTool({
           if (isTJunction && snapResult.connectedWallId && addWallProp && deleteWallProp) {
             const hostWall = walls.find(w => w.id === snapResult.connectedWallId);
             if (hostWall) {
-              const segmentAId = generateId();
-              const segmentBId = generateId();
-
               // Create segment A (hostWall start → snap point)
               const segmentAParams = {
                 startPoint: { ...hostWall.startPoint },

@@ -8,6 +8,7 @@ import * as fabric from 'fabric';
 
 import type { ArchitecturalObjectDefinition } from '../../../data';
 import type { SymbolInstance2D, Wall, Opening } from '../../../types';
+import { endDragPerfTimer, startDragPerfTimer } from '../perf/dragPerf';
 import { MM_TO_PX } from '../scale';
 import { renderOpeningPreview } from '../wall/OpeningRenderer';
 
@@ -479,6 +480,65 @@ export class ObjectRenderer {
     this.canvas = canvas;
   }
 
+  private cloneInstance(instance: SymbolInstance2D): SymbolInstance2D {
+    return {
+      ...instance,
+      position: { ...instance.position },
+      properties: { ...instance.properties },
+    };
+  }
+
+  private cloneInstances(instances: SymbolInstance2D[]): SymbolInstance2D[] {
+    return instances.map((instance) => this.cloneInstance(instance));
+  }
+
+  private valuesEqual(left: unknown, right: unknown): boolean {
+    if (Object.is(left, right)) return true;
+    if (typeof left !== typeof right) return false;
+
+    if (left === null || right === null) return left === right;
+
+    if (Array.isArray(left) && Array.isArray(right)) {
+      if (left.length !== right.length) return false;
+      for (let index = 0; index < left.length; index += 1) {
+        if (!this.valuesEqual(left[index], right[index])) return false;
+      }
+      return true;
+    }
+
+    if (typeof left === 'object' && typeof right === 'object') {
+      const leftRecord = left as Record<string, unknown>;
+      const rightRecord = right as Record<string, unknown>;
+      const leftKeys = Object.keys(leftRecord);
+      const rightKeys = Object.keys(rightRecord);
+      if (leftKeys.length !== rightKeys.length) return false;
+      for (const key of leftKeys) {
+        if (!(key in rightRecord)) return false;
+        if (!this.valuesEqual(leftRecord[key], rightRecord[key])) return false;
+      }
+      return true;
+    }
+
+    return false;
+  }
+
+  private instanceVisualChanged(previous: SymbolInstance2D, next: SymbolInstance2D): boolean {
+    return (
+      previous.symbolId !== next.symbolId ||
+      previous.scale !== next.scale ||
+      previous.flipped !== next.flipped ||
+      !this.valuesEqual(previous.properties ?? {}, next.properties ?? {})
+    );
+  }
+
+  private instanceTransformChanged(previous: SymbolInstance2D, next: SymbolInstance2D): boolean {
+    return (
+      Math.abs(previous.position.x - next.position.x) > 0.0001 ||
+      Math.abs(previous.position.y - next.position.y) > 0.0001 ||
+      Math.abs(previous.rotation - next.rotation) > 0.0001
+    );
+  }
+
   setDefinitions(definitions: ArchitecturalObjectDefinition[]): void {
     this.definitions = new Map(definitions.map((definition) => [definition.id, definition]));
     if (this.instancesCache.length > 0) {
@@ -637,11 +697,7 @@ export class ObjectRenderer {
   }
 
   renderAll(instances: SymbolInstance2D[]): void {
-    this.instancesCache = instances.map((instance) => ({
-      ...instance,
-      position: { ...instance.position },
-      properties: { ...instance.properties },
-    }));
+    this.instancesCache = this.cloneInstances(instances);
     this.clearAllObjects();
     instances.forEach((instance) => {
       const definition = this.definitions.get(instance.symbolId) ?? definitionFallback(instance.symbolId);
@@ -650,6 +706,110 @@ export class ObjectRenderer {
       this.groups.set(instance.id, group);
     });
     this.canvas.requestRenderAll();
+  }
+
+  renderIncremental(instances: SymbolInstance2D[]): void {
+    const perfStart = startDragPerfTimer();
+    const previousRenderOnAdd = (this.canvas as unknown as { renderOnAddRemove?: boolean }).renderOnAddRemove;
+    (this.canvas as unknown as { renderOnAddRemove?: boolean }).renderOnAddRemove = false;
+    let addedCount = 0;
+    let removedCount = 0;
+    let rebuiltCount = 0;
+    let movedCount = 0;
+    let orderChangedCount = 0;
+
+    try {
+      const previousById = new Map(this.instancesCache.map((instance) => [instance.id, instance]));
+      const nextById = new Map(instances.map((instance) => [instance.id, instance]));
+      let needsRender = false;
+
+      for (const [objectId, group] of this.groups.entries()) {
+        if (nextById.has(objectId)) continue;
+        this.canvas.remove(group);
+        this.groups.delete(objectId);
+        removedCount += 1;
+        needsRender = true;
+      }
+
+      for (const instance of instances) {
+        const previous = previousById.get(instance.id);
+        const existingGroup = this.groups.get(instance.id);
+        const definition = this.definitions.get(instance.symbolId) ?? definitionFallback(instance.symbolId);
+
+        if (!previous || !existingGroup) {
+          if (existingGroup) {
+            this.canvas.remove(existingGroup);
+            rebuiltCount += 1;
+          } else {
+            addedCount += 1;
+          }
+          const group = this.buildGroup(instance, definition);
+          this.canvas.add(group);
+          this.groups.set(instance.id, group);
+          needsRender = true;
+          continue;
+        }
+
+        if (this.instanceVisualChanged(previous, instance)) {
+          this.canvas.remove(existingGroup);
+          const group = this.buildGroup(instance, definition);
+          this.canvas.add(group);
+          this.groups.set(instance.id, group);
+          rebuiltCount += 1;
+          needsRender = true;
+          continue;
+        }
+
+        if (this.instanceTransformChanged(previous, instance)) {
+          existingGroup.set({
+            left: instance.position.x * MM_TO_PX,
+            top: instance.position.y * MM_TO_PX,
+            angle: instance.rotation,
+          });
+          existingGroup.set('dirty', true);
+          movedCount += 1;
+          needsRender = true;
+        }
+      }
+
+      const previousOrder = this.instancesCache.map((instance) => instance.id);
+      const nextOrder = instances.map((instance) => instance.id);
+      let orderChanged = previousOrder.length !== nextOrder.length;
+      if (!orderChanged) {
+        for (let index = 0; index < previousOrder.length; index += 1) {
+          if (previousOrder[index] !== nextOrder[index]) {
+            orderChanged = true;
+            break;
+          }
+        }
+      }
+
+      if (orderChanged) {
+        orderChangedCount = 1;
+        for (const instance of instances) {
+          const group = this.groups.get(instance.id);
+          if (group) {
+            this.canvas.bringObjectToFront(group);
+          }
+        }
+        needsRender = true;
+      }
+
+      this.instancesCache = this.cloneInstances(instances);
+      if (needsRender) {
+        this.canvas.requestRenderAll();
+      }
+    } finally {
+      endDragPerfTimer('object.renderIncremental', perfStart, {
+        symbols: instances.length,
+        added: addedCount,
+        removed: removedCount,
+        rebuilt: rebuiltCount,
+        moved: movedCount,
+        reorder: orderChangedCount,
+      });
+      (this.canvas as unknown as { renderOnAddRemove?: boolean }).renderOnAddRemove = previousRenderOnAdd ?? true;
+    }
   }
 
   setSelectedObjects(ids: string[]): void {
