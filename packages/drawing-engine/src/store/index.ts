@@ -1238,6 +1238,8 @@ function buildAutoWallDimensions(
         precision: settings.precision,
         displayFormat: settings.displayFormat,
         offset,
+        autoBaseOffset: offset,
+        autoOffsetAdjustment: 0,
         linkedWallIds: [wall.id],
         isAssociative: true,
         chainGroupId: chainId,
@@ -1281,6 +1283,8 @@ function buildAutoWallDimensions(
       precision: settings.precision,
       displayFormat: settings.displayFormat,
       offset,
+      autoBaseOffset: offset,
+      autoOffsetAdjustment: 0,
       linkedWallIds: [wall.id],
       isAssociative: true,
       baselineGroupId: 'auto-exterior',
@@ -1331,6 +1335,12 @@ function normalizeDimensionPayload(
     Number.isFinite(payload.textPositionRatio)
       ? Math.min(0.92, Math.max(0.08, payload.textPositionRatio as number))
       : undefined;
+  const safeAutoBaseOffset = Number.isFinite(payload.autoBaseOffset)
+    ? (payload.autoBaseOffset as number)
+    : undefined;
+  const safeAutoOffsetAdjustment = Number.isFinite(payload.autoOffsetAdjustment)
+    ? (payload.autoOffsetAdjustment as number)
+    : undefined;
 
   return {
     ...payload,
@@ -1343,6 +1353,8 @@ function normalizeDimensionPayload(
     offset: Number.isFinite(payload.offset) ? payload.offset : settings.defaultOffset,
     textPositionLocked: payload.textPositionLocked ?? false,
     textPositionRatio: safeTextPositionRatio,
+    autoBaseOffset: safeAutoBaseOffset,
+    autoOffsetAdjustment: safeAutoOffsetAdjustment,
   };
 }
 
@@ -1410,10 +1422,27 @@ function mergeAutoManagedDimensions(
       };
     }
 
+    const nextAutoBaseOffset: number =
+      Number.isFinite(normalized.autoBaseOffset)
+        ? (normalized.autoBaseOffset as number)
+        : (normalized.offset as number);
+    const existingAutoBaseOffset: number =
+      Number.isFinite(existing.autoBaseOffset)
+        ? (existing.autoBaseOffset as number)
+        : nextAutoBaseOffset;
+    const derivedAutoOffsetAdjustment =
+      Number.isFinite(existing.autoOffsetAdjustment)
+        ? (existing.autoOffsetAdjustment as number)
+        : (
+          Number.isFinite(existing.offset)
+            ? (existing.offset as number) - existingAutoBaseOffset
+            : 0
+        );
+
     return {
       ...normalized,
       id: existing.id,
-      offset: Number.isFinite(existing.offset) ? existing.offset : normalized.offset,
+      offset: nextAutoBaseOffset + derivedAutoOffsetAdjustment,
       textPosition: existing.textPositionLocked
         ? { ...existing.textPosition }
         : normalized.textPosition,
@@ -1421,6 +1450,8 @@ function mergeAutoManagedDimensions(
       textPositionRatio: existing.textPositionLocked
         ? existing.textPositionRatio ?? normalized.textPositionRatio
         : normalized.textPositionRatio,
+      autoBaseOffset: nextAutoBaseOffset,
+      autoOffsetAdjustment: derivedAutoOffsetAdjustment,
       text: existing.text,
       isDesignValue: existing.isDesignValue,
       baselineOrigin: existing.baselineOrigin ? { ...existing.baselineOrigin } : normalized.baselineOrigin,
@@ -1890,16 +1921,15 @@ export const useDrawingStore = create<DrawingState>()(
       autoDimensionExteriorWalls: () => {
         const { walls, rooms, dimensionSettings, dimensions } = get();
         const autoLinear = buildAutoWallDimensions(walls, rooms, dimensionSettings);
-        const autoArea = buildRoomAreaDimensions(rooms, dimensionSettings);
         const preserved = dimensions.filter((dimension) => !isAutoManagedDimension(dimension));
         set({
           dimensions: [
             ...preserved,
-            ...mergeAutoManagedDimensions([...autoLinear, ...autoArea], dimensions, dimensionSettings),
+            ...mergeAutoManagedDimensions(autoLinear, dimensions, dimensionSettings),
           ],
         });
         get().saveToHistory('Auto dimension exterior walls');
-        get().setProcessingStatus('Auto dimensions added (walls + room areas).', false);
+        get().setProcessingStatus('Auto dimensions added for walls.', false);
       },
 
       /**
@@ -1911,12 +1941,11 @@ export const useDrawingStore = create<DrawingState>()(
         const { walls, rooms, dimensionSettings, dimensions } = get();
         if (walls.length === 0 && rooms.length === 0) return;
         const autoLinear = buildAutoWallDimensions(walls, rooms, dimensionSettings);
-        const autoArea = buildRoomAreaDimensions(rooms, dimensionSettings);
         const preserved = dimensions.filter((dimension) => !isAutoManagedDimension(dimension));
         set({
           dimensions: [
             ...preserved,
-            ...mergeAutoManagedDimensions([...autoLinear, ...autoArea], dimensions, dimensionSettings),
+            ...mergeAutoManagedDimensions(autoLinear, dimensions, dimensionSettings),
           ],
         });
       },

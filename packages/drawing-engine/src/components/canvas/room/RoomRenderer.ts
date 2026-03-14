@@ -25,12 +25,16 @@ type NamedObject = fabric.Object & {
 
 type RoomGroup = fabric.Group & { roomId?: string; id?: string; name?: string };
 type RoomLabelGroup = fabric.Group & { roomId?: string; id?: string; name?: string };
+type RoomControlGroup = fabric.Group & { roomId?: string; id?: string; name?: string };
 
 const MIN_LABEL_FONT_SIZE = 72;
 const MAX_LABEL_FONT_SIZE = 56;
-const LABEL_OFFSET_Y = 28;
 const LABEL_MIN_SCREEN_SCALE = 1.4;
 const LABEL_MIN_SCENE_SCALE = 1.05;
+const LABEL_SELECTED_MARGIN_X = 18;
+const LABEL_SELECTED_MARGIN_Y = 16;
+const LABEL_SELECTED_INSET = 6;
+const LABEL_FIT_STEPS = 18;
 
 function toCanvasPoint(point: Point2D): Point2D {
   return {
@@ -74,9 +78,12 @@ function polygonArea(vertices: Point2D[]): number {
 export class RoomRenderer {
   private canvas: fabric.Canvas;
   private roomGroups = new Map<string, RoomGroup>();
+  private roomControlGroups = new Map<string, RoomControlGroup>();
   private roomLabelGroups = new Map<string, RoomLabelGroup>();
   private roomData = new Map<string, Room>();
   private selectedRoomIds = new Set<string>();
+  private activeDragRoomId: string | null = null;
+  private persistentControlRoomId: string | null = null;
   private hoveredRoomId: string | null = null;
   private showTemperatureIcons: boolean = true;
   private showVentilationBadges: boolean = true;
@@ -127,12 +134,146 @@ export class RoomRenderer {
     }
   }
 
+  private annotateDecoration(target: fabric.FabricObject, roomId: string, name?: string): void {
+    const typed = target as NamedObject;
+    typed.roomId = roomId;
+    typed.id = roomId;
+    if (name) {
+      typed.name = name;
+    }
+    typed.isRoomControlDecoration = true;
+    typed.selectable = false;
+    typed.evented = false;
+  }
+
+  private sp(screenPx: number): number {
+    return screenPx / this.viewportZoom;
+  }
+
+  private getLabelScale(): number {
+    const safeZoom = Math.max(this.viewportZoom, 0.05);
+    return clamp(LABEL_MIN_SCREEN_SCALE / safeZoom, LABEL_MIN_SCENE_SCALE, 10);
+  }
+
+  private isRoomControlVisible(roomId: string): boolean {
+    return (
+      this.selectedRoomIds.has(roomId) ||
+      this.activeDragRoomId === roomId ||
+      this.persistentControlRoomId === roomId
+    );
+  }
+
+  private updateRoomControlGroupVisibility(group: RoomControlGroup, roomId: string): void {
+    const visible = this.isRoomControlVisible(roomId);
+    group.getObjects().forEach((object) => {
+      object.set('visible', visible);
+      object.setCoords();
+    });
+    group.set('dirty', true);
+    group.setCoords();
+    if (visible) {
+      this.canvas.bringObjectToFront(group);
+    }
+  }
+
+  private doesLabelRectFitRoom(
+    center: Point2D,
+    halfWidth: number,
+    halfHeight: number,
+    room: Room
+  ): boolean {
+    const polygon = room.vertices.map(toCanvasPoint);
+    const testPoints: Point2D[] = [
+      center,
+      { x: center.x - halfWidth, y: center.y - halfHeight },
+      { x: center.x + halfWidth, y: center.y - halfHeight },
+      { x: center.x + halfWidth, y: center.y + halfHeight },
+      { x: center.x - halfWidth, y: center.y + halfHeight },
+    ];
+    return testPoints.every((point) => this.pointInPolygon(point, polygon));
+  }
+
+  private findFittedLabelCenter(
+    room: Room,
+    preferredCenter: Point2D,
+    fallbackCenter: Point2D,
+    halfWidth: number,
+    halfHeight: number
+  ): Point2D {
+    if (this.doesLabelRectFitRoom(preferredCenter, halfWidth, halfHeight, room)) {
+      return preferredCenter;
+    }
+
+    for (let step = 1; step <= LABEL_FIT_STEPS; step += 1) {
+      const t = step / LABEL_FIT_STEPS;
+      const candidate = {
+        x: preferredCenter.x + (fallbackCenter.x - preferredCenter.x) * t,
+        y: preferredCenter.y + (fallbackCenter.y - preferredCenter.y) * t,
+      };
+      if (this.doesLabelRectFitRoom(candidate, halfWidth, halfHeight, room)) {
+        return candidate;
+      }
+    }
+
+    return fallbackCenter;
+  }
+
+  private getRoomLabelCenter(
+    room: Room,
+    baseWidth: number,
+    baseHeight: number,
+    scale: number
+  ): Point2D {
+    const centroidCanvas = toCanvasPoint(room.centroid);
+    const halfWidth = (baseWidth * scale) / 2;
+    const halfHeight = (baseHeight * scale) / 2;
+
+    if (this.activeDragRoomId !== room.id) {
+      return this.findFittedLabelCenter(
+        room,
+        centroidCanvas,
+        centroidCanvas,
+        halfWidth,
+        halfHeight
+      );
+    }
+
+    const bounds = roomBounds(room.vertices);
+    const minX = bounds.minX * MM_TO_PX;
+    const minY = bounds.minY * MM_TO_PX;
+    const maxX = bounds.maxX * MM_TO_PX;
+    const maxY = bounds.maxY * MM_TO_PX;
+    const preferredX = minX + this.sp(LABEL_SELECTED_MARGIN_X) + halfWidth;
+    const preferredY = minY + this.sp(LABEL_SELECTED_MARGIN_Y) + halfHeight;
+    const clampedMinX = minX + halfWidth + this.sp(LABEL_SELECTED_INSET);
+    const clampedMaxX = maxX - halfWidth - this.sp(LABEL_SELECTED_INSET);
+    const clampedMinY = minY + halfHeight + this.sp(LABEL_SELECTED_INSET);
+    const clampedMaxY = maxY - halfHeight - this.sp(LABEL_SELECTED_INSET);
+
+    if (clampedMaxX <= clampedMinX || clampedMaxY <= clampedMinY) {
+      return {
+        x: minX + halfWidth + this.sp(LABEL_SELECTED_MARGIN_X),
+        y: minY + halfHeight + this.sp(LABEL_SELECTED_MARGIN_Y),
+      };
+    }
+
+    const preferredCenter = {
+      x: clamp(preferredX, clampedMinX, clampedMaxX),
+      y: clamp(preferredY, clampedMinY, clampedMaxY),
+    };
+    return this.findFittedLabelCenter(
+      room,
+      preferredCenter,
+      centroidCanvas,
+      halfWidth,
+      halfHeight
+    );
+  }
+
   private createRoomLabelGroup(room: Room): RoomLabelGroup | null {
     if (!room.showLabel) {
       return null;
     }
-
-    const centroidCanvas = toCanvasPoint(room.centroid);
     const areaM2 = room.area / 1_000_000;
     const titleFontSize = clamp(Math.sqrt(Math.max(areaM2, 1)) * 2.2 + 11, MIN_LABEL_FONT_SIZE, MAX_LABEL_FONT_SIZE);
     const metaFontSize = clamp(titleFontSize - 2, MIN_LABEL_FONT_SIZE - 1, MAX_LABEL_FONT_SIZE - 2);
@@ -231,9 +372,12 @@ export class RoomRenderer {
       top: paddingY + titleHeight + lineGap,
     });
 
+    const labelScale = this.getLabelScale();
+    const labelCenter = this.getRoomLabelCenter(room, labelWidth, labelHeight, labelScale);
+
     const labelGroup = new fabric.Group([background, colorDot, title, meta], {
-      left: centroidCanvas.x,
-      top: centroidCanvas.y - LABEL_OFFSET_Y,
+      left: labelCenter.x,
+      top: labelCenter.y,
       originX: 'center',
       originY: 'center',
       selectable: false,
@@ -249,12 +393,20 @@ export class RoomRenderer {
   }
 
   private applyZoomScaleToLabelGroup(group: RoomLabelGroup): void {
-    const safeZoom = Math.max(this.viewportZoom, 0.05);
-    const scale = clamp(LABEL_MIN_SCREEN_SCALE / safeZoom, LABEL_MIN_SCENE_SCALE, 10);
+    const scale = this.getLabelScale();
+    const room = group.roomId ? this.roomData.get(group.roomId) : null;
+    if (room) {
+      const center = this.getRoomLabelCenter(room, group.width ?? 0, group.height ?? 0, scale);
+      group.set({
+        left: center.x,
+        top: center.y,
+      });
+    }
     group.set({
       scaleX: scale,
       scaleY: scale,
     });
+    group.setCoords();
   }
 
   private applyLabelZoomScaling(): void {
@@ -298,26 +450,7 @@ export class RoomRenderer {
     });
     this.annotate(hoverOutline, room.id, 'hoverOutline');
 
-    const labelText = `${room.name} - ${(room.area / 1_000_000).toFixed(1)}m²`;
     const centroidCanvas = toCanvasPoint(room.centroid);
-    const bounds = roomBounds(room.vertices);
-    const boundsCenter = {
-      x: (bounds.minX + bounds.maxX) / 2,
-      y: (bounds.minY + bounds.maxY) / 2,
-    };
-    const label = new fabric.Text(labelText, {
-      left: centroidCanvas.x,
-      top: centroidCanvas.y - 18,
-      fontSize: 12,
-      fill: '#1F2937',
-      fontFamily: 'Arial',
-      originX: 'center',
-      originY: 'center',
-      selectable: false,
-      evented: false,
-      visible: room.showLabel,
-    });
-    this.annotate(label, room.id, 'roomLabel');
 
     const hvacIndicators: fabric.FabricObject[] = [];
     if (this.showTemperatureIcons) {
@@ -391,13 +524,49 @@ export class RoomRenderer {
       hvacIndicators.push(ventilationBadge, ventilationText);
     }
 
-    const centerHandle = new fabric.Circle({
+    const group = new fabric.Group(
+      [
+        fill,
+        selectionOutline,
+        hoverOutline,
+        ...hvacIndicators,
+      ],
+      {
+        selectable: true,
+        evented: true,
+        subTargetCheck: true,
+        hasControls: false,
+        hasBorders: false,
+        lockMovementX: true,
+        lockMovementY: true,
+        objectCaching: true,
+      }
+    ) as RoomGroup;
+
+    group.id = room.id;
+    group.roomId = room.id;
+    group.name = `room-${room.id}`;
+    return group;
+  }
+
+  private createRoomControlGroup(room: Room): RoomControlGroup {
+    const centroidCanvas = toCanvasPoint(room.centroid);
+    const controlsVisible = this.isRoomControlVisible(room.id);
+    const bounds = roomBounds(room.vertices);
+    const boundsCenter = {
+      x: (bounds.minX + bounds.maxX) / 2,
+      y: (bounds.minY + bounds.maxY) / 2,
+    };
+    const boundsTopCanvas = bounds.minY * MM_TO_PX;
+    const centerHandleSize = this.sp(controlsVisible ? 24 : 22);
+    const centerHandleInnerSize = Math.max(centerHandleSize - this.sp(4), this.sp(10));
+    const centerHandleHit = new fabric.Circle({
       left: centroidCanvas.x,
       top: centroidCanvas.y,
-      radius: this.selectedRoomIds.has(room.id) ? 9 : 8,
-      fill: '#F8FAFC',
-      stroke: this.selectedRoomIds.has(room.id) ? '#1D4ED8' : '#334155',
-      strokeWidth: 2.5,
+      radius: this.sp(18),
+      fill: 'rgba(37,99,235,0.001)',
+      stroke: 'rgba(37,99,235,0.001)',
+      strokeWidth: 1,
       originX: 'center',
       originY: 'center',
       selectable: true,
@@ -405,10 +574,190 @@ export class RoomRenderer {
       hoverCursor: 'move',
       hasControls: false,
       hasBorders: false,
+      visible: controlsVisible,
+    });
+    this.annotate(centerHandleHit, room.id, 'room-center-handle-hit');
+    (centerHandleHit as NamedObject).controlType = 'room-center-handle';
+    (centerHandleHit as NamedObject).isRoomControl = true;
+    const centerHandle = new fabric.Rect({
+      left: centroidCanvas.x,
+      top: centroidCanvas.y,
+      width: centerHandleSize,
+      height: centerHandleSize,
+      rx: this.sp(4),
+      ry: this.sp(4),
+      fill: '#FFFFFF',
+      stroke: '#2563EB',
+      strokeWidth: this.sp(2.2),
+      originX: 'center',
+      originY: 'center',
+      selectable: true,
+      evented: true,
+      hoverCursor: 'move',
+      hasControls: false,
+      hasBorders: false,
+      visible: controlsVisible,
+      shadow: new fabric.Shadow({
+        color: 'rgba(37, 99, 235, 0.2)',
+        blur: this.sp(8),
+        offsetX: 0,
+        offsetY: this.sp(1),
+      }),
     });
     this.annotate(centerHandle, room.id, 'room-center-handle');
     (centerHandle as NamedObject).controlType = 'room-center-handle';
     (centerHandle as NamedObject).isRoomControl = true;
+
+    const centerHandleInner = new fabric.Rect({
+      left: centroidCanvas.x,
+      top: centroidCanvas.y,
+      width: centerHandleInnerSize,
+      height: centerHandleInnerSize,
+      rx: this.sp(2.8),
+      ry: this.sp(2.8),
+      fill: '#EFF6FF',
+      stroke: '#BFDBFE',
+      strokeWidth: this.sp(1),
+      originX: 'center',
+      originY: 'center',
+      visible: controlsVisible,
+    });
+    this.annotateDecoration(centerHandleInner, room.id, 'room-center-handle-inner');
+
+    const moveAxisHalf = this.sp(4.8);
+    const moveHeadLength = this.sp(3.6);
+    const moveHeadHalfWidth = this.sp(2.5);
+    const moveGlyphH = new fabric.Line(
+      [
+        centroidCanvas.x - moveAxisHalf,
+        centroidCanvas.y,
+        centroidCanvas.x + moveAxisHalf,
+        centroidCanvas.y,
+      ],
+      {
+        stroke: '#2563EB',
+        strokeWidth: this.sp(1.5),
+        visible: controlsVisible,
+      }
+    );
+    this.annotateDecoration(moveGlyphH, room.id, 'room-center-glyph-h');
+    const moveGlyphV = new fabric.Line(
+      [
+        centroidCanvas.x,
+        centroidCanvas.y - moveAxisHalf,
+        centroidCanvas.x,
+        centroidCanvas.y + moveAxisHalf,
+      ],
+      {
+        stroke: '#2563EB',
+        strokeWidth: this.sp(1.5),
+        visible: controlsVisible,
+      }
+    );
+    this.annotateDecoration(moveGlyphV, room.id, 'room-center-glyph-v');
+    const createMoveHead = (dx: number, dy: number) =>
+      new fabric.Polygon(
+        [
+          {
+            x: centroidCanvas.x + dx * (moveAxisHalf + moveHeadLength),
+            y: centroidCanvas.y + dy * (moveAxisHalf + moveHeadLength),
+          },
+          {
+            x: centroidCanvas.x + dx * moveAxisHalf - dy * moveHeadHalfWidth,
+            y: centroidCanvas.y + dy * moveAxisHalf + dx * moveHeadHalfWidth,
+          },
+          {
+            x: centroidCanvas.x + dx * moveAxisHalf + dy * moveHeadHalfWidth,
+            y: centroidCanvas.y + dy * moveAxisHalf - dx * moveHeadHalfWidth,
+          },
+        ],
+        {
+          fill: '#2563EB',
+          stroke: '#2563EB',
+          strokeWidth: this.sp(0.8),
+          visible: controlsVisible,
+        }
+      );
+    const moveHeadRight = createMoveHead(1, 0);
+    const moveHeadLeft = createMoveHead(-1, 0);
+    const moveHeadDown = createMoveHead(0, 1);
+    const moveHeadUp = createMoveHead(0, -1);
+    this.annotateDecoration(moveHeadRight, room.id, 'room-center-glyph-right');
+    this.annotateDecoration(moveHeadLeft, room.id, 'room-center-glyph-left');
+    this.annotateDecoration(moveHeadDown, room.id, 'room-center-glyph-down');
+    this.annotateDecoration(moveHeadUp, room.id, 'room-center-glyph-up');
+
+    const rotationPoint = {
+      x: boundsCenter.x * MM_TO_PX,
+      y: boundsTopCanvas - this.sp(40),
+    };
+    const rotationHandleHit = new fabric.Circle({
+      left: rotationPoint.x,
+      top: rotationPoint.y,
+      radius: this.sp(18),
+      fill: 'rgba(21,128,61,0.001)',
+      stroke: 'rgba(21,128,61,0.001)',
+      strokeWidth: 1,
+      originX: 'center',
+      originY: 'center',
+      selectable: true,
+      evented: true,
+      hoverCursor: 'alias',
+      hasControls: false,
+      hasBorders: false,
+      visible: controlsVisible,
+    });
+    this.annotate(rotationHandleHit, room.id, 'room-rotation-handle-hit');
+    (rotationHandleHit as NamedObject).controlType = 'room-rotation-handle';
+    (rotationHandleHit as NamedObject).isRoomControl = true;
+    const rotationStem = new fabric.Line(
+      [
+        centroidCanvas.x,
+        centroidCanvas.y,
+        rotationPoint.x,
+        rotationPoint.y,
+      ],
+      {
+        stroke: '#15803D',
+        strokeWidth: this.sp(1.3),
+        strokeDashArray: [this.sp(4), this.sp(3)],
+        visible: controlsVisible,
+      }
+    );
+    this.annotateDecoration(rotationStem, room.id, 'room-rotation-handle-stem');
+    const rotationHandle = new fabric.Circle({
+      left: rotationPoint.x,
+      top: rotationPoint.y,
+      radius: this.sp(8),
+      fill: '#FFFFFF',
+      stroke: '#15803D',
+      strokeWidth: this.sp(2.2),
+      originX: 'center',
+      originY: 'center',
+      selectable: true,
+      evented: true,
+      hoverCursor: 'alias',
+      hasControls: false,
+      hasBorders: false,
+      visible: controlsVisible,
+    });
+    this.annotate(rotationHandle, room.id, 'room-rotation-handle');
+    (rotationHandle as NamedObject).controlType = 'room-rotation-handle';
+    (rotationHandle as NamedObject).isRoomControl = true;
+    const rotationLabel = new fabric.Text('R', {
+      left: rotationPoint.x,
+      top: rotationPoint.y,
+      fontSize: this.sp(10),
+      fontWeight: 'bold',
+      fill: '#166534',
+      fontFamily: 'Arial',
+      originX: 'center',
+      originY: 'center',
+      selectable: false,
+      evented: false,
+      visible: controlsVisible,
+    });
+    this.annotateDecoration(rotationLabel, room.id, 'room-rotation-handle-label');
 
     const cornerHandles = room.vertices.map((vertex, index) => {
       const cornerPoint = toCanvasPoint(vertex);
@@ -425,7 +774,7 @@ export class RoomRenderer {
         selectable: true,
         evented: true,
         hoverCursor: 'move',
-        visible: this.selectedRoomIds.has(room.id),
+        visible: controlsVisible,
         hasControls: false,
         hasBorders: false,
       });
@@ -450,9 +799,9 @@ export class RoomRenderer {
         originY: 'center',
         selectable: false,
         evented: false,
-        visible: this.selectedRoomIds.has(room.id),
+        visible: controlsVisible,
       });
-      this.annotate(edgeHandle, room.id, 'room-edge-mid-handle');
+      this.annotateDecoration(edgeHandle, room.id, 'room-edge-mid-handle');
       return edgeHandle;
     });
 
@@ -486,7 +835,7 @@ export class RoomRenderer {
         selectable: true,
         evented: true,
         hoverCursor: spec.cursor,
-        visible: this.selectedRoomIds.has(room.id),
+        visible: controlsVisible,
         hasControls: false,
         hasBorders: false,
       });
@@ -497,43 +846,24 @@ export class RoomRenderer {
       return scaleHandle;
     });
 
-    const crossHorizontal = new fabric.Line(
-      [centroidCanvas.x - 5, centroidCanvas.y, centroidCanvas.x + 5, centroidCanvas.y],
-      {
-        stroke: '#334155',
-        strokeWidth: 1.8,
-        selectable: false,
-        evented: false,
-      }
-    );
-    this.annotate(crossHorizontal, room.id, 'room-center-cross-h');
-    (crossHorizontal as NamedObject).isRoomControlDecoration = true;
-
-    const crossVertical = new fabric.Line(
-      [centroidCanvas.x, centroidCanvas.y - 5, centroidCanvas.x, centroidCanvas.y + 5],
-      {
-        stroke: '#334155',
-        strokeWidth: 1.8,
-        selectable: false,
-        evented: false,
-      }
-    );
-    this.annotate(crossVertical, room.id, 'room-center-cross-v');
-    (crossVertical as NamedObject).isRoomControlDecoration = true;
-
     const group = new fabric.Group(
       [
-        fill,
-        selectionOutline,
-        hoverOutline,
-        label,
-        ...hvacIndicators,
         ...edgeMidHandles,
         ...cornerHandles,
         ...scaleHandles,
+        rotationHandleHit,
+        rotationStem,
+        rotationHandle,
+        rotationLabel,
+        centerHandleHit,
         centerHandle,
-        crossHorizontal,
-        crossVertical,
+        centerHandleInner,
+        moveGlyphH,
+        moveGlyphV,
+        moveHeadRight,
+        moveHeadLeft,
+        moveHeadDown,
+        moveHeadUp,
       ],
       {
         selectable: true,
@@ -545,11 +875,11 @@ export class RoomRenderer {
         lockMovementY: true,
         objectCaching: true,
       }
-    ) as RoomGroup;
+    ) as RoomControlGroup;
 
     group.id = room.id;
     group.roomId = room.id;
-    group.name = `room-${room.id}`;
+    group.name = `room-controls-${room.id}`;
     return group;
   }
 
@@ -561,6 +891,11 @@ export class RoomRenderer {
     this.roomGroups.set(room.id, group);
     this.canvas.add(group);
     this.canvas.sendObjectToBack(group);
+
+    const controlGroup = this.createRoomControlGroup(room);
+    this.roomControlGroups.set(room.id, controlGroup);
+    this.canvas.add(controlGroup);
+    this.canvas.bringObjectToFront(controlGroup);
 
     const labelGroup = this.createRoomLabelGroup(room);
     if (labelGroup) {
@@ -574,10 +909,14 @@ export class RoomRenderer {
     this.roomGroups.forEach((group) => {
       this.canvas.remove(group);
     });
+    this.roomControlGroups.forEach((group) => {
+      this.canvas.remove(group);
+    });
     this.roomLabelGroups.forEach((group) => {
       this.canvas.remove(group);
     });
     this.roomGroups.clear();
+    this.roomControlGroups.clear();
     this.roomLabelGroups.clear();
     this.roomData.clear();
 
@@ -608,29 +947,47 @@ export class RoomRenderer {
         );
       }
 
-      const handle = group
-        .getObjects()
-        .find((object) => (object as NamedObject).name === 'room-center-handle');
-      if (handle) {
-        const typed = handle as fabric.Circle;
-        typed.set({
-          radius: selected ? 9 : 8,
-          stroke: selected ? '#1D4ED8' : '#334155',
-        });
-      }
-
-      group.getObjects().forEach((object) => {
-        const typed = object as NamedObject;
-        if (
-          typed.name === 'room-corner-handle' ||
-          typed.name === 'room-scale-handle' ||
-          typed.name === 'room-edge-mid-handle'
-        ) {
-          object.set('visible', selected);
-        }
-      });
       group.set('dirty', true);
     });
+    this.roomControlGroups.forEach((group, roomId) => {
+      this.updateRoomControlGroupVisibility(group, roomId);
+    });
+    this.roomLabelGroups.forEach((group) => {
+      this.applyZoomScaleToLabelGroup(group);
+      group.set('dirty', true);
+    });
+    this.canvas.requestRenderAll();
+  }
+
+  setActiveDragRoom(roomId: string | null): void {
+    this.activeDragRoomId = roomId;
+    this.roomControlGroups.forEach((group, currentRoomId) => {
+      this.updateRoomControlGroupVisibility(group, currentRoomId);
+    });
+    if (roomId) {
+      const labelGroup = this.roomLabelGroups.get(roomId);
+      if (labelGroup) {
+        this.canvas.bringObjectToFront(labelGroup);
+      }
+    }
+    this.canvas.requestRenderAll();
+  }
+
+  setPersistentControlRoom(roomId: string | null): void {
+    this.persistentControlRoomId = roomId;
+    this.roomControlGroups.forEach((group, currentRoomId) => {
+      this.updateRoomControlGroupVisibility(group, currentRoomId);
+    });
+    if (roomId) {
+      const controlGroup = this.roomControlGroups.get(roomId);
+      if (controlGroup) {
+        this.canvas.bringObjectToFront(controlGroup);
+      }
+      const labelGroup = this.roomLabelGroups.get(roomId);
+      if (labelGroup) {
+        this.canvas.bringObjectToFront(labelGroup);
+      }
+    }
     this.canvas.requestRenderAll();
   }
 
@@ -678,6 +1035,11 @@ export class RoomRenderer {
       this.canvas.remove(group);
       this.roomGroups.delete(roomId);
     }
+    const controlGroup = this.roomControlGroups.get(roomId);
+    if (controlGroup) {
+      this.canvas.remove(controlGroup);
+      this.roomControlGroups.delete(roomId);
+    }
     const labelGroup = this.roomLabelGroups.get(roomId);
     if (labelGroup) {
       this.canvas.remove(labelGroup);
@@ -692,11 +1054,15 @@ export class RoomRenderer {
 
   clearAllRooms(): void {
     this.roomGroups.forEach((group) => this.canvas.remove(group));
+    this.roomControlGroups.forEach((group) => this.canvas.remove(group));
     this.roomLabelGroups.forEach((group) => this.canvas.remove(group));
     this.roomGroups.clear();
+    this.roomControlGroups.clear();
     this.roomLabelGroups.clear();
     this.roomData.clear();
     this.selectedRoomIds.clear();
+    this.activeDragRoomId = null;
+    this.persistentControlRoomId = null;
     this.hoveredRoomId = null;
     this.canvas.requestRenderAll();
   }

@@ -264,6 +264,8 @@ export function DrawingCanvas({
     const [placementValid, setPlacementValid] = useState(true);
     const [openingInteractionActive, setOpeningInteractionActive] = useState(false);
     const [isHandleDragging, setIsHandleDragging] = useState(false);
+    const [activeRoomDragId, setActiveRoomDragId] = useState<string | null>(null);
+    const [persistentRoomControlId, setPersistentRoomControlId] = useState<string | null>(null);
     const [canvasState, setCanvasState] = useState<CanvasState>({
         isPanning: false,
         lastPanPoint: null,
@@ -1949,6 +1951,7 @@ export function DrawingCanvas({
         saveToHistory,
         setProcessingStatus,
         onDragStateChange: setIsHandleDragging,
+        onRoomDragStateChange: setActiveRoomDragId,
         originOffset,
     });
     const {
@@ -2067,6 +2070,7 @@ export function DrawingCanvas({
     });
 
     const restackInteractiveOverlays = useCallback((canvas: fabric.Canvas) => {
+        const selectModeOverlays: fabric.Object[] = [];
         const roomControlDecorations: fabric.Object[] = [];
         const roomControls: fabric.Object[] = [];
         const dimensionControlDecorations: fabric.Object[] = [];
@@ -2084,8 +2088,13 @@ export function DrawingCanvas({
                 isDimensionControl?: boolean;
                 isDimensionControlDecoration?: boolean;
                 isOpeningResizeHandle?: boolean;
+                isSelectModeOverlay?: boolean;
             };
 
+            if (typed.isSelectModeOverlay) {
+                selectModeOverlays.push(obj);
+                return;
+            }
             if (typed.isRoomControlDecoration) {
                 roomControlDecorations.push(obj);
                 return;
@@ -2116,6 +2125,7 @@ export function DrawingCanvas({
         });
 
         [
+            selectModeOverlays,
             roomControlDecorations,
             roomControls,
             dimensionControlDecorations,
@@ -2257,8 +2267,39 @@ export function DrawingCanvas({
             return true;
         }
         if (tool === 'section-line' && sectionLineDrawingState.isDrawing) return true;
+        if (selectedIds.length > 0 || persistentRoomControlId) {
+            const canvas = fabricRef.current;
+            if (canvas) {
+                canvas.discardActiveObject();
+                hideActiveSelectionChrome(canvas);
+                canvas.requestRenderAll();
+            }
+            setSelectedIds([]);
+            setHoveredElement(null);
+            wallRenderer?.setHoveredWall(null);
+            roomRendererRef.current?.setHoveredRoom(null);
+            roomRendererRef.current?.setSelectedRooms([]);
+            roomRendererRef.current?.setActiveDragRoom(null);
+            roomRendererRef.current?.setPersistentControlRoom(null);
+            setActiveRoomDragId(null);
+            setPersistentRoomControlId(null);
+            return true;
+        }
         return false;
-    }, [pendingPlacementDefinition, tool, isWallDrawing, isRoomDrawing, cancelRoomCreation, sectionLineDrawingState.isDrawing, wallRenderer]);
+    }, [
+        pendingPlacementDefinition,
+        tool,
+        isWallDrawing,
+        isRoomDrawing,
+        cancelRoomCreation,
+        sectionLineDrawingState.isDrawing,
+        selectedIds.length,
+        persistentRoomControlId,
+        fabricRef,
+        setSelectedIds,
+        setHoveredElement,
+        wallRenderer,
+    ]);
 
     // Keyboard handling
     useCanvasKeyboard({
@@ -2599,8 +2640,12 @@ export function DrawingCanvas({
     useEffect(() => {
         roomRendererRef.current?.renderAllRooms(rooms);
         // Rebuild dimensions after room re-renders, then restore edit-handle priority.
+        if (isHandleDragging) {
+            scheduleDimensionLayerRefresh();
+            return;
+        }
         refreshDimensionLayer();
-    }, [rooms, fabricCanvas, refreshDimensionLayer]);
+    }, [rooms, fabricCanvas, refreshDimensionLayer, isHandleDragging, scheduleDimensionLayerRefresh]);
 
     useEffect(() => {
         return () => {
@@ -2627,14 +2672,45 @@ export function DrawingCanvas({
     }, [wallSettings.showRoomTemperatureIcons, wallSettings.showRoomVentilationBadges, fabricCanvas]);
 
     useEffect(() => {
+        if (isHandleDragging) {
+            scheduleDimensionLayerRefresh();
+            return;
+        }
         refreshDimensionLayer();
-    }, [refreshDimensionLayer, fabricCanvas]);
+    }, [refreshDimensionLayer, scheduleDimensionLayerRefresh, fabricCanvas, isHandleDragging]);
 
     useEffect(() => {
         const roomIdSet = new Set(rooms.map((room) => room.id));
         const selectedRoomIds = selectedIds.filter((id) => roomIdSet.has(id));
         roomRendererRef.current?.setSelectedRooms(selectedRoomIds);
+        if (selectedRoomIds.length > 0) {
+            setPersistentRoomControlId(selectedRoomIds[0] ?? null);
+        }
     }, [rooms, selectedIds]);
+
+    useEffect(() => {
+        const roomIdSet = new Set(rooms.map((room) => room.id));
+        const resolvedRoomDragId =
+            activeRoomDragId && roomIdSet.has(activeRoomDragId)
+                ? activeRoomDragId
+                : null;
+        roomRendererRef.current?.setActiveDragRoom(resolvedRoomDragId);
+        if (resolvedRoomDragId !== activeRoomDragId) {
+            setActiveRoomDragId(resolvedRoomDragId);
+        }
+    }, [rooms, activeRoomDragId]);
+
+    useEffect(() => {
+        const roomIdSet = new Set(rooms.map((room) => room.id));
+        const resolvedPersistentRoomControlId =
+            persistentRoomControlId && roomIdSet.has(persistentRoomControlId)
+                ? persistentRoomControlId
+                : null;
+        roomRendererRef.current?.setPersistentControlRoom(resolvedPersistentRoomControlId);
+        if (resolvedPersistentRoomControlId !== persistentRoomControlId) {
+            setPersistentRoomControlId(resolvedPersistentRoomControlId);
+        }
+    }, [rooms, persistentRoomControlId]);
 
     useEffect(() => {
         const dimensionIdSet = new Set(dimensions.map((dimension) => dimension.id));
@@ -2676,13 +2752,27 @@ export function DrawingCanvas({
         });
         wallRenderer.setOpeningSymbolInstances(openingSymbols);
         if (isHandleDragging) {
+            wallRenderer.renderWallsInteractive(wallsRef.current);
+            if (fabricRef.current) {
+                restackInteractiveOverlays(fabricRef.current);
+            }
+            scheduleDimensionLayerRefresh();
             return;
         }
         // Keep wall visuals identical while dragging and idle.
         wallRenderer.renderAllWalls(wallsRef.current);
         // Rebuild dimensions after wall re-renders, then restore edit-handle priority.
         refreshDimensionLayer();
-    }, [wallRenderer, doorWindowSymbolsSignature, objectDefinitionsById, refreshDimensionLayer, isHandleDragging]);
+    }, [
+        wallRenderer,
+        walls,
+        doorWindowSymbolsSignature,
+        objectDefinitionsById,
+        refreshDimensionLayer,
+        scheduleDimensionLayerRefresh,
+        restackInteractiveOverlays,
+        isHandleDragging,
+    ]);
 
     useEffect(() => {
         if (isHandleDragging) return;
@@ -3848,6 +3938,7 @@ export function DrawingCanvas({
             }
             const openingInteraction = openingPointerInteractionRef.current;
             if (openingInteraction) {
+                setPersistentRoomControlId(null);
                 setSelectedIds([openingInteraction.openingId]);
                 return;
             }
@@ -3857,6 +3948,7 @@ export function DrawingCanvas({
                 .map((target) => resolveObjectIdFromTarget(target))
                 .filter((id): id is string => Boolean(id));
             if (objectIds.length > 0) {
+                setPersistentRoomControlId(null);
                 setSelectedIds(Array.from(new Set(objectIds)));
                 return;
             }
@@ -3865,11 +3957,14 @@ export function DrawingCanvas({
                 .filter((id): id is string => Boolean(id));
             if (roomIds.length > 0) {
                 const perimeterWallIds = perimeterWallIdsForRooms(roomIds);
-                if (perimeterWallIds.length > 0) {
-                    setSelectedIds(perimeterWallIds);
+                const roomSelectionIds = Array.from(new Set([...roomIds, ...perimeterWallIds]));
+                if (roomSelectionIds.length > 0) {
+                    setPersistentRoomControlId(roomIds[0] ?? null);
+                    setSelectedIds(roomSelectionIds);
                     return;
                 }
             }
+            setPersistentRoomControlId(null);
             updateSelectionFromTargets(targets);
         };
 
@@ -3886,6 +3981,7 @@ export function DrawingCanvas({
             }
             const openingInteraction = openingPointerInteractionRef.current;
             if (openingInteraction) {
+                setPersistentRoomControlId(null);
                 setSelectedIds([openingInteraction.openingId]);
                 return;
             }
@@ -3895,6 +3991,7 @@ export function DrawingCanvas({
                 .map((target) => resolveObjectIdFromTarget(target))
                 .filter((id): id is string => Boolean(id));
             if (objectIds.length > 0) {
+                setPersistentRoomControlId(null);
                 setSelectedIds(Array.from(new Set(objectIds)));
                 return;
             }
@@ -3903,11 +4000,14 @@ export function DrawingCanvas({
                 .filter((id): id is string => Boolean(id));
             if (roomIds.length > 0) {
                 const perimeterWallIds = perimeterWallIdsForRooms(roomIds);
-                if (perimeterWallIds.length > 0) {
-                    setSelectedIds(perimeterWallIds);
+                const roomSelectionIds = Array.from(new Set([...roomIds, ...perimeterWallIds]));
+                if (roomSelectionIds.length > 0) {
+                    setPersistentRoomControlId(roomIds[0] ?? null);
+                    setSelectedIds(roomSelectionIds);
                     return;
                 }
             }
+            setPersistentRoomControlId(null);
             updateSelectionFromTargets(targets);
         };
 
@@ -3923,10 +4023,12 @@ export function DrawingCanvas({
             applyMarqueeFilterRef.current = false;
             const openingInteraction = openingPointerInteractionRef.current;
             if (openingInteraction) {
+                setPersistentRoomControlId(null);
                 setSelectedIds([openingInteraction.openingId]);
                 return;
             }
             if (!isWallHandleDraggingRef.current) {
+                setPersistentRoomControlId(null);
                 setSelectedIds([]);
             }
         };
@@ -3991,6 +4093,7 @@ export function DrawingCanvas({
                 null;
             if (openingResizeHandle) {
                 suppressNextFabricSelectionSync();
+                setPersistentRoomControlId(null);
                 marqueeSelectionRef.current = { active: false, start: null, current: null, mode: 'window' };
                 lastMarqueeSelectionRef.current = { active: false, start: null, current: null, mode: 'window' };
                 applyMarqueeFilterRef.current = false;
@@ -4029,6 +4132,7 @@ export function DrawingCanvas({
                 ?? null;
             if (openingVisualId) {
                 suppressNextFabricSelectionSync();
+                setPersistentRoomControlId(null);
                 marqueeSelectionRef.current = { active: false, start: null, current: null, mode: 'window' };
                 lastMarqueeSelectionRef.current = { active: false, start: null, current: null, mode: 'window' };
                 applyMarqueeFilterRef.current = false;
@@ -4089,6 +4193,7 @@ export function DrawingCanvas({
                 resolveSectionLineIdFromTarget(hitTarget);
             if (sectionLineId) {
                 suppressNextFabricSelectionSync();
+                setPersistentRoomControlId(null);
                 if (addToSelection) {
                     toggleSelectedId(sectionLineId);
                 } else {
@@ -4105,6 +4210,7 @@ export function DrawingCanvas({
                 resolveObjectIdFromTarget(hitTarget);
             if (objectId) {
                 suppressNextFabricSelectionSync();
+                setPersistentRoomControlId(null);
                 if (addToSelection) {
                     toggleSelectedId(objectId);
                 } else {
@@ -4159,11 +4265,49 @@ export function DrawingCanvas({
             const isRoomAreaClick = roomInteriorDistance > roomInteriorThreshold;
             if (prioritizedWallOrRoomTarget) {
                 suppressNextFabricSelectionSync();
+                const prioritizedMeta = getTargetMeta(prioritizedWallOrRoomTarget);
+                if (prioritizedMeta.roomId) {
+                    setPersistentRoomControlId(prioritizedMeta.roomId);
+                } else if (!prioritizedMeta.isRoomControl) {
+                    setPersistentRoomControlId(null);
+                }
                 handleSelectMouseDown(prioritizedWallOrRoomTarget, wallPointMm, addToSelection);
                 return;
             }
+            if (
+                clickedRoomId &&
+                isRoomAreaClick &&
+                !targetMeta.isRoomControl &&
+                !targetMeta.isWallControl &&
+                !targetMeta.wallId
+            ) {
+                const perimeterWallIds = perimeterWallIdsForRooms([clickedRoomId]);
+                const roomSelectionIds = [clickedRoomId, ...perimeterWallIds];
+                if (roomSelectionIds.length > 0) {
+                    suppressNextFabricSelectionSync();
+                    setPersistentRoomControlId(clickedRoomId);
+                    wallRenderer?.setHoveredWall(null);
+                    setHoveredElement(clickedRoomId);
+
+                    const roomAlreadySelected = selectedIds.includes(clickedRoomId);
+                    if (roomAlreadySelected && !addToSelection) {
+                        const syntheticRoomTarget = {
+                            roomId: clickedRoomId,
+                            id: clickedRoomId,
+                            name: `room-${clickedRoomId}`,
+                        } as unknown as fabric.Object;
+                        handleSelectMouseDown(syntheticRoomTarget, wallPointMm, false);
+                    } else if (addToSelection) {
+                        toggleSelectedIds(roomSelectionIds);
+                    } else {
+                        setSelectedIds(roomSelectionIds);
+                    }
+                    return;
+                }
+            }
             if (clickedWallId) {
                 suppressNextFabricSelectionSync();
+                setPersistentRoomControlId(null);
                 if (addToSelection) {
                     canvas.discardActiveObject();
                     toggleSelectedId(clickedWallId);
@@ -4181,28 +4325,10 @@ export function DrawingCanvas({
             );
             if (dimensionHandled) {
                 suppressNextFabricSelectionSync();
+                setPersistentRoomControlId(null);
                 return;
             }
-            if (
-                clickedRoomId &&
-                isRoomAreaClick &&
-                !targetMeta.isRoomControl &&
-                !targetMeta.isWallControl &&
-                !targetMeta.wallId
-            ) {
-                const perimeterWallIds = perimeterWallIdsForRooms([clickedRoomId]);
-                if (perimeterWallIds.length > 0) {
-                    suppressNextFabricSelectionSync();
-                    if (addToSelection) {
-                        toggleSelectedIds(perimeterWallIds);
-                    } else {
-                        setSelectedIds(perimeterWallIds);
-                    }
-                    wallRenderer?.setHoveredWall(null);
-                    setHoveredElement(null);
-                    return;
-                }
-            }
+            setPersistentRoomControlId(null);
             handleSelectMouseDown(prioritizedWallOrRoomTarget ?? hitTarget, wallPointMm, addToSelection);
         };
 

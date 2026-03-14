@@ -49,6 +49,10 @@ const ENDPOINT_DEFAULT_SNAP_DISTANCE_FACTOR = 0.2;
 const ENDPOINT_DEFAULT_SNAP_SEARCH_RADIUS_FACTOR = 1.1;
 const ENDPOINT_DEFAULT_SNAP_RELEASE_FACTOR = 0.55;
 const ENDPOINT_MIN_SNAP_DISTANCE_PX = 5;
+const ROOM_ROTATION_MAJOR_ANGLES_DEG = [0, 45, 90, 135];
+const ROOM_ROTATION_GUIDE_HIGHLIGHT_TOLERANCE_DEG = 6;
+const ROOM_ROTATION_GUIDE_VISIBILITY_TOLERANCE_DEG = 10;
+const ROOM_ROTATION_MAGNETIC_SNAP_TOLERANCE_DEG = 4;
 
 type WallControlType =
   | 'wall-center-handle'
@@ -58,6 +62,7 @@ type WallControlType =
   | 'wall-thickness-exterior'
   | 'wall-rotation-handle'
   | 'room-center-handle'
+  | 'room-rotation-handle'
   | 'room-corner-handle'
   | 'room-scale-handle';
 
@@ -104,6 +109,7 @@ export interface UseSelectModeOptions {
   saveToHistory: (action: string) => void;
   setProcessingStatus: (status: string, isProcessing: boolean) => void;
   onDragStateChange?: (isDragging: boolean) => void;
+  onRoomDragStateChange?: (roomId: string | null) => void;
   originOffset: { x: number; y: number };
 }
 
@@ -198,6 +204,16 @@ interface RoomScaleDragState {
   baselineWalls: Map<string, Wall>;
 }
 
+interface RoomRotateDragState {
+  mode: 'room-rotate';
+  roomId: string;
+  pivot: Point2D;
+  baselineAngleRad: number;
+  baselineReferenceAngleRad: number;
+  baselineRoom: Room;
+  baselineWalls: Map<string, Wall>;
+}
+
 interface RotateDragState {
   mode: 'rotate';
   wallId: string;
@@ -214,6 +230,7 @@ type DragState =
   | RoomMoveDragState
   | RoomCornerDragState
   | RoomScaleDragState
+  | RoomRotateDragState
   | RotateDragState;
 
 interface DragApplyResult {
@@ -303,6 +320,93 @@ function wallAngleDegrees(wall: Pick<Wall, 'startPoint' | 'endPoint'>): number {
       180) /
     Math.PI;
   return (angle + 360) % 360;
+}
+
+function normalizeAngleRadians(angle: number): number {
+  let normalized = angle;
+  while (normalized > Math.PI) normalized -= Math.PI * 2;
+  while (normalized < -Math.PI) normalized += Math.PI * 2;
+  return normalized;
+}
+
+function normalizeAngleDegrees(angle: number): number {
+  return ((angle % 360) + 360) % 360;
+}
+
+function normalizeLineAngleDegrees(angle: number): number {
+  return normalizeAngleDegrees(angle) % 180;
+}
+
+function rotatePointAround(point: Point2D, pivot: Point2D, angleRad: number): Point2D {
+  const cos = Math.cos(angleRad);
+  const sin = Math.sin(angleRad);
+  const dx = point.x - pivot.x;
+  const dy = point.y - pivot.y;
+  return {
+    x: pivot.x + dx * cos - dy * sin,
+    y: pivot.y + dx * sin + dy * cos,
+  };
+}
+
+function getRoomPrimaryAxisAngleRad(vertices: Point2D[]): number {
+  if (vertices.length < 2) return 0;
+
+  let bestAngle = 0;
+  let bestLength = -1;
+  for (let index = 0; index < vertices.length; index += 1) {
+    const start = vertices[index];
+    const end = vertices[(index + 1) % vertices.length];
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const length = Math.hypot(dx, dy);
+    if (length > bestLength) {
+      bestLength = length;
+      bestAngle = Math.atan2(dy, dx);
+    }
+  }
+
+  return bestAngle;
+}
+
+function getRoomGuideRadiusMm(vertices: Point2D[], pivot: Point2D): number {
+  const furthestVertexDistance = vertices.reduce((maxDistance, vertex) => {
+    return Math.max(maxDistance, magnitude(subtract(vertex, pivot)));
+  }, 0);
+  return Math.max(1600, furthestVertexDistance + 700);
+}
+
+function getLineAngleDegreesFromRadians(angleRad: number): number {
+  return normalizeLineAngleDegrees((angleRad * 180) / Math.PI);
+}
+
+function getLineAngleDeltaDegrees(aDeg: number, bDeg: number): number {
+  const diff = Math.abs(normalizeLineAngleDegrees(aDeg) - normalizeLineAngleDegrees(bDeg));
+  return Math.min(diff, 180 - diff);
+}
+
+function getNearestRoomRotationGuideAngle(angleRad: number): {
+  angleDeg: number;
+  angleRad: number;
+  deltaDeg: number;
+} {
+  const lineAngleDeg = getLineAngleDegreesFromRadians(angleRad);
+  let bestAngleDeg = ROOM_ROTATION_MAJOR_ANGLES_DEG[0];
+  let bestDeltaDeg = getLineAngleDeltaDegrees(lineAngleDeg, bestAngleDeg);
+
+  for (let index = 1; index < ROOM_ROTATION_MAJOR_ANGLES_DEG.length; index += 1) {
+    const candidateDeg = ROOM_ROTATION_MAJOR_ANGLES_DEG[index];
+    const candidateDeltaDeg = getLineAngleDeltaDegrees(lineAngleDeg, candidateDeg);
+    if (candidateDeltaDeg < bestDeltaDeg) {
+      bestAngleDeg = candidateDeg;
+      bestDeltaDeg = candidateDeltaDeg;
+    }
+  }
+
+  return {
+    angleDeg: bestAngleDeg,
+    angleRad: (bestAngleDeg * Math.PI) / 180,
+    deltaDeg: bestDeltaDeg,
+  };
 }
 
 function snapThickness(thicknessMm: number): number {
@@ -486,6 +590,7 @@ export function useSelectMode({
   saveToHistory,
   setProcessingStatus,
   onDragStateChange,
+  onRoomDragStateChange,
 }: UseSelectModeOptions) {
   const isWallHandleDraggingRef = useRef(false);
   const dragStateRef = useRef<DragState>({ mode: 'idle' });
@@ -495,6 +600,7 @@ export function useSelectMode({
   const dimensionLabelRef = useRef<fabric.Text | null>(null);
   const ghostObjectsRef = useRef<fabric.FabricObject[]>([]);
   const snapObjectsRef = useRef<fabric.FabricObject[]>([]);
+  const rotationGuideObjectsRef = useRef<fabric.FabricObject[]>([]);
   const lastAppliedStatusRef = useRef<string>('');
   const lastStatusAtRef = useRef(0);
   const lastOverlapCheckAtRef = useRef(0);
@@ -525,6 +631,7 @@ export function useSelectMode({
     saveToHistory,
     setProcessingStatus,
     onDragStateChange,
+    onRoomDragStateChange,
   });
 
   const canRotateWall = useCallback((wall: Wall): boolean => {
@@ -555,6 +662,7 @@ export function useSelectMode({
       saveToHistory,
       setProcessingStatus,
       onDragStateChange,
+      onRoomDragStateChange,
     };
   }, [
     walls,
@@ -575,6 +683,7 @@ export function useSelectMode({
     saveToHistory,
     setProcessingStatus,
     onDragStateChange,
+    onRoomDragStateChange,
   ]);
 
   useEffect(() => {
@@ -612,6 +721,15 @@ export function useSelectMode({
     objectsRef.current.forEach((obj) => canvas.remove(obj));
     objectsRef.current = [];
   }, [fabricRef]);
+
+  const markOverlayObject = useCallback((obj: fabric.FabricObject) => {
+    (
+      obj as fabric.FabricObject & {
+        isSelectModeOverlay?: boolean;
+      }
+    ).isSelectModeOverlay = true;
+    return obj;
+  }, []);
 
   const clearDimensionLabel = useCallback(() => {
     const canvas = fabricRef.current;
@@ -655,20 +773,20 @@ export function useSelectMode({
     const overlays: fabric.FabricObject[] = [];
     for (const wall of ghostWalls) {
         const polygon = computeWallBodyPolygon(wall).map((point) => toCanvasPoint(point));
-      const ghost = new fabric.Polygon(polygon, {
+      const ghost = markOverlayObject(new fabric.Polygon(polygon, {
         fill: 'rgba(148,163,184,0.08)',
         stroke: '#64748B',
         strokeDashArray: [6, 4],
         strokeWidth: 1.5,
         selectable: false,
         evented: false,
-      });
+      }));
       overlays.push(ghost);
       canvas.add(ghost);
     }
     ghostObjectsRef.current = overlays;
     canvas.requestRenderAll();
-  }, [clearOverlayObjects, fabricRef]);
+  }, [clearOverlayObjects, fabricRef, markOverlayObject]);
 
   const clearGhostWalls = useCallback(() => {
     clearOverlayObjects(ghostObjectsRef);
@@ -700,6 +818,7 @@ export function useSelectMode({
           evented: false,
         }
       );
+      markOverlayObject(indicatorLine);
       overlays.push(indicatorLine);
       canvas.add(indicatorLine);
     }
@@ -707,7 +826,7 @@ export function useSelectMode({
     if (point) {
       const canvasPoint = toCanvasPoint(point);
       if (visual?.indicator === 'square') {
-        const marker = new fabric.Rect({
+        const marker = markOverlayObject(new fabric.Rect({
           left: canvasPoint.x,
           top: canvasPoint.y,
           width: 10,
@@ -719,11 +838,11 @@ export function useSelectMode({
           originY: 'center',
           selectable: false,
           evented: false,
-        });
+        }));
         overlays.push(marker);
         canvas.add(marker);
       } else if (visual?.indicator === 'triangle') {
-        const marker = new fabric.Triangle({
+        const marker = markOverlayObject(new fabric.Triangle({
           left: canvasPoint.x,
           top: canvasPoint.y,
           width: 10,
@@ -735,11 +854,11 @@ export function useSelectMode({
           originY: 'center',
           selectable: false,
           evented: false,
-        });
+        }));
         overlays.push(marker);
         canvas.add(marker);
       } else if (visual?.indicator === 'cross') {
-        const h = new fabric.Line(
+        const h = markOverlayObject(new fabric.Line(
           [canvasPoint.x - 6, canvasPoint.y, canvasPoint.x + 6, canvasPoint.y],
           {
             stroke: color,
@@ -747,8 +866,8 @@ export function useSelectMode({
             selectable: false,
             evented: false,
           }
-        );
-        const v = new fabric.Line(
+        ));
+        const v = markOverlayObject(new fabric.Line(
           [canvasPoint.x, canvasPoint.y - 6, canvasPoint.x, canvasPoint.y + 6],
           {
             stroke: color,
@@ -756,11 +875,11 @@ export function useSelectMode({
             selectable: false,
             evented: false,
           }
-        );
+        ));
         overlays.push(h, v);
         canvas.add(h, v);
       } else {
-        const marker = new fabric.Circle({
+        const marker = markOverlayObject(new fabric.Circle({
           left: canvasPoint.x,
           top: canvasPoint.y,
           radius: 5,
@@ -771,7 +890,7 @@ export function useSelectMode({
           originY: 'center',
           selectable: false,
           evented: false,
-        });
+        }));
         overlays.push(marker);
         canvas.add(marker);
       }
@@ -784,13 +903,198 @@ export function useSelectMode({
   const clearSnapIndicators = useCallback(() => {
     clearOverlayObjects(snapObjectsRef);
     fabricRef.current?.requestRenderAll();
+  }, [clearOverlayObjects, fabricRef, markOverlayObject]);
+
+  const showRoomRotationGuide = useCallback((params: {
+    pivot: Point2D;
+    baselineAngleRad: number;
+    currentAngleRad: number;
+    suggestedAngleRad: number;
+    currentAngleDeg: number;
+    suggestedAngleDeg: number;
+    suggestedAngleDeltaDeg: number;
+    radiusMm: number;
+  }) => {
+    clearOverlayObjects(rotationGuideObjectsRef);
+    const canvas = fabricRef.current;
+    if (!canvas) return;
+
+    const overlays: fabric.FabricObject[] = [];
+    const pivot = toCanvasPoint(params.pivot);
+    const guideHalfLengthPx = params.radiusMm * MM_TO_PX;
+
+    const createGuideLine = (
+      angleRad: number,
+      options: {
+        color: string;
+        width: number;
+        dash: number[];
+        opacity?: number;
+      }
+    ) => {
+      const dx = Math.cos(angleRad) * guideHalfLengthPx;
+      const dy = Math.sin(angleRad) * guideHalfLengthPx;
+      return markOverlayObject(new fabric.Line(
+        [pivot.x - dx, pivot.y - dy, pivot.x + dx, pivot.y + dy],
+        {
+          stroke: options.color,
+          strokeWidth: options.width,
+          strokeDashArray: options.dash,
+          opacity: options.opacity ?? 10,
+          strokeLineCap: 'round',
+          selectable: false,
+          evented: false,
+        }
+      ));
+    };
+
+    const addBadge = (
+      text: string,
+      anchor: Point2D,
+      accentColor: string,
+      verticalShiftPx: number
+    ) => {
+      const label = markOverlayObject(new fabric.Text(text, {
+        left: anchor.x,
+        top: anchor.y + verticalShiftPx,
+        fontSize: 11,
+        fontWeight: '700',
+        fontFamily: 'Arial',
+        fill: '#0F172A',
+        originX: 'center',
+        originY: 'center',
+        selectable: false,
+        evented: false,
+      }));
+      const badge = markOverlayObject(new fabric.Rect({
+        left: anchor.x,
+        top: anchor.y + verticalShiftPx,
+        width: (label.width ?? 0) + 12,
+        height: (label.height ?? 0) + 8,
+        rx: 6,
+        ry: 6,
+        fill: 'rgba(255,255,255,0.98)',
+        stroke: accentColor,
+        strokeWidth: 1.4,
+        originX: 'center',
+        originY: 'center',
+        selectable: false,
+        evented: false,
+        shadow: new fabric.Shadow({
+          color: 'rgba(15,23,42,0.18)',
+          blur: 6,
+          offsetX: 0,
+          offsetY: 1,
+        }),
+      }));
+      overlays.push(badge, label);
+      canvas.add(badge, label);
+    };
+
+    const suggestedHighlight =
+      params.suggestedAngleDeltaDeg <= ROOM_ROTATION_GUIDE_HIGHLIGHT_TOLERANCE_DEG;
+    const suggestedAxisPrimaryBack = createGuideLine(params.suggestedAngleRad, {
+      color: 'rgba(255,255,255,0.94)',
+      width: suggestedHighlight ? 4.8 : 4,
+      dash: [8, 6],
+      opacity: 0.96,
+    });
+    const suggestedAxisPrimary = createGuideLine(params.suggestedAngleRad, {
+      color: suggestedHighlight ? '#0284C7' : 'rgba(3,105,161,0.85)',
+      width: suggestedHighlight ? 2.6 : 2,
+      dash: [8, 6],
+      opacity: suggestedHighlight ? 1 : 0.95,
+    });
+    const suggestedAxisPerpendicularBack = createGuideLine(params.suggestedAngleRad + Math.PI / 2, {
+      color: 'rgba(255,255,255,0.9)',
+      width: suggestedHighlight ? 4.2 : 3.6,
+      dash: [8, 6],
+      opacity: 0.92,
+    });
+    const suggestedAxisPerpendicular = createGuideLine(params.suggestedAngleRad + Math.PI / 2, {
+      color: suggestedHighlight ? 'rgba(2,132,199,0.88)' : 'rgba(3,105,161,0.75)',
+      width: suggestedHighlight ? 2.1 : 1.7,
+      dash: [8, 6],
+      opacity: suggestedHighlight ? 0.95 : 0.9,
+    });
+    const currentLineBack = createGuideLine(params.currentAngleRad, {
+      color: 'rgba(255,255,255,0.96)',
+      width: 5,
+      dash: [12, 6],
+      opacity: 0.96,
+    });
+    const currentLine = createGuideLine(params.currentAngleRad, {
+      color: '#1D4ED8',
+      width: 2.7,
+      dash: [12, 6],
+      opacity: 1,
+    });
+    const pivotMarker = markOverlayObject(new fabric.Circle({
+      left: pivot.x,
+      top: pivot.y,
+      radius: 5.5,
+      fill: '#FFFFFF',
+      stroke: '#1D4ED8',
+      strokeWidth: 2.2,
+      originX: 'center',
+      originY: 'center',
+      selectable: false,
+      evented: false,
+      shadow: new fabric.Shadow({
+        color: 'rgba(29,78,216,0.18)',
+        blur: 6,
+        offsetX: 0,
+        offsetY: 1,
+      }),
+    }));
+
+    overlays.push(
+      suggestedAxisPrimaryBack,
+      suggestedAxisPerpendicularBack,
+      currentLineBack,
+      suggestedAxisPrimary,
+      suggestedAxisPerpendicular,
+      currentLine,
+      pivotMarker
+    );
+    canvas.add(
+      suggestedAxisPrimaryBack,
+      suggestedAxisPerpendicularBack,
+      currentLineBack,
+      suggestedAxisPrimary,
+      suggestedAxisPerpendicular,
+      currentLine,
+      pivotMarker
+    );
+
+    const currentLabelAnchor = {
+      x: pivot.x + Math.cos(params.currentAngleRad) * (guideHalfLengthPx * 0.82),
+      y: pivot.y + Math.sin(params.currentAngleRad) * (guideHalfLengthPx * 0.82),
+    };
+    const suggestedLabelAnchor = {
+      x: pivot.x + Math.cos(params.suggestedAngleRad) * (guideHalfLengthPx * 0.67),
+      y: pivot.y + Math.sin(params.suggestedAngleRad) * (guideHalfLengthPx * 0.67),
+    };
+
+    addBadge(`${params.currentAngleDeg.toFixed(1)}deg`, currentLabelAnchor, '#2563EB', -14);
+    addBadge(`${params.suggestedAngleDeg}deg`, suggestedLabelAnchor, '#0EA5E9', 14);
+
+    rotationGuideObjectsRef.current = overlays;
+    overlays.forEach((overlay) => canvas.bringObjectToFront(overlay));
+    canvas.requestRenderAll();
+  }, [clearOverlayObjects, fabricRef, markOverlayObject]);
+
+  const clearRotationGuide = useCallback(() => {
+    clearOverlayObjects(rotationGuideObjectsRef);
+    fabricRef.current?.requestRenderAll();
   }, [clearOverlayObjects, fabricRef]);
 
   const clearEditVisuals = useCallback(() => {
     clearGhostWalls();
     clearSnapIndicators();
+    clearRotationGuide();
     clearDimensionLabel();
-  }, [clearGhostWalls, clearSnapIndicators, clearDimensionLabel]);
+  }, [clearDimensionLabel, clearGhostWalls, clearRotationGuide, clearSnapIndicators]);
 
   const getSnapReleaseDistanceMm = useCallback((): number => {
     const safeZoom = Math.max(optionsRef.current.zoom, 0.01);
@@ -1316,6 +1620,7 @@ export function useSelectMode({
         lastAppliedDelta: { x: 0, y: 0 },
         ghostWalls,
       };
+      optionsRef.current.onRoomDragStateChange?.(room.id);
       return true;
     }
 
@@ -1345,6 +1650,7 @@ export function useSelectMode({
         },
         baselineWalls,
       };
+      optionsRef.current.onRoomDragStateChange?.(room.id);
       return true;
     }
 
@@ -1374,6 +1680,40 @@ export function useSelectMode({
         },
         baselineWalls,
       };
+      optionsRef.current.onRoomDragStateChange?.(room.id);
+      return true;
+    }
+
+    if (meta.controlType === 'room-rotation-handle' && meta.roomId) {
+      const room = findRoomById(meta.roomId);
+      if (!room) return false;
+      const baselineWalls = new Map<string, Wall>();
+      room.wallIds.forEach((wallId) => {
+        const roomWall = findWallById(wallId);
+        if (roomWall) {
+          baselineWalls.set(wallId, { ...roomWall });
+        }
+      });
+      const pivot = { ...room.centroid };
+      const baselineAngleRad = Math.atan2(point.y - pivot.y, point.x - pivot.x);
+      isWallHandleDraggingRef.current = true;
+      resetDragDynamics(point);
+
+      dragStateRef.current = {
+        mode: 'room-rotate',
+        roomId: room.id,
+        pivot,
+        baselineAngleRad,
+        baselineReferenceAngleRad: getRoomPrimaryAxisAngleRad(room.vertices),
+        baselineRoom: {
+          ...room,
+          centroid: { ...room.centroid },
+          vertices: room.vertices.map((vertex) => ({ ...vertex })),
+          wallIds: [...room.wallIds],
+        },
+        baselineWalls,
+      };
+      optionsRef.current.onRoomDragStateChange?.(room.id);
       return true;
     }
 
@@ -1541,6 +1881,28 @@ export function useSelectMode({
 
     return false;
   }, [buildEndpointConstraints, canRotateWall, findRoomById, findWallById, resetDragDynamics, showGhostWalls]);
+
+  const beginRoomMoveDrag = useCallback((roomId: string, point: Point2D): boolean => {
+    const room = findRoomById(roomId);
+    if (!room) return false;
+
+    isWallHandleDraggingRef.current = true;
+    resetDragDynamics(point);
+    const ghostWalls = room.wallIds
+      .map((wallId) => findWallById(wallId))
+      .filter((wall): wall is Wall => Boolean(wall));
+    showGhostWalls(ghostWalls);
+
+    dragStateRef.current = {
+      mode: 'room-move',
+      roomId: room.id,
+      startPointer: { ...point },
+      lastAppliedDelta: { x: 0, y: 0 },
+      ghostWalls,
+    };
+    optionsRef.current.onRoomDragStateChange?.(room.id);
+    return true;
+  }, [findRoomById, findWallById, resetDragDynamics, showGhostWalls]);
 
   const computePerpendicularSnap = useCallback(
     (state: EndpointDragState, candidatePoint: Point2D): { snapped: Point2D; line?: { start: Point2D; end: Point2D } } => {
@@ -2039,6 +2401,83 @@ export function useSelectMode({
       };
     }
 
+    if (state.mode === 'room-rotate') {
+      const room = findRoomById(state.roomId);
+      if (!room) return null;
+
+      let deltaAngle = normalizeAngleRadians(
+        Math.atan2(point.y - state.pivot.y, point.x - state.pivot.x) - state.baselineAngleRad
+      );
+      const unsnappedReferenceAngleRad = normalizeAngleRadians(
+        state.baselineReferenceAngleRad + deltaAngle
+      );
+      const suggestedGuideBeforeSnap = getNearestRoomRotationGuideAngle(unsnappedReferenceAngleRad);
+      if (
+        !modifierKeysRef.current.ctrl &&
+        !modifierKeysRef.current.shift &&
+        suggestedGuideBeforeSnap.deltaDeg <= ROOM_ROTATION_MAGNETIC_SNAP_TOLERANCE_DEG
+      ) {
+        deltaAngle = normalizeAngleRadians(
+          suggestedGuideBeforeSnap.angleRad - state.baselineReferenceAngleRad
+        );
+      } else if (modifierKeysRef.current.shift) {
+        const snappedDeg = Math.round((deltaAngle * 180) / Math.PI / 15) * 15;
+        deltaAngle = (snappedDeg * Math.PI) / 180;
+      }
+
+      const nextVertices = state.baselineRoom.vertices.map((vertex) =>
+        rotatePointAround(vertex, state.pivot, deltaAngle)
+      );
+
+      const validation = validateRoomVertices(nextVertices);
+      if (!validation.valid) {
+        optionsRef.current.setProcessingStatus(validation.reason ?? 'Invalid room rotation.', false);
+        return null;
+      }
+
+      const roomRotateUpdates: Array<{ id: string; updates: Partial<Wall> }> = [];
+      state.baselineWalls.forEach((baselineWall, wallId) => {
+        roomRotateUpdates.push({
+          id: wallId,
+          updates: {
+            startPoint: rotatePointAround(baselineWall.startPoint, state.pivot, deltaAngle),
+            endPoint: rotatePointAround(baselineWall.endPoint, state.pivot, deltaAngle),
+          },
+        });
+      });
+
+      updateWallsIfChanged(roomRotateUpdates, { skipHistory: true, source: 'drag' });
+
+      const angleDeg = (deltaAngle * 180) / Math.PI;
+      const currentReferenceAngleRad = normalizeAngleRadians(
+        state.baselineReferenceAngleRad + deltaAngle
+      );
+      const currentReferenceAngleDeg = getLineAngleDegreesFromRadians(currentReferenceAngleRad);
+      const suggestedGuide = getNearestRoomRotationGuideAngle(currentReferenceAngleRad);
+      if (suggestedGuide.deltaDeg <= ROOM_ROTATION_GUIDE_VISIBILITY_TOLERANCE_DEG) {
+        showRoomRotationGuide({
+          pivot: state.pivot,
+          baselineAngleRad: state.baselineReferenceAngleRad,
+          currentAngleRad: currentReferenceAngleRad,
+          suggestedAngleRad: suggestedGuide.angleRad,
+          currentAngleDeg: currentReferenceAngleDeg,
+          suggestedAngleDeg: suggestedGuide.angleDeg,
+          suggestedAngleDeltaDeg: suggestedGuide.deltaDeg,
+          radiusMm: getRoomGuideRadiusMm(state.baselineRoom.vertices, state.pivot),
+        });
+      } else {
+        clearRotationGuide();
+      }
+      optionsRef.current.setProcessingStatus(
+        `${room.name}: Rotation ${angleDeg >= 0 ? '+' : ''}${angleDeg.toFixed(1)}deg`,
+        false
+      );
+      return {
+        label: `Rotate ${angleDeg >= 0 ? '+' : ''}${angleDeg.toFixed(1)}deg | Axis ${currentReferenceAngleDeg.toFixed(1)}deg`,
+        point: state.pivot,
+      };
+    }
+
     if (state.mode === 'rotate') {
       const rotationPreview = state.operation.onDrag(point, {
         shift: modifierKeysRef.current.shift,
@@ -2318,6 +2757,8 @@ export function useSelectMode({
     hasOverlapWithUnselectedWalls,
     setStatusFromRoom,
     setStatusFromWall,
+    clearRotationGuide,
+    showRoomRotationGuide,
     showSnapIndicator,
     updateWallIfChanged,
     updateWallsIfChanged,
@@ -2419,6 +2860,8 @@ export function useSelectMode({
               ? 'Move wall'
               : mode === 'rotate'
                 ? 'Rotate wall'
+                : mode === 'room-rotate'
+                  ? 'Rotate room'
                 : mode === 'room-corner'
                   ? 'Edit room corner'
                   : mode === 'room-scale'
@@ -2438,6 +2881,7 @@ export function useSelectMode({
     wallUpdateCacheRef.current.clear();
     connectedPairCacheRef.current.clear();
     optionsRef.current.onDragStateChange?.(false);
+    optionsRef.current.onRoomDragStateChange?.(null);
     clearEditVisuals();
   }, [applyDrag, clearEditVisuals, setDimensionLabel]);
 
@@ -2471,6 +2915,17 @@ export function useSelectMode({
         return;
       }
 
+      if (
+        meta.roomId &&
+        !meta.controlType &&
+        !addToSelection &&
+        optionsRef.current.selectedIds.includes(meta.roomId) &&
+        beginRoomMoveDrag(meta.roomId, scenePoint)
+      ) {
+        optionsRef.current.onDragStateChange?.(true);
+        return;
+      }
+
       const clickedId =
         meta.wallId ??
         meta.roomId ??
@@ -2496,7 +2951,7 @@ export function useSelectMode({
       }
       optionsRef.current.setHoveredElement(null);
     },
-    [beginControlDrag, getTargetMeta]
+    [beginControlDrag, beginRoomMoveDrag, getTargetMeta]
   );
 
   const handleMouseUp = useCallback(() => {
@@ -2518,6 +2973,7 @@ export function useSelectMode({
         window.cancelAnimationFrame(frameRef.current);
       }
       optionsRef.current.onDragStateChange?.(false);
+      optionsRef.current.onRoomDragStateChange?.(null);
       clearEditVisuals();
     };
   }, [clearEditVisuals]);

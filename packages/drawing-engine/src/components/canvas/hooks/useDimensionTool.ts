@@ -741,9 +741,20 @@ export function useDimensionTool(options: UseDimensionToolOptions): UseDimension
     const deltaAlongNormal = dot(delta, normal);
     const baselineOffsetSign = dragState.baselineOffset >= 0 ? 1 : -1;
     const nextOffset = dragState.baselineOffset + baselineOffsetSign * deltaAlongNormal;
+    const isAutoManaged =
+      dimension.baselineGroupId === 'auto-exterior' ||
+      dimension.baselineGroupId === 'auto-exterior-overall';
+    const autoBaseOffset = Number.isFinite(dimension.autoBaseOffset)
+      ? (dimension.autoBaseOffset as number)
+      : undefined;
     optionsRef.current.updateDimension(
       dragState.dimensionId,
-      { offset: nextOffset },
+      {
+        offset: nextOffset,
+        ...(isAutoManaged && autoBaseOffset !== undefined
+          ? { autoOffsetAdjustment: nextOffset - autoBaseOffset }
+          : {}),
+      },
       { skipHistory: true }
     );
   }, []);
