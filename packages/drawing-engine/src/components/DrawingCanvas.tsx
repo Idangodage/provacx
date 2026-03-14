@@ -655,18 +655,41 @@ export function DrawingCanvas({
     }, [projectPointToSegment]);
 
     const perimeterWallIdsForRooms = useCallback((roomIds: string[]): string[] => {
+        const pointsNear = (a: Point2D, b: Point2D, toleranceMm: number = 6) =>
+            Math.hypot(a.x - b.x, a.y - b.y) <= toleranceMm;
+
+        const wallMatchesEdge = (wall: Wall, start: Point2D, end: Point2D) =>
+            (pointsNear(wall.startPoint, start) && pointsNear(wall.endPoint, end)) ||
+            (pointsNear(wall.startPoint, end) && pointsNear(wall.endPoint, start));
+
         const unique = new Set<string>();
         roomIds.forEach((roomId) => {
             const room = roomById.get(roomId);
             if (!room) return;
-            room.wallIds.forEach((wallId) => {
-                if (wallIdSet.has(wallId)) {
-                    unique.add(wallId);
+            const matchedWallIds = new Set<string>();
+            const candidateWalls = room.wallIds
+                .map((wallId) => wallById.get(wallId))
+                .filter((wall): wall is Wall => Boolean(wall));
+
+            for (let index = 0; index < room.vertices.length; index += 1) {
+                const start = room.vertices[index];
+                const end = room.vertices[(index + 1) % room.vertices.length];
+                if (!start || !end) continue;
+
+                const matchedWall = candidateWalls.find((wall) => wallMatchesEdge(wall, start, end));
+                if (matchedWall) {
+                    matchedWallIds.add(matchedWall.id);
                 }
-            });
+            }
+
+            const resolvedWallIds = matchedWallIds.size > 0
+                ? Array.from(matchedWallIds)
+                : room.wallIds.filter((wallId) => wallIdSet.has(wallId));
+
+            resolvedWallIds.forEach((wallId) => unique.add(wallId));
         });
         return Array.from(unique);
-    }, [roomById, wallIdSet]);
+    }, [roomById, wallById, wallIdSet]);
 
     const findWallPlacementSnap = useCallback((point: Point2D) => {
         const maxSnapDistanceMm = Math.max(100, 72 / Math.max(viewportZoom, 0.01) / MM_TO_PX);
@@ -2638,6 +2661,7 @@ export function DrawingCanvas({
     }, [refreshDimensionLayer]);
 
     useEffect(() => {
+        roomRendererRef.current?.setWallContext(walls);
         roomRendererRef.current?.renderAllRooms(rooms);
         // Rebuild dimensions after room re-renders, then restore edit-handle priority.
         if (isHandleDragging) {
@@ -2645,7 +2669,7 @@ export function DrawingCanvas({
             return;
         }
         refreshDimensionLayer();
-    }, [rooms, fabricCanvas, refreshDimensionLayer, isHandleDragging, scheduleDimensionLayerRefresh]);
+    }, [rooms, walls, fabricCanvas, refreshDimensionLayer, isHandleDragging, scheduleDimensionLayerRefresh]);
 
     useEffect(() => {
         return () => {

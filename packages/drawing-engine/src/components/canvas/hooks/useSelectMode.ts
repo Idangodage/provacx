@@ -26,6 +26,7 @@ import {
   type CornerEnd,
 } from '../../../utils/wallBevel';
 import { endDragPerfTimer, startDragPerfTimer } from '../perf/dragPerf';
+import { isRoomIsolatedFromAttachments } from '../room/roomIsolation';
 import { MM_TO_PX } from '../scale';
 import { computeWallBodyPolygon } from '../wall/WallGeometry';
 import { snapToGrid } from '../wall/WallSnapping';
@@ -1687,6 +1688,9 @@ export function useSelectMode({
     if (meta.controlType === 'room-rotation-handle' && meta.roomId) {
       const room = findRoomById(meta.roomId);
       if (!room) return false;
+      if (!isRoomIsolatedFromAttachments(room, optionsRef.current.walls)) {
+        return false;
+      }
       const baselineWalls = new Map<string, Wall>();
       room.wallIds.forEach((wallId) => {
         const roomWall = findWallById(wallId);

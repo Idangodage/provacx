@@ -9,8 +9,10 @@
 
 import * as fabric from 'fabric';
 
-import type { Point2D, Room } from '../../../types';
+import type { Point2D, Room, Wall } from '../../../types';
 import { MM_TO_PX } from '../scale';
+
+import { isRoomIsolatedFromAttachments } from './roomIsolation';
 
 type NamedObject = fabric.Object & {
   id?: string;
@@ -81,6 +83,7 @@ export class RoomRenderer {
   private roomControlGroups = new Map<string, RoomControlGroup>();
   private roomLabelGroups = new Map<string, RoomLabelGroup>();
   private roomData = new Map<string, Room>();
+  private wallData = new Map<string, Wall>();
   private selectedRoomIds = new Set<string>();
   private activeDragRoomId: string | null = null;
   private persistentControlRoomId: string | null = null;
@@ -163,10 +166,20 @@ export class RoomRenderer {
     );
   }
 
+  private canShowRoomRotationControl(roomId: string): boolean {
+    return isRoomIsolatedFromAttachments(this.roomData.get(roomId), this.wallData);
+  }
+
+  private isRotationControlObject(object: fabric.FabricObject): boolean {
+    const named = object as NamedObject;
+    return named.name?.startsWith('room-rotation-handle') ?? false;
+  }
+
   private updateRoomControlGroupVisibility(group: RoomControlGroup, roomId: string): void {
     const visible = this.isRoomControlVisible(roomId);
+    const rotationVisible = visible && this.canShowRoomRotationControl(roomId);
     group.getObjects().forEach((object) => {
-      object.set('visible', visible);
+      object.set('visible', this.isRotationControlObject(object) ? rotationVisible : visible);
       object.setCoords();
     });
     group.set('dirty', true);
@@ -174,6 +187,14 @@ export class RoomRenderer {
     if (visible) {
       this.canvas.bringObjectToFront(group);
     }
+  }
+
+  setWallContext(walls: Wall[]): void {
+    this.wallData = new Map(walls.map((wall) => [wall.id, wall]));
+    this.roomControlGroups.forEach((group, roomId) => {
+      this.updateRoomControlGroupVisibility(group, roomId);
+    });
+    this.canvas.requestRenderAll();
   }
 
   private doesLabelRectFitRoom(
@@ -552,6 +573,7 @@ export class RoomRenderer {
   private createRoomControlGroup(room: Room): RoomControlGroup {
     const centroidCanvas = toCanvasPoint(room.centroid);
     const controlsVisible = this.isRoomControlVisible(room.id);
+    const rotationControlsVisible = controlsVisible && this.canShowRoomRotationControl(room.id);
     const bounds = roomBounds(room.vertices);
     const boundsCenter = {
       x: (bounds.minX + bounds.maxX) / 2,
@@ -705,7 +727,7 @@ export class RoomRenderer {
       hoverCursor: 'alias',
       hasControls: false,
       hasBorders: false,
-      visible: controlsVisible,
+      visible: rotationControlsVisible,
     });
     this.annotate(rotationHandleHit, room.id, 'room-rotation-handle-hit');
     (rotationHandleHit as NamedObject).controlType = 'room-rotation-handle';
@@ -721,7 +743,7 @@ export class RoomRenderer {
         stroke: '#15803D',
         strokeWidth: this.sp(1.3),
         strokeDashArray: [this.sp(4), this.sp(3)],
-        visible: controlsVisible,
+        visible: rotationControlsVisible,
       }
     );
     this.annotateDecoration(rotationStem, room.id, 'room-rotation-handle-stem');
@@ -739,7 +761,7 @@ export class RoomRenderer {
       hoverCursor: 'alias',
       hasControls: false,
       hasBorders: false,
-      visible: controlsVisible,
+      visible: rotationControlsVisible,
     });
     this.annotate(rotationHandle, room.id, 'room-rotation-handle');
     (rotationHandle as NamedObject).controlType = 'room-rotation-handle';
@@ -755,7 +777,7 @@ export class RoomRenderer {
       originY: 'center',
       selectable: false,
       evented: false,
-      visible: controlsVisible,
+      visible: rotationControlsVisible,
     });
     this.annotateDecoration(rotationLabel, room.id, 'room-rotation-handle-label');
 
