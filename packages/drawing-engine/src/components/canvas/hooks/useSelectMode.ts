@@ -17,19 +17,12 @@ import { WallRotationOperation } from '../../../operations';
 import type { Point2D, Room, Wall, WallSettings } from '../../../types';
 import {
   MAX_WALL_THICKNESS,
-  MAX_WALL_CENTERLINE_OFFSET,
   MIN_WALL_LENGTH,
   MIN_WALL_THICKNESS,
 } from '../../../types/wall';
 import { SnapManager } from '../../../utils/SnapManager';
 import { GeometryEngine } from '../../../utils/geometry-engine';
 import {
-  clampBevelOffset,
-  countWallsTouchingEndpoint,
-  computeCornerBevelDotsForEndpoint,
-  computeDeadEndBevelDotsForEndpoint,
-  projectPointToLine,
-  type CornerBevelKind,
   type CornerEnd,
 } from '../../../utils/wallBevel';
 import { endDragPerfTimer, startDragPerfTimer } from '../perf/dragPerf';
@@ -61,13 +54,8 @@ type WallControlType =
   | 'wall-center-handle'
   | 'wall-endpoint-start'
   | 'wall-endpoint-end'
-  | 'wall-bevel-outer-start'
-  | 'wall-bevel-outer-end'
-  | 'wall-bevel-inner-start'
-  | 'wall-bevel-inner-end'
   | 'wall-thickness-interior'
   | 'wall-thickness-exterior'
-  | 'wall-offset-handle'
   | 'wall-rotation-handle'
   | 'room-center-handle'
   | 'room-corner-handle'
@@ -218,27 +206,6 @@ interface RotateDragState {
   operation: WallRotationOperation;
 }
 
-interface BevelDragState {
-  mode: 'bevel';
-  wallId: string;
-  endpoint: CornerEnd;
-  kind: CornerBevelKind;
-  cornerPoint: Point2D;
-  origin: Point2D;
-  direction: Point2D;
-  maxOffset: number;
-  otherWallId: string;
-  otherEndpoint: CornerEnd;
-}
-
-interface OffsetDragState {
-  mode: 'offset';
-  wallId: string;
-  startPointer: Point2D;
-  baselineWall: Wall;
-  normal: Point2D;
-}
-
 type DragState =
   | IdleDragState
   | ThicknessDragState
@@ -247,9 +214,7 @@ type DragState =
   | RoomMoveDragState
   | RoomCornerDragState
   | RoomScaleDragState
-  | RotateDragState
-  | BevelDragState
-  | OffsetDragState;
+  | RotateDragState;
 
 interface DragApplyResult {
   label: string;
@@ -443,23 +408,6 @@ function perpendicularDirection(reference: Wall, atPoint: Point2D): Point2D | nu
   return normalize({ x: -dir.y, y: dir.x });
 }
 
-function parseBevelControl(
-  controlType?: WallControlType
-): { endpoint: CornerEnd; kind: CornerBevelKind } | null {
-  switch (controlType) {
-    case 'wall-bevel-outer-start':
-      return { endpoint: 'start', kind: 'outer' };
-    case 'wall-bevel-inner-start':
-      return { endpoint: 'start', kind: 'inner' };
-    case 'wall-bevel-outer-end':
-      return { endpoint: 'end', kind: 'outer' };
-    case 'wall-bevel-inner-end':
-      return { endpoint: 'end', kind: 'inner' };
-    default:
-      return null;
-  }
-}
-
 function roomBounds(vertices: Point2D[]): { minX: number; minY: number; maxX: number; maxY: number } {
   const xs = vertices.map((vertex) => vertex.x);
   const ys = vertices.map((vertex) => vertex.y);
@@ -555,7 +503,6 @@ export function useSelectMode({
   const smoothedPointerRef = useRef<Point2D | null>(null);
   const endpointSnapMemoryRef = useRef<EndpointSnapMemory | null>(null);
   const wallUpdateCacheRef = useRef<Map<string, string>>(new Map());
-  const wallBevelUpdateCacheRef = useRef<Map<string, string>>(new Map());
   const connectedPairCacheRef = useRef<Set<string>>(new Set());
   const modifierKeysRef = useRef({ shift: false, ctrl: false, alt: false });
 
@@ -855,13 +802,10 @@ export function useSelectMode({
   }, []);
 
   const withDragPerfOptions = useCallback((options?: WallUpdateOptions): WallUpdateOptions | undefined => {
-    if (!options || options.source !== 'drag' || options.skipRoomDetection !== undefined) {
-      return options;
-    }
-    return {
-      ...options,
-      skipRoomDetection: true,
-    };
+    // Keep room detection enabled during drag so room-area relationships
+    // (and linked area dimensions) update in real time.
+    // The store already frame-throttles drag-time detection.
+    return options;
   }, []);
 
   const getWallUpdateThreshold = useCallback((options?: WallUpdateOptions): number => {
@@ -1322,49 +1266,6 @@ export function useSelectMode({
     [findWallById, getWallUpdateThreshold, withDragPerfOptions]
   );
 
-  const updateWallBevelIfChanged = useCallback(
-    (
-      wallId: string,
-      end: CornerEnd,
-      bevel: Partial<{ outerOffset: number; innerOffset: number }>,
-      options?: WallUpdateOptions
-    ) => {
-      const effectiveOptions = withDragPerfOptions(options);
-      const cacheKey = [
-        end,
-        `o:${bevel.outerOffset !== undefined ? bevel.outerOffset.toFixed(3) : ''}`,
-        `i:${bevel.innerOffset !== undefined ? bevel.innerOffset.toFixed(3) : ''}`,
-      ].join('|');
-      const bevelCacheKey = `${wallId}:${end}`;
-      if (wallBevelUpdateCacheRef.current.get(bevelCacheKey) === cacheKey) {
-        return;
-      }
-
-      const current = findWallById(wallId);
-      if (!current) {
-        optionsRef.current.updateWallBevel(wallId, end, bevel, effectiveOptions);
-        wallBevelUpdateCacheRef.current.set(bevelCacheKey, cacheKey);
-        return;
-      }
-      const currentBevel = end === 'start' ? current.startBevel : current.endBevel;
-      const outerChanged =
-        bevel.outerOffset !== undefined
-          ? Math.abs(bevel.outerOffset - currentBevel.outerOffset) > 0.01
-          : false;
-      const innerChanged =
-        bevel.innerOffset !== undefined
-          ? Math.abs(bevel.innerOffset - currentBevel.innerOffset) > 0.01
-          : false;
-      if (!outerChanged && !innerChanged) {
-        wallBevelUpdateCacheRef.current.set(bevelCacheKey, cacheKey);
-        return;
-      }
-      optionsRef.current.updateWallBevel(wallId, end, bevel, effectiveOptions);
-      wallBevelUpdateCacheRef.current.set(bevelCacheKey, cacheKey);
-    },
-    [findWallById, withDragPerfOptions]
-  );
-
   const connectWallsIfNeeded = useCallback((wallId: string, otherWallId: string) => {
     if (wallId === otherWallId) return;
     const pairKey = wallId < otherWallId ? `${wallId}|${otherWallId}` : `${otherWallId}|${wallId}`;
@@ -1389,7 +1290,6 @@ export function useSelectMode({
     dragChangedRef.current = false;
     endpointSnapMemoryRef.current = null;
     wallUpdateCacheRef.current.clear();
-    wallBevelUpdateCacheRef.current.clear();
     connectedPairCacheRef.current.clear();
     lastOverlapCheckAtRef.current = 0;
     lastOverlapWarningRef.current = false;
@@ -1483,65 +1383,6 @@ export function useSelectMode({
 
     isWallHandleDraggingRef.current = true;
     resetDragDynamics(point);
-
-    const bevelControl = parseBevelControl(meta.controlType);
-    if (bevelControl) {
-      const cornerTolerance = Math.max(
-        2,
-        optionsRef.current.wallSettings.endpointSnapTolerance / (MM_TO_PX * Math.max(optionsRef.current.zoom, 0.01))
-      );
-      const connectionCount = countWallsTouchingEndpoint(
-        wall,
-        bevelControl.endpoint,
-        optionsRef.current.walls,
-        cornerTolerance
-      );
-      const corner = computeCornerBevelDotsForEndpoint(
-        wall,
-        bevelControl.endpoint,
-        optionsRef.current.walls,
-        cornerTolerance
-      ) ?? (connectionCount === 0
-        ? computeDeadEndBevelDotsForEndpoint(wall, bevelControl.endpoint)
-        : null);
-      if (!corner) {
-        isWallHandleDraggingRef.current = false;
-        return false;
-      }
-
-      const bevelDirection = normalize(corner.bisector);
-      if (magnitude(bevelDirection) < 0.0001) {
-        isWallHandleDraggingRef.current = false;
-        return false;
-      }
-
-      const origin = bevelControl.kind === 'outer' ? corner.outerMiterPoint : corner.innerMiterPoint;
-      if (!origin) {
-        isWallHandleDraggingRef.current = false;
-        return false;
-      }
-
-      dragStateRef.current = {
-        mode: 'bevel',
-        wallId: wall.id,
-        endpoint: bevelControl.endpoint,
-        kind: bevelControl.kind,
-        cornerPoint: corner.cornerPoint,
-        origin,
-        direction: bevelDirection,
-        maxOffset: corner.maxOffset,
-        otherWallId:
-          'otherWallId' in corner && typeof corner.otherWallId === 'string'
-            ? corner.otherWallId
-            : wall.id,
-        otherEndpoint:
-          'otherEnd' in corner && (corner.otherEnd === 'start' || corner.otherEnd === 'end')
-            ? corner.otherEnd
-            : bevelControl.endpoint,
-      };
-      return true;
-    }
-
     if (meta.controlType === 'wall-thickness-exterior' || meta.controlType === 'wall-thickness-interior') {
       const endpointConstraints: MoveEndpointConstraint[] = [];
       const startConstraints = buildEndpointConstraints(
@@ -1579,17 +1420,6 @@ export function useSelectMode({
         baselineWall: { ...wall },
         normal: wallNormal(wall),
         endpointConstraints,
-      };
-      return true;
-    }
-
-    if (meta.controlType === 'wall-offset-handle') {
-      dragStateRef.current = {
-        mode: 'offset',
-        wallId: wall.id,
-        startPointer: { ...point },
-        baselineWall: { ...wall },
-        normal: wallNormal(wall),
       };
       return true;
     }
@@ -1863,65 +1693,6 @@ export function useSelectMode({
 
       return {
         label: `${state.side === 'interior' ? 'Inner' : 'Outer'} ${Math.round(nextThickness)} mm`,
-        point: handlePoint,
-      };
-    }
-
-    if (state.mode === 'offset') {
-      const baseline = state.baselineWall;
-      const normal = state.normal;
-      const pointerDelta = subtract(point, state.startPointer);
-      const projectedDelta = dot(pointerDelta, normal);
-      const baseOffset = baseline.centerlineOffset ?? 0;
-      const rawOffset = baseOffset + projectedDelta;
-
-      // Snap to 0 when close (makes it easy to reset)
-      const snapZeroThreshold = 10;
-      const snappedOffset = Math.abs(rawOffset) < snapZeroThreshold ? 0 : rawOffset;
-
-      const nextOffset = clamp(snappedOffset, -MAX_WALL_CENTERLINE_OFFSET, MAX_WALL_CENTERLINE_OFFSET);
-
-      updateWallsIfChanged(
-        [{ id: baseline.id, updates: { centerlineOffset: nextOffset } }],
-        { skipHistory: true, source: 'drag' }
-      );
-
-      const updatedCenter = midpoint(baseline.startPoint, baseline.endPoint);
-      const handlePoint = add(updatedCenter, scale(normal, nextOffset));
-
-      const sign = nextOffset >= 0 ? '+' : '';
-      return {
-        label: `Offset ${sign}${Math.round(nextOffset)} mm`,
-        point: handlePoint,
-      };
-    }
-
-    if (state.mode === 'bevel') {
-      const projection = projectPointToLine(point, state.origin, state.direction);
-      const nextOffset = clampBevelOffset(projection.t, state.maxOffset);
-      const direction = normalize(state.direction);
-      const fallbackPoint = add(state.origin, scale(direction, nextOffset));
-      const bevelUpdate =
-        state.kind === 'outer'
-          ? { outerOffset: nextOffset }
-          : { innerOffset: nextOffset };
-
-      updateWallBevelIfChanged(
-        state.wallId,
-        state.endpoint,
-        bevelUpdate,
-        {
-          skipHistory: true,
-          source: 'drag',
-        }
-      );
-
-      // Use projected control point directly during drag to avoid an O(n)
-      // corner recomputation pass each frame.
-      const handlePoint = fallbackPoint;
-
-      return {
-        label: `${state.kind === 'outer' ? 'Outer' : 'Inner'} bevel ${Math.round(nextOffset)} mm`,
         point: handlePoint,
       };
     }
@@ -2548,7 +2319,6 @@ export function useSelectMode({
     setStatusFromRoom,
     setStatusFromWall,
     showSnapIndicator,
-    updateWallBevelIfChanged,
     updateWallIfChanged,
     updateWallsIfChanged,
   ]);
@@ -2645,9 +2415,7 @@ export function useSelectMode({
       const action =
         mode === 'thickness'
           ? 'Adjust wall thickness'
-          : mode === 'offset'
-            ? 'Adjust wall offset'
-            : mode === 'move'
+          : mode === 'move'
               ? 'Move wall'
               : mode === 'rotate'
                 ? 'Rotate wall'
@@ -2657,9 +2425,7 @@ export function useSelectMode({
                     ? 'Scale room'
                     : mode === 'room-move'
                       ? 'Move room'
-                      : mode === 'bevel'
-                        ? 'Adjust wall bevel'
-                        : 'Edit wall endpoint';
+                      : 'Edit wall endpoint';
       optionsRef.current.detectRooms();
       optionsRef.current.saveToHistory(action);
     }
@@ -2670,7 +2436,6 @@ export function useSelectMode({
     smoothedPointerRef.current = null;
     endpointSnapMemoryRef.current = null;
     wallUpdateCacheRef.current.clear();
-    wallBevelUpdateCacheRef.current.clear();
     connectedPairCacheRef.current.clear();
     optionsRef.current.onDragStateChange?.(false);
     clearEditVisuals();
@@ -2681,35 +2446,9 @@ export function useSelectMode({
   }, [finishDrag]);
 
   const handleDoubleClick = useCallback((event: MouseEvent) => {
-    const canvas = fabricRef.current;
-    if (!canvas) return false;
-    const target = canvas.findTarget(event as unknown as fabric.TPointerEvent);
-    const meta = getTargetMeta((target as FabricObject | undefined | null) ?? null);
-    const bevelControl = parseBevelControl(meta.controlType);
-    if (!bevelControl || !meta.wallId) {
-      return false;
-    }
-
-    const bevelUpdate =
-      bevelControl.kind === 'outer'
-        ? { outerOffset: 0 }
-        : { innerOffset: 0 };
-    optionsRef.current.updateWallBevel(
-      meta.wallId,
-      bevelControl.endpoint,
-      bevelUpdate,
-      {
-        skipHistory: false,
-        source: 'ui',
-        skipRoomDetection: false,
-      }
-    );
-    optionsRef.current.setProcessingStatus(
-      `${bevelControl.kind === 'outer' ? 'Outer' : 'Inner'} bevel reset.`,
-      false
-    );
-    return true;
-  }, [fabricRef, getTargetMeta]);
+    void event;
+    return false;
+  }, []);
 
   const handleObjectMoving = useCallback((_target: FabricObject) => {
     // Object moving is disabled for wall groups. Editing is handle-driven.

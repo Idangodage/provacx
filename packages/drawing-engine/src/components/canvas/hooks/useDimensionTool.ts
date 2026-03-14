@@ -58,6 +58,10 @@ type DragState =
       dimensionId: string;
       startPointer: Point2D;
       baselineTextPosition: Point2D;
+      baselineTextPositionRatio?: number;
+      baselineDimensionStart?: Point2D;
+      baselineDirection?: Point2D;
+      baselineLength?: number;
     }
   | {
       mode: 'offset';
@@ -130,6 +134,10 @@ function subtract(a: Point2D, b: Point2D): Point2D {
 
 function dot(a: Point2D, b: Point2D): number {
   return a.x * b.x + a.y * b.y;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 function normalize(vector: Point2D): Point2D {
@@ -597,6 +605,45 @@ export function useDimensionTool(options: UseDimensionToolOptions): UseDimension
     if (!dimension) return;
 
     if (dragState.mode === 'text') {
+      const geometry = resolveDimensionGeometry(
+        dimension,
+        optionsRef.current.walls,
+        optionsRef.current.rooms,
+        optionsRef.current.dimensionSettings
+      );
+      if (
+        geometry?.kind === 'linear' &&
+        dragState.baselineDirection &&
+        dragState.baselineDimensionStart &&
+        Number.isFinite(dragState.baselineLength) &&
+        Number.isFinite(dragState.baselineTextPositionRatio)
+      ) {
+        const delta = subtract(point, dragState.startPointer);
+        const deltaAlongDirection = dot(delta, dragState.baselineDirection);
+        const nextRatio = clamp(
+          (dragState.baselineTextPositionRatio as number) +
+            deltaAlongDirection / Math.max(dragState.baselineLength as number, 0.000001),
+          0.08,
+          0.92
+        );
+        const next = add(
+          dragState.baselineDimensionStart,
+          {
+            x: dragState.baselineDirection.x * (dragState.baselineLength as number) * nextRatio,
+            y: dragState.baselineDirection.y * (dragState.baselineLength as number) * nextRatio,
+          }
+        );
+        optionsRef.current.updateDimension(
+          dragState.dimensionId,
+          {
+            textPosition: next,
+            textPositionLocked: true,
+            textPositionRatio: nextRatio,
+          },
+          { skipHistory: true }
+        );
+        return;
+      }
       const delta = subtract(point, dragState.startPointer);
       const next = add(dragState.baselineTextPosition, delta);
       optionsRef.current.updateDimension(
@@ -604,6 +651,7 @@ export function useDimensionTool(options: UseDimensionToolOptions): UseDimension
         {
           textPosition: next,
           textPositionLocked: true,
+          textPositionRatio: undefined,
         },
         { skipHistory: true }
       );
@@ -622,6 +670,7 @@ export function useDimensionTool(options: UseDimensionToolOptions): UseDimension
 
       if (geometry.kind === 'linear') {
         const deltaAlongNormal = dot(delta, geometry.normal);
+        const baselineOffsetSign = dragState.baselineOffset >= 0 ? 1 : -1;
         const normalDelta = {
           x: geometry.normal.x * deltaAlongNormal,
           y: geometry.normal.y * deltaAlongNormal,
@@ -629,7 +678,7 @@ export function useDimensionTool(options: UseDimensionToolOptions): UseDimension
         optionsRef.current.updateDimension(
           dragState.dimensionId,
           {
-            offset: dragState.baselineOffset + deltaAlongNormal,
+            offset: dragState.baselineOffset + baselineOffsetSign * deltaAlongNormal,
             ...(dragState.textPositionLocked
               ? {
                   textPosition: add(dragState.baselineTextPosition, normalDelta),
@@ -690,7 +739,8 @@ export function useDimensionTool(options: UseDimensionToolOptions): UseDimension
     const delta = subtract(point, dragState.startPointer);
     const normal = geometry.normal;
     const deltaAlongNormal = dot(delta, normal);
-    const nextOffset = dragState.baselineOffset + deltaAlongNormal;
+    const baselineOffsetSign = dragState.baselineOffset >= 0 ? 1 : -1;
+    const nextOffset = dragState.baselineOffset + baselineOffsetSign * deltaAlongNormal;
     optionsRef.current.updateDimension(
       dragState.dimensionId,
       { offset: nextOffset },
@@ -724,15 +774,34 @@ export function useDimensionTool(options: UseDimensionToolOptions): UseDimension
       if (meta.controlType === 'dimension-text-handle') {
         const dimension = optionsRef.current.dimensions.find((entry) => entry.id === meta.dimensionId);
         if (!dimension) return false;
+        const geometry = resolveDimensionGeometry(
+          dimension,
+          optionsRef.current.walls,
+          optionsRef.current.rooms,
+          optionsRef.current.dimensionSettings
+        );
         dragStateRef.current = {
           mode: 'text',
           dimensionId: meta.dimensionId,
           startPointer: { ...point },
           baselineTextPosition: { ...dimension.textPosition },
+          baselineTextPositionRatio:
+            geometry?.kind === 'linear'
+              ? (
+                Number.isFinite(dimension.textPositionRatio)
+                  ? dimension.textPositionRatio
+                  : geometry.textPositionRatio
+              )
+              : undefined,
+          baselineDimensionStart:
+            geometry?.kind === 'linear' ? { ...geometry.dimensionStart } : undefined,
+          baselineDirection:
+            geometry?.kind === 'linear' ? { ...geometry.direction } : undefined,
+          baselineLength:
+            geometry?.kind === 'linear' ? geometry.length : undefined,
         };
-        if (!optionsRef.current.selectedIds.includes(meta.dimensionId)) {
-          optionsRef.current.setSelectedIds([meta.dimensionId]);
-        }
+        optionsRef.current.setSelectedIds([meta.dimensionId]);
+        optionsRef.current.setHoveredElement(meta.dimensionId);
         return true;
       }
 
@@ -745,9 +814,8 @@ export function useDimensionTool(options: UseDimensionToolOptions): UseDimension
           startPointer: { ...point },
           baselineOffset: dimension.offset ?? optionsRef.current.dimensionSettings.defaultOffset,
         };
-        if (!optionsRef.current.selectedIds.includes(meta.dimensionId)) {
-          optionsRef.current.setSelectedIds([meta.dimensionId]);
-        }
+        optionsRef.current.setSelectedIds([meta.dimensionId]);
+        optionsRef.current.setHoveredElement(meta.dimensionId);
         return true;
       }
 
@@ -761,17 +829,6 @@ export function useDimensionTool(options: UseDimensionToolOptions): UseDimension
         optionsRef.current.setSelectedIds(Array.from(selection));
       } else {
         optionsRef.current.setSelectedIds([meta.dimensionId]);
-        const dimension = optionsRef.current.dimensions.find((entry) => entry.id === meta.dimensionId);
-        if (dimension) {
-          dragStateRef.current = {
-            mode: 'body',
-            dimensionId: meta.dimensionId,
-            startPointer: { ...point },
-            baselineOffset: dimension.offset ?? optionsRef.current.dimensionSettings.defaultOffset,
-            baselineTextPosition: { ...dimension.textPosition },
-            textPositionLocked: Boolean(dimension.textPositionLocked),
-          };
-        }
       }
       optionsRef.current.setHoveredElement(meta.dimensionId);
       return true;
@@ -797,6 +854,7 @@ export function useDimensionTool(options: UseDimensionToolOptions): UseDimension
 
   const handleSelectMouseUp = useCallback((): boolean => {
     if (dragStateRef.current.mode === 'idle') return false;
+    const dimensionId = dragStateRef.current.dimensionId;
     if (dragFrameRef.current !== null && typeof window !== 'undefined') {
       window.cancelAnimationFrame(dragFrameRef.current);
       dragFrameRef.current = null;
@@ -805,6 +863,8 @@ export function useDimensionTool(options: UseDimensionToolOptions): UseDimension
     dragPointRef.current = null;
     if (pending) applyDrag(pending);
     dragStateRef.current = { mode: 'idle' };
+    optionsRef.current.setSelectedIds([dimensionId]);
+    optionsRef.current.setHoveredElement(dimensionId);
     optionsRef.current.saveToHistory('Edit dimension');
     return true;
   }, [applyDrag]);

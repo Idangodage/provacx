@@ -108,6 +108,20 @@ export class DimensionRenderer {
     typed.hasBorders = false;
   }
 
+  private annotateControlDecoration(
+    object: fabric.FabricObject,
+    dimensionId: string,
+    name: string
+  ): void {
+    const typed = object as NamedObject;
+    typed.dimensionId = dimensionId;
+    typed.id = dimensionId;
+    typed.name = name;
+    typed.isDimensionControlDecoration = true;
+    typed.selectable = false;
+    typed.evented = false;
+  }
+
   /** Scale a screen-pixel size to canvas units, compensating for viewport zoom. */
   private sp(screenPx: number): number {
     return screenPx / this.viewportZoom;
@@ -181,8 +195,9 @@ export class DimensionRenderer {
     x: number,
     y: number,
     fontSize: number,
-    dimensionId: string
-  ): fabric.FabricObject[] {
+    dimensionId: string,
+    includeTextHandle = true
+  ): { bg: fabric.Rect; text: fabric.Text; textHandle: fabric.Circle | null } {
     const effectiveFontSize = this.sp(fontSize);
     const text = new fabric.Text(label, {
       left: toCanvas(x),
@@ -194,7 +209,7 @@ export class DimensionRenderer {
       originY: 'center',
       selectable: false,
       evented: true,
-      hoverCursor: 'move',
+      hoverCursor: 'default',
     });
     this.annotate(text, dimensionId, 'dimensionText');
 
@@ -217,23 +232,26 @@ export class DimensionRenderer {
     });
     this.annotate(bg, dimensionId, 'dimensionTextBg');
 
-    const textHandle = new fabric.Circle({
-      left: toCanvas(x),
-      top: toCanvas(y),
-      radius: this.sp(6),
-      fill: '#EFF6FF',
-      stroke: '#1D4ED8',
-      strokeWidth: this.sp(2.2),
-      originX: 'center',
-      originY: 'center',
-      selectable: false,
-      evented: true,
-      visible: this.selectedDimensionIds.has(dimensionId),
-      hoverCursor: 'move',
-    });
-    this.annotateControl(textHandle, dimensionId, 'dimension-text-handle');
+    let textHandle: fabric.Circle | null = null;
+    if (includeTextHandle) {
+      textHandle = new fabric.Circle({
+        left: toCanvas(x),
+        top: toCanvas(y),
+        radius: this.sp(6),
+        fill: '#EFF6FF',
+        stroke: '#1D4ED8',
+        strokeWidth: this.sp(2.2),
+        originX: 'center',
+        originY: 'center',
+        selectable: false,
+        evented: true,
+        visible: this.selectedDimensionIds.has(dimensionId),
+        hoverCursor: 'move',
+      });
+      this.annotateControl(textHandle, dimensionId, 'dimension-text-handle');
+    }
 
-    return [bg, text, textHandle];
+    return { bg, text, textHandle };
   }
 
   private createLinearGroup(
@@ -271,7 +289,7 @@ export class DimensionRenderer {
         strokeWidth: this.sp(profile.dimensionStrokeWidth),
         selectable: false,
         evented: true,
-        hoverCursor: 'move',
+        hoverCursor: 'default',
       }
     );
     this.annotate(dimensionLine, dimension.id, 'dimensionLine');
@@ -319,26 +337,96 @@ export class DimensionRenderer {
       dimension.id
     );
 
-    const [textBg, text, textHandle] = this.createTextWithBackground(
+    const { bg: textBg, text } = this.createTextWithBackground(
       geometry.label,
       geometry.textPosition.x,
       geometry.textPosition.y,
       profile.textSizePx,
-      dimension.id
+      dimension.id,
+      false
     );
 
-    const offsetHandle = new fabric.Circle({
-      left: toCanvas(geometry.midpoint.x),
-      top: toCanvas(geometry.midpoint.y),
-      radius: this.sp(6),
-      fill: '#EFF6FF',
+    const textHandleOffset = ((textBg.width ?? 0) * 0.5) + this.sp(14);
+    const textHandleCenter = {
+      x: toCanvas(geometry.textPosition.x) + geometry.direction.x * textHandleOffset,
+      y: toCanvas(geometry.textPosition.y) + geometry.direction.y * textHandleOffset,
+    };
+    const textHandleGuideStart = {
+      x: toCanvas(geometry.textPosition.x) + geometry.direction.x * ((textBg.width ?? 0) * 0.5),
+      y: toCanvas(geometry.textPosition.y) + geometry.direction.y * ((textBg.width ?? 0) * 0.5),
+    };
+    const textHandleGuide = new fabric.Line(
+      [
+        textHandleGuideStart.x,
+        textHandleGuideStart.y,
+        textHandleCenter.x,
+        textHandleCenter.y,
+      ],
+      {
+        stroke: '#1D4ED8',
+        strokeWidth: this.sp(1.4),
+        strokeDashArray: [this.sp(4), this.sp(3)],
+        selectable: false,
+        evented: false,
+        visible: this.selectedDimensionIds.has(dimension.id),
+      }
+    );
+    this.annotateControlDecoration(textHandleGuide, dimension.id, 'dimension-text-handle-guide');
+
+    const textHandleSize = this.sp(9);
+    const textHandle = new fabric.Rect({
+      left: textHandleCenter.x,
+      top: textHandleCenter.y,
+      width: textHandleSize,
+      height: textHandleSize,
+      fill: '#FFFFFF',
+      stroke: '#1D4ED8',
+      strokeWidth: this.sp(2.2),
+      angle: 45,
+      originX: 'center',
+      originY: 'center',
+      selectable: false,
+      evented: true,
+      hoverCursor: 'move',
+      visible: this.selectedDimensionIds.has(dimension.id),
+    });
+    this.annotateControl(textHandle, dimension.id, 'dimension-text-handle');
+
+    const textHandleAxis = new fabric.Line(
+      [
+        textHandleCenter.x - geometry.direction.x * this.sp(4),
+        textHandleCenter.y - geometry.direction.y * this.sp(4),
+        textHandleCenter.x + geometry.direction.x * this.sp(4),
+        textHandleCenter.y + geometry.direction.y * this.sp(4),
+      ],
+      {
+        stroke: '#1D4ED8',
+        strokeWidth: this.sp(1.2),
+        selectable: false,
+        evented: false,
+        visible: this.selectedDimensionIds.has(dimension.id),
+      }
+    );
+    this.annotateControlDecoration(textHandleAxis, dimension.id, 'dimension-text-handle-axis');
+
+    const offsetHandlePosition = {
+      x: geometry.dimensionStart.x + (geometry.dimensionEnd.x - geometry.dimensionStart.x) * 0.75,
+      y: geometry.dimensionStart.y + (geometry.dimensionEnd.y - geometry.dimensionStart.y) * 0.75,
+    };
+    const offsetHandleSize = this.sp(12);
+    const offsetHandle = new fabric.Rect({
+      left: toCanvas(offsetHandlePosition.x),
+      top: toCanvas(offsetHandlePosition.y),
+      width: offsetHandleSize,
+      height: offsetHandleSize,
+      fill: '#FFFFFF',
       stroke: '#1D4ED8',
       strokeWidth: this.sp(2.2),
       originX: 'center',
       originY: 'center',
       selectable: false,
       evented: true,
-      hoverCursor: 'ns-resize',
+      hoverCursor: 'move',
       visible: this.selectedDimensionIds.has(dimension.id),
     });
     this.annotateControl(offsetHandle, dimension.id, 'dimension-offset-handle');
@@ -354,6 +442,8 @@ export class DimensionRenderer {
         terminatorB,
         textBg,
         text,
+        textHandleGuide,
+        textHandleAxis,
         textHandle,
         offsetHandle,
       ],
@@ -365,7 +455,7 @@ export class DimensionRenderer {
         hasBorders: false,
         lockMovementX: true,
         lockMovementY: true,
-        hoverCursor: 'move',
+        hoverCursor: 'default',
         objectCaching: true,
       }
     ) as DimensionGroup;
@@ -414,7 +504,7 @@ export class DimensionRenderer {
       strokeWidth: this.sp(profile.dimensionStrokeWidth),
       selectable: false,
       evented: true,
-      hoverCursor: 'move',
+      hoverCursor: 'default',
     });
     this.annotate(arc, dimension.id, 'angularArc');
 
@@ -438,7 +528,7 @@ export class DimensionRenderer {
     });
     this.annotate(hoverHalo, dimension.id, 'hoverHalo');
 
-    const [textBg, text, textHandle] = this.createTextWithBackground(
+    const { bg: textBg, text, textHandle } = this.createTextWithBackground(
       geometry.label,
       geometry.textPosition.x,
       geometry.textPosition.y,
@@ -447,7 +537,7 @@ export class DimensionRenderer {
     );
 
     const group = new fabric.Group(
-      [selectionHalo, hoverHalo, legA, legB, arc, textBg, text, textHandle],
+      [selectionHalo, hoverHalo, legA, legB, arc, textBg, text, ...(textHandle ? [textHandle] : [])],
       {
         selectable: true,
         evented: true,
@@ -456,7 +546,7 @@ export class DimensionRenderer {
         hasBorders: false,
         lockMovementX: true,
         lockMovementY: true,
-        hoverCursor: 'move',
+        hoverCursor: 'default',
         objectCaching: true,
       }
     ) as DimensionGroup;
@@ -472,7 +562,7 @@ export class DimensionRenderer {
     geometry: ResolvedAreaDimensionGeometry
   ): DimensionGroup {
     const profile = getDimensionStyleProfile(this.settings, dimension.style);
-    const [textBg, text, textHandle] = this.createTextWithBackground(
+    const { bg: textBg, text, textHandle } = this.createTextWithBackground(
       geometry.label,
       geometry.textPosition.x,
       geometry.textPosition.y,
@@ -514,7 +604,7 @@ export class DimensionRenderer {
     });
     this.annotate(hoverHalo, dimension.id, 'hoverHalo');
 
-    const group = new fabric.Group([selectionHalo, hoverHalo, textBg, text, textHandle], {
+    const group = new fabric.Group([selectionHalo, hoverHalo, textBg, text, ...(textHandle ? [textHandle] : [])], {
       selectable: true,
       evented: true,
       subTargetCheck: true,
@@ -522,7 +612,7 @@ export class DimensionRenderer {
       hasBorders: false,
       lockMovementX: true,
       lockMovementY: true,
-      hoverCursor: 'move',
+      hoverCursor: 'default',
       objectCaching: true,
     }) as DimensionGroup;
 
@@ -578,6 +668,8 @@ export class DimensionRenderer {
           obj.set('visible', selected);
         } else if (typed.name === 'hoverHalo') {
           obj.set('visible', !selected && this.hoveredDimensionId === dimensionId);
+        } else if (typed.isDimensionControlDecoration) {
+          obj.set('visible', selected);
         } else if (typed.isDimensionControl) {
           obj.set('visible', selected);
         }

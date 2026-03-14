@@ -246,6 +246,7 @@ export function DrawingCanvas({
     const openingPointerInteractionRef = useRef<OpeningPointerInteraction | null>(null);
     const suppressFabricSelectionSyncRef = useRef(0);
     const dimensionRefreshFrameRef = useRef<number | null>(null);
+    const autoDimensionSyncFrameRef = useRef<number | null>(null);
 
     // Drag interaction state
     const isDraggingObjectRef = useRef(false);
@@ -2523,6 +2524,14 @@ export function DrawingCanvas({
         renderer.setViewportZoom(viewportZoom);
         renderer.setContext(walls, rooms, dimensionSettings);
         renderer.renderAllDimensions(dimensions);
+        const dimensionIdSet = new Set(dimensions.map((dimension) => dimension.id));
+        const selectedDimensionIds = selectedIds.filter((id) => dimensionIdSet.has(id));
+        const hoveredDimensionId =
+            hoveredElementId && dimensionIdSet.has(hoveredElementId)
+                ? hoveredElementId
+                : null;
+        renderer.setSelectedDimensions(selectedDimensionIds);
+        renderer.setHoveredDimension(hoveredDimensionId);
         restackInteractiveOverlays(canvas);
         canvas.requestRenderAll();
         endDragPerfTimer('canvas.refreshDimensionLayer', perfStart, {
@@ -2530,18 +2539,50 @@ export function DrawingCanvas({
             walls: walls.length,
             rooms: rooms.length,
         });
-    }, [walls, rooms, dimensionSettings, dimensions, viewportZoom, restackInteractiveOverlays]);
+    }, [
+        walls,
+        rooms,
+        dimensionSettings,
+        dimensions,
+        viewportZoom,
+        selectedIds,
+        hoveredElementId,
+        restackInteractiveOverlays,
+    ]);
+
+    const scheduleAutoDimensionSync = useCallback(() => {
+        if (typeof window === 'undefined') {
+            syncAutoDimensions();
+            return;
+        }
+        if (autoDimensionSyncFrameRef.current !== null) return;
+        autoDimensionSyncFrameRef.current = window.requestAnimationFrame(() => {
+            autoDimensionSyncFrameRef.current = null;
+            syncAutoDimensions();
+        });
+    }, [syncAutoDimensions]);
 
     // Automatically rebuild all auto-generated dimensions whenever walls, rooms,
     // or dimension settings change — so dimensions are always visible without
     // requiring a manual "Auto Dimension" button press.
-    // Skip while a wall is actively being drawn to avoid mid-draw flicker.
+    // During handle dragging, frame-throttle updates so wall dimensions stay live.
     useEffect(() => {
-        if (isHandleDragging) return;
         if (wallDrawingState.isDrawing) return;
         if (walls.length === 0 && rooms.length === 0) return;
+        if (isHandleDragging) {
+            scheduleAutoDimensionSync();
+            return;
+        }
         syncAutoDimensions();
-    }, [walls, rooms, dimensionSettings, wallDrawingState.isDrawing, isHandleDragging, syncAutoDimensions]);
+    }, [
+        walls,
+        rooms,
+        dimensionSettings,
+        wallDrawingState.isDrawing,
+        isHandleDragging,
+        scheduleAutoDimensionSync,
+        syncAutoDimensions,
+    ]);
 
     const scheduleDimensionLayerRefresh = useCallback(() => {
         if (typeof window === 'undefined') {
@@ -2569,6 +2610,13 @@ export function DrawingCanvas({
             ) {
                 window.cancelAnimationFrame(dimensionRefreshFrameRef.current);
                 dimensionRefreshFrameRef.current = null;
+            }
+            if (
+                autoDimensionSyncFrameRef.current !== null &&
+                typeof window !== 'undefined'
+            ) {
+                window.cancelAnimationFrame(autoDimensionSyncFrameRef.current);
+                autoDimensionSyncFrameRef.current = null;
             }
         };
     }, []);
@@ -4079,6 +4127,13 @@ export function DrawingCanvas({
                     const meta = getTargetMeta(target as fabric.Object | null | undefined);
                     return Boolean(meta.isWallControl || meta.isRoomControl);
                 }) ?? null;
+            const prioritizedDimensionControlTarget =
+                candidateTargets.find((target) => {
+                    const typed = target as fabric.Object & {
+                        isDimensionControl?: boolean;
+                    };
+                    return Boolean(typed.isDimensionControl);
+                }) ?? null;
             const targetMeta = getTargetMeta(prioritizedWallOrRoomTarget ?? hitTarget);
             const directWallId =
                 candidateTargets
@@ -4120,7 +4175,7 @@ export function DrawingCanvas({
                 return;
             }
             const dimensionHandled = handleDimensionSelectMouseDown(
-                hitTarget,
+                prioritizedDimensionControlTarget ?? hitTarget,
                 wallPointMm,
                 addToSelection
             );

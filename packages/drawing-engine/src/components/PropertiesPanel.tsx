@@ -29,18 +29,17 @@ import type {
 import {
   MAX_U_VALUE,
   MAX_WALL_HEIGHT,
-  MAX_WALL_CENTERLINE_OFFSET,
   MAX_WALL_THICKNESS,
   MIN_U_VALUE,
   MIN_WALL_HEIGHT,
   MIN_WALL_THICKNESS,
 } from '../types/wall';
 
-import { fromMillimeters, toMillimeters } from './canvas/scale';
 import {
   circularMeetingFootprintMm,
   squareMeetingFootprintMm,
 } from './canvas/object/three3d/geometry/meeting-tables';
+import { fromMillimeters, toMillimeters } from './canvas/scale';
 
 type PropertyUnit = 'mm' | 'in' | 'ft';
 const COMPASS_DIRECTIONS: CompassDirection[] = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
@@ -331,23 +330,6 @@ function WallSection({ propertyUnit }: { propertyUnit: PropertyUnit }) {
                 updateWall(selectedWall.id, { thickness: nextThicknessMm });
               }}
               className="w-24 px-2 py-1 text-sm border border-amber-200/80 rounded focus:outline-none focus:ring-1 focus:ring-amber-400 bg-white"
-            />
-          </PropertyRow>
-          <PropertyRow label="Offset">
-            <input
-              type="number"
-              min={fromMm(-MAX_WALL_CENTERLINE_OFFSET, propertyUnit)}
-              max={fromMm(MAX_WALL_CENTERLINE_OFFSET, propertyUnit)}
-              step={propertyUnit === 'mm' ? 1 : 0.01}
-              value={fromMm(selectedWall.centerlineOffset ?? 0, propertyUnit).toFixed(2)}
-              onChange={(e) => {
-                const parsed = Number.parseFloat(e.target.value);
-                if (!Number.isFinite(parsed)) return;
-                const nextOffsetMm = clamp(toMm(parsed, propertyUnit), -MAX_WALL_CENTERLINE_OFFSET, MAX_WALL_CENTERLINE_OFFSET);
-                updateWall(selectedWall.id, { centerlineOffset: nextOffsetMm });
-              }}
-              className="w-24 px-2 py-1 text-sm border border-amber-200/80 rounded focus:outline-none focus:ring-1 focus:ring-amber-400 bg-white"
-              title="Perpendicular offset from reference centerline (mm). Use to create corridors/passages."
             />
           </PropertyRow>
           <PropertyRow label="Height">

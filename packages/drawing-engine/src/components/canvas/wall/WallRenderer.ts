@@ -36,11 +36,6 @@ import * as fabric from 'fabric';
 import { colorFromExposure, getArchitecturalMaterial, heatColorFromUValue } from '../../../attributes';
 import type { Point2D, Room, Wall, WallColorMode, WallMaterial, JoinData, SymbolInstance2D } from '../../../types';
 import { WALL_MATERIAL_COLORS } from '../../../types/wall';
-import {
-  computeCornerBevelDotsForEndpoint,
-  computeDeadEndBevelDotsForEndpoint,
-  countWallsTouchingEndpoint,
-} from '../../../utils/wallBevel';
 import { endDragPerfTimer, startDragPerfTimer } from '../perf/dragPerf';
 import { MM_TO_PX } from '../scale';
 
@@ -87,13 +82,8 @@ type WallControlType =
   | 'wall-center-handle'
   | 'wall-endpoint-start'
   | 'wall-endpoint-end'
-  | 'wall-bevel-outer-start'
-  | 'wall-bevel-outer-end'
-  | 'wall-bevel-inner-start'
-  | 'wall-bevel-inner-end'
   | 'wall-thickness-interior'
   | 'wall-thickness-exterior'
-  | 'wall-offset-handle'
   | 'wall-rotation-handle';
 type WallControlObject = NamedObject & {
   isWallControl?: boolean;
@@ -140,37 +130,37 @@ export const VISUAL_CONFIG = {
   hoverFill: 'rgba(15, 118, 110, 0.08)',
 
   // Control handles — all sizes in screen pixels (zoom-independent)
-  endpointRadius: 7,
-  endpointStroke: 2,
-  endpointFill: '#FFFFFF',
-  endpointStrokeColor: '#2563EB',
-  endpointShadow: 'rgba(37, 99, 235, 0.3)',
+  endpointRadius: 8,
+  endpointStroke: 2.2,
+  endpointFill: '#1D4ED8',
+  endpointStrokeColor: '#FFFFFF',
+  endpointShadow: 'rgba(37, 99, 235, 0.34)',
 
-  bevelRadius: 5,
-  bevelStroke: 1.5,
-  bevelOuterFill: '#FF6B35',
-  bevelInnerFill: '#4ECDC4',
-
-  thicknessRadius: 5,
-  thicknessFill: '#F0FDFA',
-  thicknessStroke: '#1D4ED8',
-
-  // Wall offset handle
-  offsetHandleRadius: 6,
-  offsetHandleFill: '#FDE68A',
-  offsetHandleStroke: '#B45309',
-  offsetHandleStrokeWidth: 1.5,
-  offsetHitRadius: 14,
-  offsetReferenceDash: [4, 3],
-  offsetReferenceStroke: '#B45309',
-  offsetReferenceStrokeWidth: 1,
+  thicknessRadius: 8,
+  thicknessFill: '#FFFFFF',
+  thicknessStroke: '#2563EB',
+  thicknessStrokeWidth: 1.8,
+  thicknessIconStroke: '#2563EB',
+  thicknessIconOutline: '#1E3A8A',
+  thicknessIconOutlineWidth: 1.1,
+  thicknessInnerRingStroke: 'rgba(37, 99, 235, 0.35)',
+  thicknessArrowShaftHalf: 4.8,
+  thicknessArrowHeadLength: 3.8,
+  thicknessArrowHeadHalfWidth: 2.9,
+  minThicknessHandleDistancePx: 18,
 
   centerHandleRadius: 10,
-  centerHandleFill: '#EFF6FF',
-  centerHandleStroke: '#2563EB',
+  centerHandleSize: 16,
+  centerHandleFill: '#FFFFFF',
+  centerHandleInnerFill: 'rgba(37, 99, 235, 0.12)',
+  centerHandleStroke: '#1D4ED8',
+  centerHandleInnerStroke: 'rgba(37, 99, 235, 0.45)',
   crossHalf: 4.5,
-  crossStroke: '#1E3A8A',
+  crossStroke: '#1D4ED8',
   crossStrokeWidth: 1.5,
+  moveArrowAxisHalf: 3.6,
+  moveArrowHeadLength: 2.8,
+  moveArrowHeadHalfWidth: 1.8,
 
   rotationRadius: 7.5,
   rotationStroke: '#15803D',
@@ -180,11 +170,11 @@ export const VISUAL_CONFIG = {
   rotationDistanceMm: 300,
 
   // Hit target radii (screen pixels)
-  endpointHitRadius: 14,
-  bevelHitRadius: 12,
-  thicknessHitRadius: 14,
-  centerHitRadius: 14,
-  rotationHitRadius: 14,
+  endpointHitRadius: 16,
+  bevelHitRadius: 13,
+  thicknessHitRadius: 20,
+  centerHitRadius: 20,
+  rotationHitRadius: 16,
 
   // [NEW] Dimension labels
   dimensionFontSize: 11,
@@ -557,16 +547,9 @@ export class WallRenderer {
       const selOutline = group.getObjects().find((obj) => (obj as NamedObject).name === 'selectionOutline');
       const hovOutline = group.getObjects().find((obj) => (obj as NamedObject).name === 'hoverOutline');
       const centerLine = group.getObjects().find((obj) => (obj as NamedObject).name === 'centerLine');
-      const offsetReferenceLine = group.getObjects().find((obj) => (obj as NamedObject).name === 'offsetReferenceLine');
       if (selOutline) selOutline.set('strokeWidth', this.toSceneSize(VISUAL_CONFIG.selectionStrokeWidth));
       if (hovOutline) hovOutline.set('strokeWidth', this.toSceneSize(VISUAL_CONFIG.hoverStrokeWidth));
       if (centerLine) centerLine.set('strokeWidth', this.toSceneSize(VISUAL_CONFIG.centerLineWidth));
-      if (offsetReferenceLine) {
-        offsetReferenceLine.set({
-          strokeWidth: this.toSceneSize(VISUAL_CONFIG.offsetReferenceStrokeWidth),
-          strokeDashArray: VISUAL_CONFIG.offsetReferenceDash.map((value) => this.toSceneSize(value)),
-        });
-      }
       group.getObjects().forEach((obj) => {
         const typed = obj as NamedObject;
         if (!typed.isDoorArc) return;
@@ -970,29 +953,6 @@ export class WallRenderer {
     (centerLine as NamedObject).name = 'centerLine';
     this.annotateWallTarget(centerLine, wall.id);
 
-    // When wall is offset, show a dashed reference line at the original centerline position
-    const offsetRefLine = Math.abs(wall.centerlineOffset ?? 0) > 0.5
-      ? new fabric.Line(
-          [
-            wall.startPoint.x * MM_TO_PX, this.toCanvasY(wall.startPoint.y),
-            wall.endPoint.x * MM_TO_PX, this.toCanvasY(wall.endPoint.y),
-          ],
-          {
-            stroke: VISUAL_CONFIG.offsetReferenceStroke,
-            strokeWidth: this.toSceneSize(VISUAL_CONFIG.offsetReferenceStrokeWidth),
-            strokeDashArray: VISUAL_CONFIG.offsetReferenceDash.map((value) => this.toSceneSize(value)),
-            selectable: false,
-            evented: false,
-            visible: this.showCenterLines,
-            opacity: 0.5,
-          }
-        )
-      : null;
-    if (offsetRefLine) {
-      (offsetRefLine as NamedObject).name = 'offsetReferenceLine';
-      this.annotateWallTarget(offsetRefLine, wall.id);
-    }
-
     const selectionOutline = new fabric.Polygon(canvasVertices, {
       fill: VISUAL_CONFIG.selectionFill,
       stroke: VISUAL_CONFIG.selectionStroke,
@@ -1085,7 +1045,6 @@ export class WallRenderer {
     const objects: fabric.FabricObject[] = [
       fillPolygon, interiorBoundary, exteriorBoundary,
       startCap, endCap, centerLine,
-      ...(offsetRefLine ? [offsetRefLine] : []),
       selectionOutline, hoverOutline,
       ...indicators,
       ...openingObjects,
@@ -1429,6 +1388,23 @@ export class WallRenderer {
     typed.hasBorders = false;
   }
 
+  private annotateControlVisual(
+    control: fabric.FabricObject,
+    wallId: string,
+    controlType: WallControlType
+  ): void {
+    const typed = control as WallControlObject;
+    typed.name = controlType;
+    typed.id = wallId;
+    typed.wallId = wallId;
+    typed.controlType = controlType;
+    typed.isWallControl = true;
+    typed.selectable = false;
+    typed.evented = false;
+    typed.hasControls = false;
+    typed.hasBorders = false;
+  }
+
   private createControlHitTarget(
     point: Point2D,
     wallId: string,
@@ -1465,8 +1441,6 @@ export class WallRenderer {
     this.removeControlPoints(wallId);
     const endpointRadius = this.toSceneSize(VISUAL_CONFIG.endpointRadius);
     const endpointStroke = this.toSceneSize(VISUAL_CONFIG.endpointStroke);
-    const bevelRadius = this.toSceneSize(VISUAL_CONFIG.bevelRadius);
-    const bevelStroke = this.toSceneSize(VISUAL_CONFIG.bevelStroke);
     const rotationRadius = this.toSceneSize(VISUAL_CONFIG.rotationRadius);
     const crossStroke = this.toSceneSize(VISUAL_CONFIG.crossStrokeWidth);
     const stemStroke = this.toSceneSize(VISUAL_CONFIG.rotationStemStroke);
@@ -1543,58 +1517,26 @@ export class WallRenderer {
       wall.endPoint, wallId, 'wall-endpoint-end', 'crosshair', VISUAL_CONFIG.endpointHitRadius
     );
 
-    // Bevel controls
-    const allWalls = Array.from(this.wallData.values());
-    const cornerTolerance = this.toSceneTolerance(10, 2, 180);
-    const startCornerCount = countWallsTouchingEndpoint(wall, 'start', allWalls, cornerTolerance);
-    const endCornerCount = countWallsTouchingEndpoint(wall, 'end', allWalls, cornerTolerance);
-    const startCorner =
-      computeCornerBevelDotsForEndpoint(wall, 'start', allWalls, cornerTolerance)
-      ?? (startCornerCount === 0 ? computeDeadEndBevelDotsForEndpoint(wall, 'start') : null);
-    const endCorner =
-      computeCornerBevelDotsForEndpoint(wall, 'end', allWalls, cornerTolerance)
-      ?? (endCornerCount === 0 ? computeDeadEndBevelDotsForEndpoint(wall, 'end') : null);
-    const startBevel = wall.startBevel ?? { outerOffset: 0, innerOffset: 0 };
-    const endBevel = wall.endBevel ?? { outerOffset: 0, innerOffset: 0 };
-    const showStartBevel = showAdvancedControls && Boolean(startCorner && (
-      startCornerCount === 0 || startBevel.outerOffset > 0.01 || startBevel.innerOffset > 0.01
-    ));
-    const showEndBevel = showAdvancedControls && Boolean(endCorner && (
-      endCornerCount === 0 || endBevel.outerOffset > 0.01 || endBevel.innerOffset > 0.01
-    ));
-
-    const createBevelDot = (
-      corner: NonNullable<typeof startCorner>,
-      ep: 'start' | 'end',
-      kind: 'outer' | 'inner'
-    ): { visual: fabric.Circle; hit: fabric.Circle } => {
-      const dotPos = kind === 'outer' ? corner.outerDotPosition : corner.innerDotPosition;
-      const ctrlType: WallControlType =
-        `wall-bevel-${kind}-${ep}` as WallControlType;
-
-      const dot = new fabric.Circle({
-        left: dotPos.x * MM_TO_PX,
-        top: this.toCanvasY(dotPos.y),
-        radius: bevelRadius,
-        fill: kind === 'outer' ? VISUAL_CONFIG.bevelOuterFill : VISUAL_CONFIG.bevelInnerFill,
-        stroke: '#FFFFFF',
-        strokeWidth: bevelStroke,
-        originX: 'center', originY: 'center',
-        hoverCursor: 'ew-resize',
-        lockMovementX: true, lockMovementY: true,
-        selectable: false, evented: false,
-      });
-      this.annotateControlTarget(dot, wallId, ctrlType);
-      const hit = this.createControlHitTarget(dotPos, wallId, ctrlType, 'ew-resize', VISUAL_CONFIG.bevelHitRadius);
-      return { visual: dot, hit };
+    // Thickness handles: small solid directional arrows for independent face resize.
+    // Keep them pushed away from center at low zoom so they don't overlap the move handle.
+    const wallNormalVector = { x: -unitDir.y, y: unitDir.x };
+    const baseInteriorDistance = Math.hypot(interiorMid.x - mp.x, interiorMid.y - mp.y);
+    const baseExteriorDistance = Math.hypot(exteriorMid.x - mp.x, exteriorMid.y - mp.y);
+    const minThicknessHandleDistance = this.toSceneSize(VISUAL_CONFIG.minThicknessHandleDistancePx) / MM_TO_PX;
+    const thicknessHandleDistance = Math.max(
+      baseInteriorDistance,
+      baseExteriorDistance,
+      minThicknessHandleDistance
+    );
+    const interiorHandlePoint = {
+      x: mp.x + wallNormalVector.x * thicknessHandleDistance,
+      y: mp.y + wallNormalVector.y * thicknessHandleDistance,
+    };
+    const exteriorHandlePoint = {
+      x: mp.x - wallNormalVector.x * thicknessHandleDistance,
+      y: mp.y - wallNormalVector.y * thicknessHandleDistance,
     };
 
-    const startOuterBevel = showStartBevel && startCorner ? createBevelDot(startCorner, 'start', 'outer') : null;
-    const startInnerBevel = showStartBevel && startCorner ? createBevelDot(startCorner, 'start', 'inner') : null;
-    const endOuterBevel = showEndBevel && endCorner ? createBevelDot(endCorner, 'end', 'outer') : null;
-    const endInnerBevel = showEndBevel && endCorner ? createBevelDot(endCorner, 'end', 'inner') : null;
-
-    // Thickness handles: small solid directional arrows for independent face resize.
     const createThicknessArrow = (
       point: Point2D,
       direction: Point2D,
@@ -1606,18 +1548,18 @@ export class WallRenderer {
       const uy = direction.y / directionLength;
       const px = -uy;
       const py = ux;
-      const badgeRadius = this.toSceneSize(6);
-      const shaftHalf = this.toSceneSize(3.1);
-      const headLength = this.toSceneSize(3.6);
-      const headHalfWidth = this.toSceneSize(2.2);
+      const badgeRadius = this.toSceneSize(VISUAL_CONFIG.thicknessRadius);
+      const shaftHalf = this.toSceneSize(VISUAL_CONFIG.thicknessArrowShaftHalf);
+      const headLength = this.toSceneSize(VISUAL_CONFIG.thicknessArrowHeadLength);
+      const headHalfWidth = this.toSceneSize(VISUAL_CONFIG.thicknessArrowHeadHalfWidth);
 
       const badge = new fabric.Circle({
         left: center.x,
         top: center.y,
         radius: badgeRadius,
-        fill: '#FFFFFF',
+        fill: VISUAL_CONFIG.thicknessFill,
         stroke: VISUAL_CONFIG.thicknessStroke,
-        strokeWidth: this.toSceneSize(1.5),
+        strokeWidth: this.toSceneSize(VISUAL_CONFIG.thicknessStrokeWidth),
         originX: 'center',
         originY: 'center',
         hoverCursor: 'ew-resize',
@@ -1633,6 +1575,36 @@ export class WallRenderer {
         }),
       });
       this.annotateControlTarget(badge, wallId, controlType);
+      const badgeRing = new fabric.Circle({
+        left: center.x,
+        top: center.y,
+        radius: Math.max(badgeRadius - this.toSceneSize(1.8), this.toSceneSize(2.1)),
+        fill: 'rgba(0,0,0,0)',
+        stroke: VISUAL_CONFIG.thicknessInnerRingStroke,
+        strokeWidth: this.toSceneSize(1),
+        originX: 'center',
+        originY: 'center',
+        selectable: false,
+        evented: false,
+      });
+      this.annotateControlVisual(badgeRing, wallId, controlType);
+
+      const shaftOutline = new fabric.Line(
+        [
+          center.x - ux * shaftHalf,
+          center.y - uy * shaftHalf,
+          center.x + ux * shaftHalf,
+          center.y + uy * shaftHalf,
+        ],
+        {
+          stroke: VISUAL_CONFIG.thicknessIconOutline,
+          strokeWidth: this.toSceneSize(2.6),
+          strokeLineCap: 'round',
+          selectable: false,
+          evented: false,
+        }
+      );
+      this.annotateControlVisual(shaftOutline, wallId, controlType);
 
       const shaft = new fabric.Line(
         [
@@ -1642,36 +1614,44 @@ export class WallRenderer {
           center.y + uy * shaftHalf,
         ],
         {
-          stroke: VISUAL_CONFIG.thicknessStroke,
-          strokeWidth: this.toSceneSize(1.4),
+          stroke: VISUAL_CONFIG.thicknessIconStroke,
+          strokeWidth: this.toSceneSize(1.45),
           strokeLineCap: 'round',
           selectable: false,
           evented: false,
         }
       );
-      const headBase = {
-        x: center.x + ux * shaftHalf,
-        y: center.y + uy * shaftHalf,
+      this.annotateControlVisual(shaft, wallId, controlType);
+
+      const createHead = (sign: 1 | -1): fabric.Polygon => {
+        const headBase = {
+          x: center.x + ux * shaftHalf * sign,
+          y: center.y + uy * shaftHalf * sign,
+        };
+        const headTip = {
+          x: headBase.x + ux * headLength * sign,
+          y: headBase.y + uy * headLength * sign,
+        };
+        const headLeft = {
+          x: headBase.x + px * headHalfWidth,
+          y: headBase.y + py * headHalfWidth,
+        };
+        const headRight = {
+          x: headBase.x - px * headHalfWidth,
+          y: headBase.y - py * headHalfWidth,
+        };
+        return new fabric.Polygon([headTip, headLeft, headRight], {
+          fill: VISUAL_CONFIG.thicknessIconStroke,
+          stroke: VISUAL_CONFIG.thicknessIconOutline,
+          strokeWidth: this.toSceneSize(VISUAL_CONFIG.thicknessIconOutlineWidth),
+          selectable: false,
+          evented: false,
+        });
       };
-      const headTip = {
-        x: headBase.x + ux * headLength,
-        y: headBase.y + uy * headLength,
-      };
-      const headLeft = {
-        x: headBase.x + px * headHalfWidth,
-        y: headBase.y + py * headHalfWidth,
-      };
-      const headRight = {
-        x: headBase.x - px * headHalfWidth,
-        y: headBase.y - py * headHalfWidth,
-      };
-      const head = new fabric.Polygon([headTip, headLeft, headRight], {
-        fill: VISUAL_CONFIG.thicknessStroke,
-        stroke: VISUAL_CONFIG.thicknessStroke,
-        strokeWidth: this.toSceneSize(0.8),
-        selectable: false,
-        evented: false,
-      });
+      const headForward = createHead(1);
+      const headBackward = createHead(-1);
+      this.annotateControlVisual(headForward, wallId, controlType);
+      this.annotateControlVisual(headBackward, wallId, controlType);
 
       const hit = this.createControlHitTarget(
         point,
@@ -1680,17 +1660,16 @@ export class WallRenderer {
         'ew-resize',
         VISUAL_CONFIG.thicknessHitRadius
       );
-      return { visuals: [badge, shaft, head], hit };
+      return { visuals: [badge, badgeRing, shaftOutline, shaft, headForward, headBackward], hit };
     };
 
-    const wallNormalVector = { x: -unitDir.y, y: unitDir.x };
     const interiorThickness = createThicknessArrow(
-      interiorMid,
+      interiorHandlePoint,
       wallNormalVector,
       'wall-thickness-interior'
     );
     const exteriorThickness = createThicknessArrow(
-      exteriorMid,
+      exteriorHandlePoint,
       { x: -wallNormalVector.x, y: -wallNormalVector.y },
       'wall-thickness-exterior'
     );
@@ -1702,14 +1681,15 @@ export class WallRenderer {
     // Mid-thickness move handle
     const centerX = mp.x * MM_TO_PX;
     const centerY = this.toCanvasY(mp.y);
-    const moveHandleSize = this.toSceneSize(14);
+    const wallAngleDeg = (Math.atan2(unitDir.y, unitDir.x) * 180) / Math.PI;
+    const moveHandleSize = this.toSceneSize(VISUAL_CONFIG.centerHandleSize);
     const centerHandle = new fabric.Rect({
       left: centerX,
       top: centerY,
       width: moveHandleSize,
       height: moveHandleSize,
-      rx: this.toSceneSize(3),
-      ry: this.toSceneSize(3),
+      rx: this.toSceneSize(3.5),
+      ry: this.toSceneSize(3.5),
       fill: VISUAL_CONFIG.centerHandleFill,
       stroke: VISUAL_CONFIG.centerHandleStroke,
       strokeWidth: endpointStroke,
@@ -1718,6 +1698,7 @@ export class WallRenderer {
       hoverCursor: 'move',
       lockMovementX: true,
       lockMovementY: true,
+      angle: wallAngleDeg,
       selectable: false,
       evented: false,
       shadow: new fabric.Shadow({
@@ -1728,14 +1709,38 @@ export class WallRenderer {
       }),
     });
     this.annotateControlTarget(centerHandle, wallId, 'wall-center-handle');
+    const centerHandleInner = new fabric.Rect({
+      left: centerX,
+      top: centerY,
+      width: Math.max(moveHandleSize - this.toSceneSize(4.2), this.toSceneSize(8)),
+      height: Math.max(moveHandleSize - this.toSceneSize(4.2), this.toSceneSize(8)),
+      rx: this.toSceneSize(2.6),
+      ry: this.toSceneSize(2.6),
+      fill: VISUAL_CONFIG.centerHandleInnerFill,
+      stroke: VISUAL_CONFIG.centerHandleInnerStroke,
+      strokeWidth: this.toSceneSize(0.9),
+      originX: 'center',
+      originY: 'center',
+      angle: wallAngleDeg,
+      selectable: false,
+      evented: false,
+    });
+    this.annotateControlVisual(centerHandleInner, wallId, 'wall-center-handle');
     const centerHandleHit = this.createControlHitTarget(
       mp, wallId, 'wall-center-handle', 'move', VISUAL_CONFIG.centerHitRadius
     );
-    const moveAxisHalf = this.toSceneSize(2.9);
-    const moveHeadLength = this.toSceneSize(2.2);
-    const moveHeadHalfWidth = this.toSceneSize(1.4);
+    const moveAxisHalf = this.toSceneSize(VISUAL_CONFIG.moveArrowAxisHalf);
+    const moveHeadLength = this.toSceneSize(VISUAL_CONFIG.moveArrowHeadLength);
+    const moveHeadHalfWidth = this.toSceneSize(VISUAL_CONFIG.moveArrowHeadHalfWidth);
+    const wallAxis = { x: unitDir.x, y: unitDir.y };
+    const wallPerp = { x: -unitDir.y, y: unitDir.x };
     const moveGlyphH = new fabric.Line(
-      [centerX - moveAxisHalf, centerY, centerX + moveAxisHalf, centerY],
+      [
+        centerX - wallAxis.x * moveAxisHalf,
+        centerY - wallAxis.y * moveAxisHalf,
+        centerX + wallAxis.x * moveAxisHalf,
+        centerY + wallAxis.y * moveAxisHalf,
+      ],
       {
         stroke: VISUAL_CONFIG.crossStroke,
         strokeWidth: crossStroke,
@@ -1743,8 +1748,14 @@ export class WallRenderer {
         evented: false,
       }
     );
+    this.annotateControlVisual(moveGlyphH, wallId, 'wall-center-handle');
     const moveGlyphV = new fabric.Line(
-      [centerX, centerY - moveAxisHalf, centerX, centerY + moveAxisHalf],
+      [
+        centerX - wallPerp.x * moveAxisHalf,
+        centerY - wallPerp.y * moveAxisHalf,
+        centerX + wallPerp.x * moveAxisHalf,
+        centerY + wallPerp.y * moveAxisHalf,
+      ],
       {
         stroke: VISUAL_CONFIG.crossStroke,
         strokeWidth: crossStroke,
@@ -1752,17 +1763,18 @@ export class WallRenderer {
         evented: false,
       }
     );
+    this.annotateControlVisual(moveGlyphV, wallId, 'wall-center-handle');
 
-    const createMoveHead = (dx: number, dy: number): fabric.Polygon => {
+    const createMoveHead = (dir: Point2D): fabric.Polygon => {
       const tip = {
-        x: centerX + dx * (moveAxisHalf + moveHeadLength),
-        y: centerY + dy * (moveAxisHalf + moveHeadLength),
+        x: centerX + dir.x * (moveAxisHalf + moveHeadLength),
+        y: centerY + dir.y * (moveAxisHalf + moveHeadLength),
       };
       const base = {
-        x: centerX + dx * moveAxisHalf,
-        y: centerY + dy * moveAxisHalf,
+        x: centerX + dir.x * moveAxisHalf,
+        y: centerY + dir.y * moveAxisHalf,
       };
-      const perp = { x: -dy, y: dx };
+      const perp = { x: -dir.y, y: dir.x };
       const left = {
         x: base.x + perp.x * moveHeadHalfWidth,
         y: base.y + perp.y * moveHeadHalfWidth,
@@ -1779,10 +1791,18 @@ export class WallRenderer {
         evented: false,
       });
     };
-    const moveHeadRight = createMoveHead(1, 0);
-    const moveHeadLeft = createMoveHead(-1, 0);
-    const moveHeadDown = createMoveHead(0, 1);
-    const moveHeadUp = createMoveHead(0, -1);
+    const moveHeadAlong = createMoveHead(wallAxis);
+    const moveHeadAgainst = createMoveHead({ x: -wallAxis.x, y: -wallAxis.y });
+    const moveHeadPerp = createMoveHead(wallPerp);
+    const moveHeadPerpOpposite = createMoveHead({ x: -wallPerp.x, y: -wallPerp.y });
+    const moveHeadRight = moveHeadAlong;
+    const moveHeadLeft = moveHeadAgainst;
+    const moveHeadDown = moveHeadPerp;
+    const moveHeadUp = moveHeadPerpOpposite;
+    this.annotateControlVisual(moveHeadRight, wallId, 'wall-center-handle');
+    this.annotateControlVisual(moveHeadLeft, wallId, 'wall-center-handle');
+    this.annotateControlVisual(moveHeadDown, wallId, 'wall-center-handle');
+    this.annotateControlVisual(moveHeadUp, wallId, 'wall-center-handle');
 
     // Rotation handle
     const rotationStem = new fabric.Line(
@@ -1795,6 +1815,7 @@ export class WallRenderer {
         selectable: false, evented: false,
       }
     );
+    this.annotateControlVisual(rotationStem, wallId, 'wall-rotation-handle');
     const rotationHandle = new fabric.Circle({
       left: rotationPoint.x * MM_TO_PX, top: this.toCanvasY(rotationPoint.y),
       radius: rotationRadius,
@@ -1816,112 +1837,35 @@ export class WallRenderer {
       originX: 'center', originY: 'center',
       selectable: false, evented: false,
     });
+    this.annotateControlVisual(rotationLabel, wallId, 'wall-rotation-handle');
 
     const showRotation = showAdvancedControls && this.canRotateWall(wall);
 
-    // Offset handle: positioned at 1/4 along the wall on the centerline,
-    // shows current offset distance and allows perpendicular drag to adjust.
-    const offsetHandleObjects: fabric.FabricObject[] = [];
-    if (showAdvancedControls) {
-      const quarterPoint = {
-        x: wall.startPoint.x + (wall.endPoint.x - wall.startPoint.x) * 0.25,
-        y: wall.startPoint.y + (wall.endPoint.y - wall.startPoint.y) * 0.25,
-      };
-      const currentOffset = wall.centerlineOffset ?? 0;
-      // Offset handle sits on the actual wall body center (shifted by offset)
-      const offsetHandlePos = {
-        x: quarterPoint.x + (-unitDir.y) * currentOffset,
-        y: quarterPoint.y + unitDir.x * currentOffset,
-      };
-      const offsetRadius = this.toSceneSize(VISUAL_CONFIG.offsetHandleRadius);
-
-      // If offset is non-zero, draw a dashed reference line from reference point to handle
-      if (Math.abs(currentOffset) > 0.5) {
-        const refLineCanvas = new fabric.Line(
-          [
-            quarterPoint.x * MM_TO_PX, this.toCanvasY(quarterPoint.y),
-            offsetHandlePos.x * MM_TO_PX, this.toCanvasY(offsetHandlePos.y),
-          ],
-          {
-            stroke: VISUAL_CONFIG.offsetReferenceStroke,
-            strokeWidth: this.toSceneSize(VISUAL_CONFIG.offsetReferenceStrokeWidth),
-            strokeDashArray: VISUAL_CONFIG.offsetReferenceDash.map((v) => this.toSceneSize(v)),
-            selectable: false,
-            evented: false,
-          }
-        );
-        offsetHandleObjects.push(refLineCanvas);
-      }
-
-      const offsetHandle = new fabric.Circle({
-        left: offsetHandlePos.x * MM_TO_PX,
-        top: this.toCanvasY(offsetHandlePos.y),
-        radius: offsetRadius,
-        fill: VISUAL_CONFIG.offsetHandleFill,
-        stroke: VISUAL_CONFIG.offsetHandleStroke,
-        strokeWidth: this.toSceneSize(VISUAL_CONFIG.offsetHandleStrokeWidth),
-        originX: 'center',
-        originY: 'center',
-        hoverCursor: 'ns-resize',
-        lockMovementX: true,
-        lockMovementY: true,
-        selectable: false,
-        evented: false,
-        shadow: new fabric.Shadow({
-          color: 'rgba(180, 83, 9, 0.25)',
-          blur: this.toSceneSize(5),
-          offsetX: 0,
-          offsetY: this.toSceneSize(1),
-        }),
-      });
-      this.annotateControlTarget(offsetHandle, wallId, 'wall-offset-handle');
-
-      // Small "O" label inside handle
-      const offsetLabel = new fabric.Text('O', {
-        left: offsetHandlePos.x * MM_TO_PX,
-        top: this.toCanvasY(offsetHandlePos.y),
-        fill: VISUAL_CONFIG.offsetHandleStroke,
-        fontSize: this.toSceneSize(8),
-        fontFamily: 'Arial',
-        fontWeight: 'bold',
-        originX: 'center',
-        originY: 'center',
-        selectable: false,
-        evented: false,
-      });
-
-      const offsetHit = this.createControlHitTarget(
-        offsetHandlePos, wallId, 'wall-offset-handle', 'ns-resize', VISUAL_CONFIG.offsetHitRadius
-      );
-
-      offsetHandleObjects.push(offsetHit, offsetHandle, offsetLabel);
-    }
-
-    const controls: fabric.FabricObject[] = [
-      startHandleHit, startHandle,
-      endHandleHit, endHandle,
-      ...(startOuterBevel ? [startOuterBevel.hit, startOuterBevel.visual] : []),
-      ...(startInnerBevel ? [startInnerBevel.hit, startInnerBevel.visual] : []),
-      ...(endOuterBevel ? [endOuterBevel.hit, endOuterBevel.visual] : []),
-      ...(endInnerBevel ? [endInnerBevel.hit, endInnerBevel.visual] : []),
+    const centerControls: fabric.FabricObject[] = [
       centerHandleHit,
       centerHandle,
+      centerHandleInner,
       moveGlyphH,
       moveGlyphV,
       moveHeadRight,
       moveHeadLeft,
       moveHeadDown,
       moveHeadUp,
+    ];
+
+    const controls: fabric.FabricObject[] = [
+      startHandleHit, startHandle,
+      endHandleHit, endHandle,
       ...(showAdvancedControls
         ? [
           interiorThicknessHit,
           ...interiorThicknessVisuals,
           exteriorThicknessHit,
           ...exteriorThicknessVisuals,
-          ...offsetHandleObjects,
         ]
         : []),
       ...(showRotation ? [rotationStem, rotationHandleHit, rotationHandle, rotationLabel] : []),
+      ...centerControls,
     ];
 
     controls.forEach((control) => this.canvas.add(control));

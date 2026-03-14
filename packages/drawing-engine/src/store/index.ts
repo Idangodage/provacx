@@ -1327,6 +1327,10 @@ function normalizeDimensionPayload(
       ? { ...points[0] }
       : { x: 0, y: 0 };
   const precision = payload.precision ?? settings.precision;
+  const safeTextPositionRatio =
+    Number.isFinite(payload.textPositionRatio)
+      ? Math.min(0.92, Math.max(0.08, payload.textPositionRatio as number))
+      : undefined;
 
   return {
     ...payload,
@@ -1338,7 +1342,91 @@ function normalizeDimensionPayload(
     displayFormat: payload.displayFormat ?? settings.displayFormat,
     offset: Number.isFinite(payload.offset) ? payload.offset : settings.defaultOffset,
     textPositionLocked: payload.textPositionLocked ?? false,
+    textPositionRatio: safeTextPositionRatio,
   };
+}
+
+function isAutoManagedDimension(
+  dimension: Pick<Dimension2D, 'baselineGroupId' | 'linkedRoomId'>
+): boolean {
+  return Boolean(dimension.baselineGroupId || dimension.linkedRoomId);
+}
+
+function autoManagedDimensionKey(
+  dimension: Pick<
+    Dimension2D,
+    'type' | 'baselineGroupId' | 'linkedRoomId' | 'linkedWallIds'
+  >
+): string | null {
+  if (dimension.linkedRoomId) {
+    return `area:${dimension.type}:${dimension.linkedRoomId}`;
+  }
+
+  if (!dimension.baselineGroupId) {
+    return null;
+  }
+
+  const primaryWallId = dimension.linkedWallIds?.[0];
+  if (!primaryWallId) {
+    return null;
+  }
+
+  return [
+    'wall',
+    primaryWallId,
+    dimension.type,
+  ].join(':');
+}
+
+function mergeAutoManagedDimensions(
+  generatedDimensions: Array<Omit<Dimension2D, 'id'>>,
+  existingDimensions: Dimension2D[],
+  settings: DimensionSettings
+): Dimension2D[] {
+  const existingByKey = new Map<string, Dimension2D>();
+
+  existingDimensions.forEach((dimension) => {
+    if (!isAutoManagedDimension(dimension)) {
+      return;
+    }
+
+    const key = autoManagedDimensionKey(dimension);
+    if (!key || existingByKey.has(key)) {
+      return;
+    }
+
+    existingByKey.set(key, dimension);
+  });
+
+  return generatedDimensions.map((dimension) => {
+    const normalized = normalizeDimensionPayload(dimension, settings);
+    const key = autoManagedDimensionKey(normalized);
+    const existing = key ? existingByKey.get(key) : null;
+
+    if (!existing) {
+      return {
+        ...normalized,
+        id: generateId(),
+      };
+    }
+
+    return {
+      ...normalized,
+      id: existing.id,
+      offset: Number.isFinite(existing.offset) ? existing.offset : normalized.offset,
+      textPosition: existing.textPositionLocked
+        ? { ...existing.textPosition }
+        : normalized.textPosition,
+      textPositionLocked: existing.textPositionLocked ?? normalized.textPositionLocked,
+      textPositionRatio: existing.textPositionLocked
+        ? existing.textPositionRatio ?? normalized.textPositionRatio
+        : normalized.textPositionRatio,
+      text: existing.text,
+      isDesignValue: existing.isDesignValue,
+      baselineOrigin: existing.baselineOrigin ? { ...existing.baselineOrigin } : normalized.baselineOrigin,
+      visible: existing.visible,
+    };
+  });
 }
 
 // =============================================================================
@@ -1803,12 +1891,11 @@ export const useDrawingStore = create<DrawingState>()(
         const { walls, rooms, dimensionSettings, dimensions } = get();
         const autoLinear = buildAutoWallDimensions(walls, rooms, dimensionSettings);
         const autoArea = buildRoomAreaDimensions(rooms, dimensionSettings);
-        const preserved = dimensions.filter((dimension) => !dimension.baselineGroupId && !dimension.linkedRoomId);
+        const preserved = dimensions.filter((dimension) => !isAutoManagedDimension(dimension));
         set({
           dimensions: [
             ...preserved,
-            ...autoLinear.map((dimension) => ({ ...normalizeDimensionPayload(dimension, dimensionSettings), id: generateId() })),
-            ...autoArea.map((dimension) => ({ ...normalizeDimensionPayload(dimension, dimensionSettings), id: generateId() })),
+            ...mergeAutoManagedDimensions([...autoLinear, ...autoArea], dimensions, dimensionSettings),
           ],
         });
         get().saveToHistory('Auto dimension exterior walls');
@@ -1825,12 +1912,11 @@ export const useDrawingStore = create<DrawingState>()(
         if (walls.length === 0 && rooms.length === 0) return;
         const autoLinear = buildAutoWallDimensions(walls, rooms, dimensionSettings);
         const autoArea = buildRoomAreaDimensions(rooms, dimensionSettings);
-        const preserved = dimensions.filter((d) => !d.baselineGroupId && !d.linkedRoomId);
+        const preserved = dimensions.filter((dimension) => !isAutoManagedDimension(dimension));
         set({
           dimensions: [
             ...preserved,
-            ...autoLinear.map((d) => ({ ...normalizeDimensionPayload(d, dimensionSettings), id: generateId() })),
-            ...autoArea.map((d) => ({ ...normalizeDimensionPayload(d, dimensionSettings), id: generateId() })),
+            ...mergeAutoManagedDimensions([...autoLinear, ...autoArea], dimensions, dimensionSettings),
           ],
         });
       },
@@ -2817,7 +2903,8 @@ export const useDrawingStore = create<DrawingState>()(
           get().updateWalls(updates, {
             skipHistory: true,
             source: 'drag',
-            skipRoomDetection: true,
+            // Keep room geometry and area labels live while dragging a room.
+            skipRoomDetection: false,
           });
         }
 

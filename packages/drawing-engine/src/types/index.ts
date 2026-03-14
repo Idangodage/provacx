@@ -184,6 +184,7 @@ export interface Dimension2D {
   isAssociative?: boolean;
   isDesignValue?: boolean;
   textPositionLocked?: boolean;
+  textPositionRatio?: number;
   chainGroupId?: string;
   baselineGroupId?: string;
   baselineOrigin?: Point2D;

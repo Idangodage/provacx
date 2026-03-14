@@ -35,7 +35,9 @@ export interface ResolvedLinearDimensionGeometry {
   direction: Point2D;
   normal: Point2D;
   midpoint: Point2D;
+  length: number;
   textPosition: Point2D;
+  textPositionRatio: number;
   valueMm: number;
   label: string;
 }
@@ -86,6 +88,10 @@ function midpoint(a: Point2D, b: Point2D): Point2D {
   return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
 }
 
+function dot(a: Point2D, b: Point2D): number {
+  return a.x * b.x + a.y * b.y;
+}
+
 function magnitude(vector: Point2D): number {
   return Math.hypot(vector.x, vector.y);
 }
@@ -113,6 +119,10 @@ function toPoint(angle: number, radius: number): Point2D {
 
 function near(value: number, target: number, tolerance: number): boolean {
   return Math.abs(value - target) <= tolerance;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 function valueToFtIn(mm: number, precision: number): string {
@@ -302,9 +312,23 @@ function buildLinearGeometry(
   const extensionBStart = add(p2, scale(normal, extensionGap));
   const extensionBEnd = add(dimensionEnd, scale(normal, extensionBeyond));
   const mid = midpoint(dimensionStart, dimensionEnd);
-  const textPosition = dimension.textPositionLocked
-    ? { ...dimension.textPosition }
-    : { ...mid };
+  const lineLength = magnitude(subtract(dimensionEnd, dimensionStart));
+  const projectedTextRatio =
+    lineLength > 0.000001
+      ? clamp(
+        dot(subtract(dimension.textPosition, dimensionStart), direction) / lineLength,
+        0.08,
+        0.92
+      )
+      : 0.5;
+  const textPositionRatio = dimension.textPositionLocked
+    ? (
+      Number.isFinite(dimension.textPositionRatio)
+        ? clamp(dimension.textPositionRatio as number, 0.08, 0.92)
+        : projectedTextRatio
+    )
+    : 0.5;
+  const textPosition = add(dimensionStart, scale(direction, lineLength * textPositionRatio));
   const designValueLabel = dimension.isDesignValue
     ? (
       dimension.text && dimension.text.trim().length > 0
@@ -331,7 +355,9 @@ function buildLinearGeometry(
     direction,
     normal,
     midpoint: mid,
+    length: lineLength,
     textPosition,
+    textPositionRatio,
     valueMm,
     label,
   };
