@@ -18,6 +18,8 @@ type NamedObject = fabric.Object & {
   id?: string;
   name?: string;
   objectId?: string;
+  objectCategory?: ArchitecturalObjectDefinition['category'];
+  allowRotationControl?: boolean;
 };
 
 type ObjectGroup = fabric.Group & {
@@ -25,6 +27,8 @@ type ObjectGroup = fabric.Group & {
   objectId?: string;
   name?: string;
   isOpeningSymbol?: boolean;
+  objectCategory?: ArchitecturalObjectDefinition['category'];
+  allowRotationControl?: boolean;
 };
 
 function definitionFallback(definitionId: string): ArchitecturalObjectDefinition {
@@ -585,6 +589,12 @@ export class ObjectRenderer {
       instanceCategory === 'doors' ||
       instanceCategory === 'windows' ||
       hasOpeningHost;
+    const allowRotationControl = !isPreview && !isOpening && (
+      definition.category === 'furniture' ||
+      definition.category === 'fixtures' ||
+      definition.category === 'symbols' ||
+      definition.category === 'my-library'
+    );
     const stroke = isPreview
       ? isOpening
         ? '#111827'
@@ -693,6 +703,8 @@ export class ObjectRenderer {
     group.objectId = instance.id;
     group.name = `object-${instance.id}`;
     group.isOpeningSymbol = isOpening;
+    group.objectCategory = definition.category;
+    group.allowRotationControl = allowRotationControl;
     return group;
   }
 
@@ -837,6 +849,17 @@ export class ObjectRenderer {
       group.set('dirty', true);
     });
     this.canvas.requestRenderAll();
+  }
+
+  activateObject(objectId: string): boolean {
+    const group = this.groups.get(objectId);
+    if (!group || group.isOpeningSymbol) {
+      return false;
+    }
+
+    this.canvas.setActiveObject(group);
+    this.canvas.requestRenderAll();
+    return true;
   }
 
   renderPlacementPreview(

@@ -82,6 +82,24 @@ function projectPointParameter(point: Point2D, start: Point2D, end: Point2D): nu
   return ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSq;
 }
 
+function closestPointOnSegment(
+  point: Point2D,
+  start: Point2D,
+  end: Point2D
+): { point: Point2D; t: number; distance: number } {
+  const rawT = projectPointParameter(point, start, end);
+  const t = Math.min(1, Math.max(0, rawT));
+  const projected = {
+    x: start.x + (end.x - start.x) * t,
+    y: start.y + (end.y - start.y) * t,
+  };
+  return {
+    point: projected,
+    t,
+    distance: Math.hypot(point.x - projected.x, point.y - projected.y),
+  };
+}
+
 function pointOnSegment(
   point: Point2D,
   start: Point2D,
@@ -204,6 +222,44 @@ function buildGraph(walls: Wall[]): {
       const pointsB = wallSplitPoints.get(wallB.id);
       if (!pointsA || !pointsB) continue;
 
+      const explicitlyConnected =
+        wallA.connectedWalls.includes(wallB.id) || wallB.connectedWalls.includes(wallA.id);
+      const explicitJoinTolerance = explicitlyConnected
+        ? Math.max(
+            NODE_TOLERANCE_MM,
+            Math.max(wallA.thickness, wallB.thickness) * 0.5 + NODE_TOLERANCE_MM
+          )
+        : NODE_TOLERANCE_MM;
+
+      const replaceNearbyPoint = (
+        points: Point2D[],
+        original: Point2D,
+        replacement: Point2D,
+        tolerance: number
+      ) => {
+        const toleranceSq = tolerance * tolerance;
+        const index = points.findIndex((candidate) => distanceSquared(candidate, original) <= toleranceSq);
+        if (index >= 0) {
+          points[index] = { ...replacement };
+          return;
+        }
+        addUniquePoint(points, replacement, tolerance);
+      };
+
+      const snapEndpointToConnectedWall = (
+        endpoint: Point2D,
+        ownerPoints: Point2D[],
+        hostPoints: Point2D[],
+        hostWall: Wall
+      ) => {
+        if (!explicitlyConnected) return;
+        const projection = closestPointOnSegment(endpoint, hostWall.startPoint, hostWall.endPoint);
+        if (projection.distance > explicitJoinTolerance) return;
+
+        replaceNearbyPoint(ownerPoints, endpoint, projection.point, explicitJoinTolerance);
+        addUniquePoint(hostPoints, projection.point, explicitJoinTolerance);
+      };
+
       const intersection = segmentIntersectionPoint(
         wallA.startPoint,
         wallA.endPoint,
@@ -222,13 +278,17 @@ function buildGraph(walls: Wall[]): {
         if (pointOnSegment(endpoint, wallB.startPoint, wallB.endPoint)) {
           addUniquePoint(pointsA, endpoint);
           addUniquePoint(pointsB, endpoint);
+          return;
         }
+        snapEndpointToConnectedWall(endpoint, pointsA, pointsB, wallB);
       });
       endpointsB.forEach((endpoint) => {
         if (pointOnSegment(endpoint, wallA.startPoint, wallA.endPoint)) {
           addUniquePoint(pointsA, endpoint);
           addUniquePoint(pointsB, endpoint);
+          return;
         }
+        snapEndpointToConnectedWall(endpoint, pointsB, pointsA, wallA);
       });
     }
   }

@@ -206,6 +206,18 @@ function removeOpeningsLinkedToSymbols(
   });
 }
 
+function removeDimensionsLinkedToWallIds(
+  dimensions: Dimension2D[],
+  wallIds: Set<string>
+): Dimension2D[] {
+  if (wallIds.size === 0) return dimensions;
+  return dimensions.filter((dimension) => {
+    const linkedWallIds = dimension.linkedWallIds;
+    if (!linkedWallIds || linkedWallIds.length === 0) return true;
+    return linkedWallIds.every((wallId) => !wallIds.has(wallId));
+  });
+}
+
 function clampValue(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
@@ -2718,6 +2730,7 @@ export const useDrawingStore = create<DrawingState>()(
       deleteWall: (id) => {
         const wallToDelete = get().walls.find((wall) => wall.id === id);
         if (!wallToDelete) return;
+        const deletedWallIds = new Set([id]);
 
         set((state) => ({
           walls: state.walls
@@ -2741,6 +2754,7 @@ export const useDrawingStore = create<DrawingState>()(
             ...room,
             wallIds: room.wallIds.filter((wallId) => wallId !== id),
           })),
+          dimensions: removeDimensionsLinkedToWallIds(state.dimensions, deletedWallIds),
         }));
         get().detectRooms();
         get().regenerateElevations();
@@ -3182,6 +3196,7 @@ export const useDrawingStore = create<DrawingState>()(
             ...room,
             wallIds: room.wallIds.filter((wallId) => !idsSet.has(wallId)),
           })),
+          dimensions: removeDimensionsLinkedToWallIds(state.dimensions, idsSet),
         }));
         get().detectRooms();
         get().regenerateElevations();
@@ -3254,6 +3269,9 @@ export const useDrawingStore = create<DrawingState>()(
         const removedSymbolIds = new Set(
           symbols.filter((symbol) => selectedSet.has(symbol.id)).map((symbol) => symbol.id)
         );
+        const removedWallIds = new Set(
+          walls.filter((wall) => selectedSet.has(wall.id)).map((wall) => wall.id)
+        );
         const roomsAtRisk = rooms.filter((room) =>
           room.wallIds.some((wallId) => selectedSet.has(wallId))
         );
@@ -3284,7 +3302,10 @@ export const useDrawingStore = create<DrawingState>()(
         );
 
         set({
-          dimensions: dimensions.filter((d) => !selectedSet.has(d.id)),
+          dimensions: removeDimensionsLinkedToWallIds(
+            dimensions.filter((d) => !selectedSet.has(d.id)),
+            removedWallIds
+          ),
           annotations: annotations.filter((a) => !selectedSet.has(a.id)),
           sketches: sketches.filter((s) => !selectedSet.has(s.id)),
           symbols: symbols.filter((s) => !selectedSet.has(s.id)),

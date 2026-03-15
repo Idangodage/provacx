@@ -148,9 +148,45 @@ const hideActiveSelectionChrome = (canvas: fabric.Canvas | null): void => {
     const activeObject = canvas.getActiveObject() as
         | (fabric.Object & {
             setControlsVisibility?: (options: Record<string, boolean>) => void;
+            allowRotationControl?: boolean;
+            objectCategory?: string;
+            controls?: Record<string, fabric.Control | undefined>;
         })
         | null;
     if (!activeObject) return;
+
+    if (activeObject.allowRotationControl) {
+        activeObject.set({
+            hasControls: true,
+            hasBorders: false,
+            borderColor: 'rgba(0,0,0,0)',
+            cornerColor: '#2563EB',
+            cornerStrokeColor: '#FFFFFF',
+            transparentCorners: false,
+            cornerSize: 14,
+            touchCornerSize: 26,
+            padding: 0,
+        });
+        if (typeof activeObject.setControlsVisibility === 'function') {
+            activeObject.setControlsVisibility({
+                tl: false,
+                tr: false,
+                bl: false,
+                br: false,
+                ml: false,
+                mt: false,
+                mr: false,
+                mb: false,
+                mtr: true,
+            });
+        }
+        const rotationControl = activeObject.controls?.mtr;
+        if (rotationControl) {
+            rotationControl.offsetY = -28;
+            rotationControl.withConnection = true;
+        }
+        return;
+    }
 
     activeObject.set({
         hasControls: false,
@@ -2924,6 +2960,10 @@ export function DrawingCanvas({
         const symbolIdSet = new Set(symbols.map((symbol) => symbol.id));
         const selectedSymbolIds = selectedIds.filter((id) => symbolIdSet.has(id));
         objectRendererRef.current?.setSelectedObjects(selectedSymbolIds);
+        if (tool === 'select' && selectedIds.length === 1 && selectedSymbolIds.length === 1) {
+            objectRendererRef.current?.activateObject(selectedSymbolIds[0]);
+            hideActiveSelectionChrome(fabricRef.current);
+        }
     }, [symbols, selectedIds]);
 
     useEffect(() => {
@@ -4667,10 +4707,28 @@ export function DrawingCanvas({
             const objectId = resolveObjectIdFromTarget(event.target);
             if (!objectId) return;
             const nativeEvent = event.e as MouseEvent | undefined;
-            if (nativeEvent?.ctrlKey) {
-                const angle = event.target.angle ?? 0;
-                event.target.set('angle', Math.round(angle / 15) * 15);
+            const normalizeAngle = (value: number) => ((value % 360) + 360) % 360;
+            const majorAngles = [0, 45, 90, 135, 180, 225, 270, 315];
+            const currentAngle = normalizeAngle(event.target.angle ?? 0);
+            const nearestMajorAngle = majorAngles.reduce((best, candidate) => {
+                const candidateDelta = Math.abs(candidate - currentAngle);
+                const wrappedDelta = Math.min(candidateDelta, 360 - candidateDelta);
+                const bestDelta = Math.abs(best - currentAngle);
+                const wrappedBestDelta = Math.min(bestDelta, 360 - bestDelta);
+                return wrappedDelta < wrappedBestDelta ? candidate : best;
+            }, majorAngles[0] ?? 0);
+            const snapToIncrement = nativeEvent?.shiftKey || nativeEvent?.ctrlKey;
+            if (snapToIncrement) {
+                event.target.set('angle', Math.round(currentAngle / 15) * 15);
+            } else {
+                const delta = Math.abs(nearestMajorAngle - currentAngle);
+                const wrappedDelta = Math.min(delta, 360 - delta);
+                if (wrappedDelta <= 4) {
+                    event.target.set('angle', nearestMajorAngle);
+                }
             }
+            const liveAngle = ((event.target.angle ?? 0) % 360 + 360) % 360;
+            setProcessingStatus(`Object rotation: ${liveAngle.toFixed(1)}deg`, false);
         };
 
         const handleWindowBlur = () => {

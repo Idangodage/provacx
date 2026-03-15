@@ -385,6 +385,27 @@ function getLineAngleDeltaDegrees(aDeg: number, bDeg: number): number {
   return Math.min(diff, 180 - diff);
 }
 
+function alignGuideAngleNearReference(
+  guideLineAngleRad: number,
+  referenceAngleRad: number
+): number {
+  // Line angles are periodic over PI. Choose the equivalent orientation closest to the reference
+  // so magnetic snapping never causes a large 180deg jump.
+  let best = guideLineAngleRad;
+  let bestDelta = Math.abs(normalizeAngleRadians(guideLineAngleRad - referenceAngleRad));
+
+  for (let k = -2; k <= 2; k += 1) {
+    const candidate = guideLineAngleRad + k * Math.PI;
+    const delta = Math.abs(normalizeAngleRadians(candidate - referenceAngleRad));
+    if (delta < bestDelta) {
+      best = candidate;
+      bestDelta = delta;
+    }
+  }
+
+  return best;
+}
+
 function getNearestRoomRotationGuideAngle(angleRad: number): {
   angleDeg: number;
   angleRad: number;
@@ -405,7 +426,7 @@ function getNearestRoomRotationGuideAngle(angleRad: number): {
 
   return {
     angleDeg: bestAngleDeg,
-    angleRad: (bestAngleDeg * Math.PI) / 180,
+    angleRad: alignGuideAngleNearReference((bestAngleDeg * Math.PI) / 180, angleRad),
     deltaDeg: bestDeltaDeg,
   };
 }

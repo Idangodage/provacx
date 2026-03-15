@@ -709,8 +709,9 @@ export class RoomRenderer {
     this.annotateDecoration(moveHeadDown, room.id, 'room-center-glyph-down');
     this.annotateDecoration(moveHeadUp, room.id, 'room-center-glyph-up');
 
+    // Keep room rotation axis visually vertical: handle is always above centroid X.
     const rotationPoint = {
-      x: boundsCenter.x * MM_TO_PX,
+      x: centroidCanvas.x,
       y: boundsTopCanvas - this.sp(40),
     };
     const rotationHandleHit = new fabric.Circle({
