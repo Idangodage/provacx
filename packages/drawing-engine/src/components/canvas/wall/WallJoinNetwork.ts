@@ -63,6 +63,9 @@ const MIN_ENDPOINT_JOIN_ANGLE_DEG = 0.5;
 const MAX_ENDPOINT_JOIN_ANGLE_DEG = 359.5;
 const MIN_SEGMENT_JOIN_ANGLE_DEG = 3;
 const ACUTE_BEVEL_THRESHOLD_DEG = 30;
+// Keep endpoint-node miters aligned with the safer per-wall update pipeline:
+// very small endpoint angles should not create long render-time spikes.
+const MIN_ENDPOINT_MITER_ANGLE_DEG = 15;
 
 function pointDistance(a: Point2D, b: Point2D): number {
   return Math.hypot(a.x - b.x, a.y - b.y);
@@ -271,7 +274,7 @@ function solveSector(prev: WallEndpointRef, next: WallEndpointRef): SectorSoluti
     shouldFlatBevel ||
     !miterPoint ||
     !Number.isFinite(angleDeg) ||
-    angleDeg <= MIN_ENDPOINT_JOIN_ANGLE_DEG ||
+    angleDeg <= MIN_ENDPOINT_MITER_ANGLE_DEG ||
     angleDeg >= MAX_ENDPOINT_JOIN_ANGLE_DEG
   ) {
     return {

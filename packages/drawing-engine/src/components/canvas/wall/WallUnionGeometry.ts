@@ -8,6 +8,8 @@ import { computeWallJoinMap } from './WallJoinNetwork';
 const COMPONENT_TOLERANCE_MM = 2;
 const COORDINATE_TOLERANCE_MM = 0.001;
 const MIN_PATCH_AREA_MM2 = 0.1;
+const MIN_UNION_ENDPOINT_ANGLE_DEG = 15;
+const SEGMENT_INTERIOR_TOLERANCE = 0.001;
 
 type Endpoint = 'start' | 'end';
 type RingCoordinate = number[];
@@ -99,6 +101,83 @@ function normalizeAngleDeg(angleDeg: number): number {
     normalized += 360;
   }
   return normalized;
+}
+
+function directionAwayFromWallEndpoint(wall: Wall, endpoint: Endpoint): Point2D {
+  return endpoint === 'start'
+    ? normalize(subtract(wall.endPoint, wall.startPoint))
+    : normalize(subtract(wall.startPoint, wall.endPoint));
+}
+
+function directionAlongWall(wall: Wall): Point2D {
+  return normalize(subtract(wall.endPoint, wall.startPoint));
+}
+
+function angleBetweenDirectionsDeg(a: Point2D, b: Point2D): number {
+  const clampedDot = Math.max(-1, Math.min(1, dot(a, b)));
+  return Math.acos(clampedDot) * (180 / Math.PI);
+}
+
+function angleBetweenWallAxesDeg(wall: Wall, otherWall: Wall): number {
+  const axisDot = Math.max(
+    -1,
+    Math.min(1, Math.abs(dot(directionAlongWall(wall), directionAlongWall(otherWall))))
+  );
+  return Math.acos(axisDot) * (180 / Math.PI);
+}
+
+function wallsShareAcuteEndpointContact(wall: Wall, otherWall: Wall): boolean {
+  const endpointPairs: Array<[Point2D, Endpoint, Point2D, Endpoint]> = [
+    [wall.startPoint, 'start', otherWall.startPoint, 'start'],
+    [wall.startPoint, 'start', otherWall.endPoint, 'end'],
+    [wall.endPoint, 'end', otherWall.startPoint, 'start'],
+    [wall.endPoint, 'end', otherWall.endPoint, 'end'],
+  ];
+
+  for (const [wallPoint, wallEndpoint, otherPoint, otherEndpoint] of endpointPairs) {
+    if (!arePointsNear(wallPoint, otherPoint)) {
+      continue;
+    }
+
+    const angleDeg = angleBetweenDirectionsDeg(
+      directionAwayFromWallEndpoint(wall, wallEndpoint),
+      directionAwayFromWallEndpoint(otherWall, otherEndpoint)
+    );
+    if (angleDeg < MIN_UNION_ENDPOINT_ANGLE_DEG) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function wallsShareAcuteSegmentContact(wall: Wall, otherWall: Wall): boolean {
+  if (angleBetweenWallAxesDeg(wall, otherWall) >= MIN_UNION_ENDPOINT_ANGLE_DEG) {
+    return false;
+  }
+
+  const hasAcuteInteriorProjection = (sourceWall: Wall, hostWall: Wall): boolean => {
+    const projections = [
+      projectPointToSegment(sourceWall.startPoint, hostWall.startPoint, hostWall.endPoint),
+      projectPointToSegment(sourceWall.endPoint, hostWall.startPoint, hostWall.endPoint),
+    ];
+
+    return projections.some(
+      (projection) =>
+        projection.distance <= COMPONENT_TOLERANCE_MM &&
+        projection.t > SEGMENT_INTERIOR_TOLERANCE &&
+        projection.t < 1 - SEGMENT_INTERIOR_TOLERANCE
+    );
+  };
+
+  return hasAcuteInteriorProjection(wall, otherWall) || hasAcuteInteriorProjection(otherWall, wall);
+}
+
+function canWallsShareUnionComponent(wall: Wall, otherWall: Wall): boolean {
+  return !(
+    wallsShareAcuteEndpointContact(wall, otherWall) ||
+    wallsShareAcuteSegmentContact(wall, otherWall)
+  );
 }
 
 function polygonArea(points: Point2D[]): number {
@@ -294,6 +373,20 @@ function buildComponentGraph(
   joinsMap: Map<string, JoinData[]>
 ): Map<string, Set<string>> {
   const graph = new Map<string, Set<string>>();
+  const wallsById = new Map(walls.map((wall) => [wall.id, wall]));
+  const pairCompatibilityCache = new Map<string, boolean>();
+
+  const shouldLinkWalls = (wall: Wall, otherWall: Wall): boolean => {
+    const pairKey = [wall.id, otherWall.id].sort().join('|');
+    const cached = pairCompatibilityCache.get(pairKey);
+    if (cached !== undefined) {
+      return cached;
+    }
+
+    const compatible = canWallsShareUnionComponent(wall, otherWall);
+    pairCompatibilityCache.set(pairKey, compatible);
+    return compatible;
+  };
 
   for (const wall of walls) {
     graph.set(wall.id, new Set());
@@ -301,15 +394,22 @@ function buildComponentGraph(
 
   for (const wall of walls) {
     for (const connectedWallId of wall.connectedWalls) {
-      if (graph.has(connectedWallId)) {
+      const connectedWall = wallsById.get(connectedWallId);
+      if (connectedWall && shouldLinkWalls(wall, connectedWall)) {
         addGraphEdge(graph, wall.id, connectedWallId);
       }
     }
   }
 
   joinsMap.forEach((joins, wallId) => {
+    const wall = wallsById.get(wallId);
+    if (!wall) {
+      return;
+    }
+
     for (const join of joins) {
-      if (graph.has(wallId) && graph.has(join.otherWallId)) {
+      const otherWall = wallsById.get(join.otherWallId);
+      if (otherWall && shouldLinkWalls(wall, otherWall)) {
         addGraphEdge(graph, wallId, join.otherWallId);
       }
     }
@@ -317,7 +417,10 @@ function buildComponentGraph(
 
   for (let index = 0; index < walls.length; index += 1) {
     for (let otherIndex = index + 1; otherIndex < walls.length; otherIndex += 1) {
-      if (wallsTouch(walls[index], walls[otherIndex])) {
+      if (
+        shouldLinkWalls(walls[index], walls[otherIndex]) &&
+        wallsTouch(walls[index], walls[otherIndex])
+      ) {
         addGraphEdge(graph, walls[index].id, walls[otherIndex].id);
       }
     }
