@@ -88,6 +88,10 @@ import {
 } from '../types/wall';
 import { generateId } from '../utils/geometry';
 import { GeometryEngine } from '../utils/geometry-engine';
+import {
+  readRoomAttachment,
+  syncRoomAttachmentForSymbol,
+} from '../utils/roomFurniture';
 import { DEFAULT_SPLINE_SETTINGS } from '../utils/spline';
 import {
   clampBevelOffset,
@@ -170,6 +174,46 @@ function scheduleRoomDetection(runDetection: () => void): void {
 
 // Build a lookup map for architectural object definitions by id
 const objectDefMap = new Map(DEFAULT_ARCHITECTURAL_OBJECT_LIBRARY.map((d) => [d.id, d]));
+
+function resolveSymbolCategory(instance: SymbolInstance2D): string | null {
+  const category =
+    typeof instance.properties?.category === 'string'
+      ? instance.properties.category.trim()
+      : '';
+  if (category.length > 0) {
+    return category;
+  }
+  return objectDefMap.get(instance.symbolId)?.category ?? null;
+}
+
+function syncSymbolRoomAttachment(
+  instance: SymbolInstance2D,
+  rooms: Room[]
+): SymbolInstance2D {
+  return syncRoomAttachmentForSymbol(instance, rooms, resolveSymbolCategory(instance));
+}
+
+function isSymbolAttachedToRoom(
+  instance: SymbolInstance2D,
+  roomId: string
+): boolean {
+  return readRoomAttachment(instance.properties)?.roomId === roomId;
+}
+
+function rotatePointAroundPivot(point: Point2D, pivot: Point2D, angleRad: number): Point2D {
+  const cos = Math.cos(angleRad);
+  const sin = Math.sin(angleRad);
+  const dx = point.x - pivot.x;
+  const dy = point.y - pivot.y;
+  return {
+    x: pivot.x + dx * cos - dy * sin,
+    y: pivot.y + dx * sin + dy * cos,
+  };
+}
+
+function normalizeRotationDegrees(angle: number): number {
+  return ((angle % 360) + 360) % 360;
+}
 
 /** Build elevation projection inputs from placed non-opening symbols. */
 function buildFurnitureInputs(symbols: SymbolInstance2D[]): FurnitureProjectionInput[] {
@@ -1644,6 +1688,17 @@ export interface DrawingState {
   deleteRoom: (id: string) => void;
   getRoom: (id: string) => Room | undefined;
   moveRoom: (id: string, delta: Point2D, options?: { skipHistory?: boolean }) => void;
+  translateAttachedSymbolsForRooms: (
+    roomIds: string[],
+    delta: Point2D,
+    options?: { skipHistory?: boolean }
+  ) => void;
+  rotateRoomAttachedSymbols: (
+    id: string,
+    pivot: Point2D,
+    deltaAngleRad: number,
+    options?: { skipHistory?: boolean }
+  ) => void;
   detectRooms: (options?: { debounce?: boolean }) => void;
   startWallDrawing: (startPoint: Point2D) => void;
   updateWallPreview: (currentPoint: Point2D) => void;
@@ -2021,7 +2076,10 @@ export const useDrawingStore = create<DrawingState>()(
       // Symbol Actions
       addSymbol: (symbol) => {
         const id = generateId();
-        set((state) => ({ symbols: [...state.symbols, { ...symbol, id }] }));
+        set((state) => {
+          const nextSymbol = syncSymbolRoomAttachment({ ...symbol, id }, state.rooms);
+          return { symbols: [...state.symbols, nextSymbol] };
+        });
         get().regenerateElevations({ debounce: true });
         get().saveToHistory('Add symbol');
         return id;
@@ -2029,7 +2087,16 @@ export const useDrawingStore = create<DrawingState>()(
 
       updateSymbol: (id, data, options) => {
         set((state) => ({
-          symbols: state.symbols.map((s) => s.id === id ? { ...s, ...data } : s)
+          symbols: state.symbols.map((entry) => {
+            if (entry.id !== id) return entry;
+            return syncSymbolRoomAttachment(
+              {
+                ...entry,
+                ...data,
+              },
+              state.rooms
+            );
+          })
         }));
         get().regenerateElevations({ debounce: true });
         if (!options?.skipHistory) {
@@ -2908,9 +2975,20 @@ export const useDrawingStore = create<DrawingState>()(
 
       deleteRoom: (id) => {
         const room = get().rooms.find((entry) => entry.id === id);
-        set((state) => ({
-          rooms: state.rooms.filter((room) => room.id !== id),
-        }));
+        set((state) => {
+          const removedAttachedSymbolIds = new Set(
+            state.symbols
+              .filter((symbol) => isSymbolAttachedToRoom(symbol, id))
+              .map((symbol) => symbol.id)
+          );
+          const removedIds = new Set<string>([id, ...removedAttachedSymbolIds]);
+          return {
+            rooms: state.rooms.filter((roomEntry) => roomEntry.id !== id),
+            symbols: state.symbols.filter((symbol) => !removedAttachedSymbolIds.has(symbol.id)),
+            selectedElementIds: state.selectedElementIds.filter((entryId) => !removedIds.has(entryId)),
+            selectedIds: state.selectedIds.filter((entryId) => !removedIds.has(entryId)),
+          };
+        });
         if (room) {
           get().setProcessingStatus(`Removed room "${room.name}". Walls were kept.`, false);
         }
@@ -2949,11 +3027,99 @@ export const useDrawingStore = create<DrawingState>()(
             // Keep room geometry and area labels live while dragging a room.
             skipRoomDetection: false,
           });
+          get().translateAttachedSymbolsForRooms([id], delta, { skipHistory: true });
         }
 
         if (!options?.skipHistory) {
           get().detectRooms();
           get().saveToHistory('Move room');
+        }
+      },
+
+      translateAttachedSymbolsForRooms: (roomIds, delta, _options) => {
+        if (roomIds.length === 0) {
+          return;
+        }
+        if (Math.abs(delta.x) <= 0.0001 && Math.abs(delta.y) <= 0.0001) {
+          return;
+        }
+
+        const targetRoomIds = new Set(roomIds);
+        set((state) => {
+          const targetRooms = state.rooms.filter((room) => targetRoomIds.has(room.id));
+          let didChange = false;
+          const nextSymbols = state.symbols.map((symbol) => {
+            let nextSymbol = symbol;
+            let attachment = readRoomAttachment(symbol.properties);
+
+            if (!attachment || !targetRoomIds.has(attachment.roomId)) {
+              const rebound = syncRoomAttachmentForSymbol(
+                symbol,
+                targetRooms,
+                resolveSymbolCategory(symbol)
+              );
+              const reboundAttachment = readRoomAttachment(rebound.properties);
+              if (!reboundAttachment || !targetRoomIds.has(reboundAttachment.roomId)) {
+                return symbol;
+              }
+              nextSymbol = rebound;
+              attachment = reboundAttachment;
+            }
+
+            didChange = true;
+            return {
+              ...nextSymbol,
+              position: {
+                x: nextSymbol.position.x + delta.x,
+                y: nextSymbol.position.y + delta.y,
+              },
+            };
+          });
+          return didChange ? { symbols: nextSymbols } : state;
+        });
+      },
+
+      rotateRoomAttachedSymbols: (id, pivot, deltaAngleRad, options) => {
+        if (Math.abs(deltaAngleRad) <= 0.000001) {
+          return;
+        }
+
+        set((state) => {
+          const room = state.rooms.find((entry) => entry.id === id);
+          let didChange = false;
+          const deltaAngleDeg = (deltaAngleRad * 180) / Math.PI;
+          const nextSymbols = state.symbols.map((symbol) => {
+            let nextSymbol = symbol;
+            let attachment = readRoomAttachment(symbol.properties);
+            if (!attachment || attachment.roomId !== id) {
+              if (!room) {
+                return symbol;
+              }
+              const rebound = syncRoomAttachmentForSymbol(
+                symbol,
+                [room],
+                resolveSymbolCategory(symbol)
+              );
+              const reboundAttachment = readRoomAttachment(rebound.properties);
+              if (!reboundAttachment || reboundAttachment.roomId !== id) {
+                return symbol;
+              }
+              nextSymbol = rebound;
+              attachment = reboundAttachment;
+            }
+
+            didChange = true;
+            return {
+              ...nextSymbol,
+              position: rotatePointAroundPivot(nextSymbol.position, pivot, deltaAngleRad),
+              rotation: normalizeRotationDegrees(nextSymbol.rotation + deltaAngleDeg),
+            };
+          });
+          return didChange ? { symbols: nextSymbols } : state;
+        });
+
+        if (!options?.skipHistory) {
+          get().saveToHistory('Rotate room');
         }
       },
 
@@ -3266,8 +3432,21 @@ export const useDrawingStore = create<DrawingState>()(
         const selectedSet = new Set(selectedElementIds);
         const selectedRoomCount = rooms.filter((room) => selectedSet.has(room.id)).length;
         const selectedWallCount = walls.filter((wall) => selectedSet.has(wall.id)).length;
+        const removedRoomIds = new Set(
+          rooms.filter((room) => selectedSet.has(room.id)).map((room) => room.id)
+        );
+        const roomOwnedSymbolIds = new Set(
+          symbols
+            .filter((symbol) => {
+              const attachment = readRoomAttachment(symbol.properties);
+              return attachment ? removedRoomIds.has(attachment.roomId) : false;
+            })
+            .map((symbol) => symbol.id)
+        );
         const removedSymbolIds = new Set(
-          symbols.filter((symbol) => selectedSet.has(symbol.id)).map((symbol) => symbol.id)
+          symbols
+            .filter((symbol) => selectedSet.has(symbol.id) || roomOwnedSymbolIds.has(symbol.id))
+            .map((symbol) => symbol.id)
         );
         const removedWallIds = new Set(
           walls.filter((wall) => selectedSet.has(wall.id)).map((wall) => wall.id)
@@ -3308,7 +3487,7 @@ export const useDrawingStore = create<DrawingState>()(
           ),
           annotations: annotations.filter((a) => !selectedSet.has(a.id)),
           sketches: sketches.filter((s) => !selectedSet.has(s.id)),
-          symbols: symbols.filter((s) => !selectedSet.has(s.id)),
+          symbols: symbols.filter((symbol) => !removedSymbolIds.has(symbol.id)),
           walls: nextWalls,
           rooms: rooms
             .filter((room) => !selectedSet.has(room.id))

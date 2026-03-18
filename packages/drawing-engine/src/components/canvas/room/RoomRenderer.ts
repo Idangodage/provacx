@@ -892,6 +892,7 @@ export class RoomRenderer {
         selectable: true,
         evented: true,
         subTargetCheck: true,
+        perPixelTargetFind: true,
         hasControls: false,
         hasBorders: false,
         lockMovementX: true,

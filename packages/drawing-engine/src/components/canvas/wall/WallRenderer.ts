@@ -463,7 +463,20 @@ export class WallRenderer {
   }
 
   setRoomWallIds(wallIds: Iterable<string>): void {
-    this.roomWallIds = new Set(wallIds);
+    const nextRoomWallIds = new Set(wallIds);
+    if (
+      nextRoomWallIds.size === this.roomWallIds.size &&
+      Array.from(nextRoomWallIds).every((wallId) => this.roomWallIds.has(wallId))
+    ) {
+      return;
+    }
+
+    this.roomWallIds = nextRoomWallIds;
+    if (this.dragOptimizedMode) {
+      this.syncDragSelectionPreview();
+      this.canvas.requestRenderAll();
+      return;
+    }
     if (this.selectedWallIds.size > 0) {
       this.setSelectedWalls([...this.selectedWallIds]);
     } else if (this.hoveredWallId) {
@@ -496,38 +509,26 @@ export class WallRenderer {
     this.dragOptimizedMode = enabled;
 
     if (enabled) {
-      // During live dragging, keep per-wall objects and skip expensive merged overlays.
-      this.clearMergedComponents();
+      // During live dragging, keep wall geometry live but stop rebuilding
+      // high-cost selection/hover/control overlays on every frame.
       this.clearSelectionComponents();
       this.clearHoverComponents();
       this.clearDimensionLabels();
       this.hoveredWallId = null;
-      this.wallObjects.forEach((group) => {
-        const selection = group.getObjects().find((obj) => (obj as NamedObject).name === 'selectionOutline');
-        const hover = group.getObjects().find((obj) => (obj as NamedObject).name === 'hoverOutline');
-        if (selection) selection.set('visible', false);
-        if (hover) hover.set('visible', false);
-        group.set('dirty', true);
-      });
       // Controls are expensive to rebuild per frame; hide during drag and restore after.
       this.controlPointObjects.forEach((controls) => {
         controls.forEach((control) => this.canvas.remove(control));
       });
       this.controlPointObjects.clear();
+      this.syncDragSelectionPreview();
       this.canvas.requestRenderAll();
       return;
     }
 
-    // Drag ended: rebuild full merged/textured wall rendering.
-    const allWalls = Array.from(this.wallData.values());
-    if (allWalls.length > 0) {
-      this.renderAllWalls(allWalls);
-      return;
+    if (this.wallData.size === 0) {
+      this.syncDragSelectionPreview();
+      this.canvas.requestRenderAll();
     }
-
-    // Nothing to rebuild; just restore overlays.
-    this.setSelectedWalls([...this.selectedWallIds]);
-    this.canvas.requestRenderAll();
   }
 
   /**
@@ -816,6 +817,38 @@ export class WallRenderer {
     });
   }
 
+  private syncDragSelectionPreview(): void {
+    this.clearSelectionComponents();
+    this.clearHoverComponents();
+    this.clearDimensionLabels();
+
+    this.wallObjects.forEach((group, wallId) => {
+      const selectionOutline = group.getObjects().find(
+        (obj) => (obj as NamedObject).name === 'selectionOutline'
+      );
+      if (selectionOutline) {
+        selectionOutline.set({
+          visible: this.selectedWallIds.has(wallId),
+          stroke: VISUAL_CONFIG.selectionStroke,
+          fill: VISUAL_CONFIG.selectionFill,
+        });
+      }
+
+      const hoverOutline = group.getObjects().find(
+        (obj) => (obj as NamedObject).name === 'hoverOutline'
+      );
+      if (hoverOutline) {
+        hoverOutline.set({
+          visible: false,
+          stroke: VISUAL_CONFIG.hoverStroke,
+          fill: VISUAL_CONFIG.hoverFill,
+        });
+      }
+
+      group.set('dirty', true);
+    });
+  }
+
   private syncHoverPreview(): void {
     const hoveredWallId = this.hoveredWallId;
     const hoverPlan = hoveredWallId && !this.selectedWallIds.has(hoveredWallId)
@@ -856,6 +889,9 @@ export class WallRenderer {
     }
     this.wallData.set(wall.id, wall);
 
+    const showStandaloneInteractiveGeometry =
+      this.dragOptimizedMode && (!componentWalls || componentWalls.length === 0);
+
     let interactionVertices = componentWalls && componentWalls.length > 0
       ? computeSelectableWallPolygon(
         wall,
@@ -872,7 +908,7 @@ export class WallRenderer {
 
     const dragEdgeStrokeWidth = this.toSceneSize(VISUAL_CONFIG.wallStrokeWidth);
     const fillPolygon = new fabric.Polygon(canvasVertices, {
-      fill: this.dragOptimizedMode ? 'rgba(148,163,184,0.18)' : 'rgba(0,0,0,0.001)',
+      fill: showStandaloneInteractiveGeometry ? 'rgba(148,163,184,0.18)' : 'rgba(0,0,0,0.001)',
       stroke: 'transparent',
       strokeWidth: 0,
       selectable: false,
@@ -893,7 +929,7 @@ export class WallRenderer {
         strokeWidth: dragEdgeStrokeWidth,
         selectable: false,
         evented: false,
-        visible: this.dragOptimizedMode,
+        visible: showStandaloneInteractiveGeometry,
       }
     );
     (interiorBoundary as NamedObject).name = 'interiorBoundary';
@@ -906,7 +942,7 @@ export class WallRenderer {
         strokeWidth: dragEdgeStrokeWidth,
         selectable: false,
         evented: false,
-        visible: this.dragOptimizedMode,
+        visible: showStandaloneInteractiveGeometry,
       }
     );
     (exteriorBoundary as NamedObject).name = 'exteriorBoundary';
@@ -919,7 +955,7 @@ export class WallRenderer {
         strokeWidth: dragEdgeStrokeWidth,
         selectable: false,
         evented: false,
-        visible: this.dragOptimizedMode,
+        visible: showStandaloneInteractiveGeometry,
       }
     );
     (startCap as NamedObject).name = 'startCap';
@@ -932,7 +968,7 @@ export class WallRenderer {
         strokeWidth: dragEdgeStrokeWidth,
         selectable: false,
         evented: false,
-        visible: this.dragOptimizedMode,
+        visible: showStandaloneInteractiveGeometry,
       }
     );
     (endCap as NamedObject).name = 'endCap';
@@ -1066,9 +1102,6 @@ export class WallRenderer {
 
     this.canvas.add(group);
     this.wallObjects.set(wall.id, group);
-    if (wasSelected && !this.dragOptimizedMode) {
-      this.createControlPoints(wall.id);
-    }
 
     return group;
   }
@@ -1883,6 +1916,15 @@ export class WallRenderer {
     const previousSelection = this.selectedWallIds;
     this.selectedWallIds = newSelection;
 
+    if (this.dragOptimizedMode) {
+      for (const wallId of previousSelection) {
+        this.removeControlPoints(wallId);
+      }
+      this.syncDragSelectionPreview();
+      this.canvas.requestRenderAll();
+      return;
+    }
+
     const selectionPlan = resolveWallSelectionPlan(
       Array.from(this.wallData.values()), this.rooms, selectedWallIds
     );
@@ -2078,7 +2120,10 @@ export class WallRenderer {
       walls.forEach((wall) => this.wallData.set(wall.id, wall));
 
       this.selectedWallIds = new Set(selectedWallIds);
-      if (selectedWallIds.length > 0 || this.selectionComponentObjects.length > 0 || this.controlPointObjects.size > 0) {
+      if (this.dragOptimizedMode) {
+        this.syncDragSelectionPreview();
+        this.canvas.requestRenderAll();
+      } else if (selectedWallIds.length > 0 || this.selectionComponentObjects.length > 0 || this.controlPointObjects.size > 0) {
         this.setSelectedWalls(selectedWallIds);
       } else {
         this.syncHoverPreview();

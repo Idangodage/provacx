@@ -56,6 +56,7 @@ const WALL_SEGMENT_FILL = '#000007';
 const WALL_SEGMENT_STROKE = '#111827';
 const MAX_BITMAP_SYMBOL_SIDE_PX = 384;
 const BITMAP_SYMBOL_DPR = 2;
+const NON_VISUAL_PROPERTY_KEYS = new Set(['roomAttachment']);
 
 function makeLine(
   coords: [number, number, number, number],
@@ -496,6 +497,21 @@ export class ObjectRenderer {
     return instances.map((instance) => this.cloneInstance(instance));
   }
 
+  private visualProperties(properties: Record<string, unknown> | null | undefined): Record<string, unknown> {
+    if (!properties) {
+      return {};
+    }
+
+    const next: Record<string, unknown> = {};
+    Object.entries(properties).forEach(([key, value]) => {
+      if (NON_VISUAL_PROPERTY_KEYS.has(key)) {
+        return;
+      }
+      next[key] = value;
+    });
+    return next;
+  }
+
   private valuesEqual(left: unknown, right: unknown): boolean {
     if (Object.is(left, right)) return true;
     if (typeof left !== typeof right) return false;
@@ -531,7 +547,10 @@ export class ObjectRenderer {
       previous.symbolId !== next.symbolId ||
       previous.scale !== next.scale ||
       previous.flipped !== next.flipped ||
-      !this.valuesEqual(previous.properties ?? {}, next.properties ?? {})
+      !this.valuesEqual(
+        this.visualProperties(previous.properties),
+        this.visualProperties(next.properties)
+      )
     );
   }
 
@@ -729,6 +748,10 @@ export class ObjectRenderer {
     let rebuiltCount = 0;
     let movedCount = 0;
     let orderChangedCount = 0;
+    const activeObject = this.canvas.getActiveObject() as ObjectGroup | null;
+    const activeObjectId = activeObject?.objectId ?? null;
+    let nextActiveGroup: ObjectGroup | null = null;
+    let removedActiveObject = false;
 
     try {
       const previousById = new Map(this.instancesCache.map((instance) => [instance.id, instance]));
@@ -737,6 +760,9 @@ export class ObjectRenderer {
 
       for (const [objectId, group] of this.groups.entries()) {
         if (nextById.has(objectId)) continue;
+        if (objectId === activeObjectId) {
+          removedActiveObject = true;
+        }
         this.canvas.remove(group);
         this.groups.delete(objectId);
         removedCount += 1;
@@ -750,6 +776,9 @@ export class ObjectRenderer {
 
         if (!previous || !existingGroup) {
           if (existingGroup) {
+            if (instance.id === activeObjectId) {
+              removedActiveObject = true;
+            }
             this.canvas.remove(existingGroup);
             rebuiltCount += 1;
           } else {
@@ -758,15 +787,24 @@ export class ObjectRenderer {
           const group = this.buildGroup(instance, definition);
           this.canvas.add(group);
           this.groups.set(instance.id, group);
+          if (instance.id === activeObjectId && !group.isOpeningSymbol) {
+            nextActiveGroup = group;
+          }
           needsRender = true;
           continue;
         }
 
         if (this.instanceVisualChanged(previous, instance)) {
+          if (instance.id === activeObjectId) {
+            removedActiveObject = true;
+          }
           this.canvas.remove(existingGroup);
           const group = this.buildGroup(instance, definition);
           this.canvas.add(group);
           this.groups.set(instance.id, group);
+          if (instance.id === activeObjectId && !group.isOpeningSymbol) {
+            nextActiveGroup = group;
+          }
           rebuiltCount += 1;
           needsRender = true;
           continue;
@@ -782,6 +820,14 @@ export class ObjectRenderer {
           movedCount += 1;
           needsRender = true;
         }
+      }
+
+      if (nextActiveGroup) {
+        this.canvas.setActiveObject(nextActiveGroup);
+        needsRender = true;
+      } else if (removedActiveObject && activeObjectId && !nextById.has(activeObjectId)) {
+        this.canvas.discardActiveObject();
+        needsRender = true;
       }
 
       const previousOrder = this.instancesCache.map((instance) => instance.id);
@@ -851,12 +897,29 @@ export class ObjectRenderer {
     this.canvas.requestRenderAll();
   }
 
+  bringObjectsToFront(objectIds?: Iterable<string>): void {
+    const ids = objectIds ? Array.from(objectIds) : this.instancesCache.map((instance) => instance.id);
+    ids.forEach((objectId) => {
+      const group = this.groups.get(objectId);
+      if (!group) return;
+      this.canvas.bringObjectToFront(group);
+    });
+  }
+
   activateObject(objectId: string): boolean {
     const group = this.groups.get(objectId);
     if (!group || group.isOpeningSymbol) {
       return false;
     }
 
+    const activeObject = this.canvas.getActiveObject() as ObjectGroup | null;
+    if (activeObject === group) {
+      this.canvas.bringObjectToFront(group);
+      this.canvas.requestRenderAll();
+      return true;
+    }
+
+    this.canvas.bringObjectToFront(group);
     this.canvas.setActiveObject(group);
     this.canvas.requestRenderAll();
     return true;

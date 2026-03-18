@@ -283,6 +283,7 @@ export function DrawingCanvas({
     const suppressFabricSelectionSyncRef = useRef(0);
     const dimensionRefreshFrameRef = useRef<number | null>(null);
     const autoDimensionSyncFrameRef = useRef<number | null>(null);
+    const objectRefreshFrameRef = useRef<number | null>(null);
 
     // Drag interaction state
     const isDraggingObjectRef = useRef(false);
@@ -363,6 +364,8 @@ export function DrawingCanvas({
         // Wall state and actions
         walls,
         rooms,
+        translateAttachedSymbolsForRooms,
+        rotateRoomAttachedSymbols,
         wallDrawingState,
         wallSettings,
         sectionLines,
@@ -2005,6 +2008,8 @@ export function DrawingCanvas({
         resetWallBevel,
         getCornerBevelDots,
         moveRoom,
+        translateAttachedSymbolsForRooms,
+        rotateRoomAttachedSymbols,
         connectWalls,
         detectRooms,
         saveToHistory,
@@ -2129,6 +2134,8 @@ export function DrawingCanvas({
     });
 
     const restackInteractiveOverlays = useCallback((canvas: fabric.Canvas) => {
+        const selectedObjectIds = new Set(selectedIds);
+        const selectedObjects: fabric.Object[] = [];
         const selectModeOverlays: fabric.Object[] = [];
         const roomControlDecorations: fabric.Object[] = [];
         const roomControls: fabric.Object[] = [];
@@ -2148,8 +2155,13 @@ export function DrawingCanvas({
                 isDimensionControlDecoration?: boolean;
                 isOpeningResizeHandle?: boolean;
                 isSelectModeOverlay?: boolean;
+                objectId?: string;
             };
 
+            if (typed.objectId && selectedObjectIds.has(typed.objectId)) {
+                selectedObjects.push(obj);
+                return;
+            }
             if (typed.isSelectModeOverlay) {
                 selectModeOverlays.push(obj);
                 return;
@@ -2184,6 +2196,7 @@ export function DrawingCanvas({
         });
 
         [
+            selectedObjects,
             selectModeOverlays,
             roomControlDecorations,
             roomControls,
@@ -2195,7 +2208,7 @@ export function DrawingCanvas({
         ].forEach((objects) => {
             objects.forEach((obj) => canvas.bringObjectToFront(obj));
         });
-    }, []);
+    }, [selectedIds]);
 
     // Offset tool hook
     const offsetTool = useOffsetTool({
@@ -2696,16 +2709,34 @@ export function DrawingCanvas({
         });
     }, [refreshDimensionLayer]);
 
+    const refreshObjectLayer = useCallback(() => {
+        if (!objectRendererRef.current) return;
+        objectRendererRef.current.renderIncremental(symbolsRef.current);
+    }, []);
+
+    const scheduleObjectLayerRefresh = useCallback(() => {
+        if (typeof window === 'undefined') {
+            refreshObjectLayer();
+            return;
+        }
+        if (objectRefreshFrameRef.current !== null) return;
+        objectRefreshFrameRef.current = window.requestAnimationFrame(() => {
+            objectRefreshFrameRef.current = null;
+            refreshObjectLayer();
+        });
+    }, [refreshObjectLayer]);
+
     useEffect(() => {
         roomRendererRef.current?.setWallContext(walls);
         roomRendererRef.current?.renderAllRooms(rooms);
+        objectRendererRef.current?.bringObjectsToFront(symbols.map((symbol) => symbol.id));
         // Rebuild dimensions after room re-renders, then restore edit-handle priority.
         if (isHandleDragging) {
             scheduleDimensionLayerRefresh();
             return;
         }
         refreshDimensionLayer();
-    }, [rooms, walls, fabricCanvas, refreshDimensionLayer, isHandleDragging, scheduleDimensionLayerRefresh]);
+    }, [rooms, walls, symbols, fabricCanvas, refreshDimensionLayer, isHandleDragging, scheduleDimensionLayerRefresh]);
 
     useEffect(() => {
         return () => {
@@ -2722,6 +2753,13 @@ export function DrawingCanvas({
             ) {
                 window.cancelAnimationFrame(autoDimensionSyncFrameRef.current);
                 autoDimensionSyncFrameRef.current = null;
+            }
+            if (
+                objectRefreshFrameRef.current !== null &&
+                typeof window !== 'undefined'
+            ) {
+                window.cancelAnimationFrame(objectRefreshFrameRef.current);
+                objectRefreshFrameRef.current = null;
             }
         };
     }, []);
@@ -2800,9 +2838,12 @@ export function DrawingCanvas({
     }, [objectDefinitions, fabricCanvas]);
 
     useEffect(() => {
-        if (isHandleDragging) return;
-        objectRendererRef.current?.renderIncremental(symbols);
-    }, [symbols, objectDefinitions, fabricCanvas, isHandleDragging]);
+        if (isHandleDragging) {
+            scheduleObjectLayerRefresh();
+            return;
+        }
+        refreshObjectLayer();
+    }, [symbols, objectDefinitions, fabricCanvas, isHandleDragging, refreshObjectLayer, scheduleObjectLayerRefresh]);
 
     useEffect(() => {
         if (!wallRenderer) return;
@@ -2811,6 +2852,7 @@ export function DrawingCanvas({
             return definition?.category === 'doors' || definition?.category === 'windows';
         });
         wallRenderer.setOpeningSymbolInstances(openingSymbols);
+        wallRenderer.setDragOptimizedMode(isHandleDragging);
         if (isHandleDragging) {
             wallRenderer.renderWallsInteractive(wallsRef.current);
             if (fabricRef.current) {
@@ -2819,7 +2861,6 @@ export function DrawingCanvas({
             scheduleDimensionLayerRefresh();
             return;
         }
-        // Keep wall visuals identical while dragging and idle.
         wallRenderer.renderAllWalls(wallsRef.current);
         // Rebuild dimensions after wall re-renders, then restore edit-handle priority.
         refreshDimensionLayer();
@@ -2957,14 +2998,31 @@ export function DrawingCanvas({
     ]);
 
     useEffect(() => {
+        const canvas = fabricRef.current;
         const symbolIdSet = new Set(symbols.map((symbol) => symbol.id));
         const selectedSymbolIds = selectedIds.filter((id) => symbolIdSet.has(id));
         objectRendererRef.current?.setSelectedObjects(selectedSymbolIds);
-        if (tool === 'select' && selectedIds.length === 1 && selectedSymbolIds.length === 1) {
-            objectRendererRef.current?.activateObject(selectedSymbolIds[0]);
+        const activeObject = canvas?.getActiveObject() as (fabric.Object & { objectId?: string }) | null;
+        const activeObjectId = activeObject?.objectId ?? null;
+        const singleSelectedSymbolId =
+            tool === 'select' && selectedIds.length === 1 && selectedSymbolIds.length === 1
+                ? selectedSymbolIds[0]
+                : null;
+
+        if (singleSelectedSymbolId) {
+            if (activeObjectId !== singleSelectedSymbolId) {
+                objectRendererRef.current?.activateObject(singleSelectedSymbolId);
+            }
             hideActiveSelectionChrome(fabricRef.current);
+        } else if (canvas && activeObjectId) {
+            canvas.discardActiveObject();
+            hideActiveSelectionChrome(canvas);
         }
-    }, [symbols, selectedIds]);
+        if (canvas && selectedSymbolIds.length > 0) {
+            restackInteractiveOverlays(canvas);
+            canvas.requestRenderAll();
+        }
+    }, [symbols, selectedIds, tool, restackInteractiveOverlays]);
 
     useEffect(() => {
         const symbolIdSet = new Set(symbols.map((symbol) => symbol.id));

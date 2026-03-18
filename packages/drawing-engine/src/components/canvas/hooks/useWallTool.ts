@@ -69,7 +69,7 @@ export function useWallTool({
   walls,
   rooms,
   selectedIds,
-  isHandleDragging = false,
+  isHandleDragging: _isHandleDragging = false,
   wallDrawingState,
   wallSettings,
   zoom,
@@ -148,11 +148,6 @@ export function useWallTool({
     };
   }, [canvas, pageHeight]);
 
-  useEffect(() => {
-    if (!wallRendererRef.current) return;
-    wallRendererRef.current.setDragOptimizedMode(false);
-  }, [isHandleDragging, canvas]);
-
   // Update wall manager when walls change
   useEffect(() => {
     if (wallManagerRef.current) {
@@ -166,21 +161,8 @@ export function useWallTool({
   useEffect(() => {
     if (wallRendererRef.current && canvas) {
       wallRendererRef.current.setRooms(rooms);
-      wallRendererRef.current.setRoomWallIds(rooms.flatMap((room) => room.wallIds));
     }
   }, [rooms, canvas]);
-
-  // Update renderer when wall geometry changes.
-  useEffect(() => {
-    if (wallRendererRef.current && canvas) {
-      wallRendererRef.current.setDragOptimizedMode(false);
-      if (isHandleDragging) {
-        wallRendererRef.current.renderWallsInteractive(walls);
-        return;
-      }
-      wallRendererRef.current.renderAllWalls(walls);
-    }
-  }, [walls, canvas, isHandleDragging]);
 
   // Update selected wall highlights + control points
   useEffect(() => {
