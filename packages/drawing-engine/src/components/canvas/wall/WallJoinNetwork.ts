@@ -218,44 +218,6 @@ function buildEndpointRef(wall: Wall, endpoint: Endpoint): WallEndpointRef {
   };
 }
 
-function comparePointLex(a: Point2D, b: Point2D): number {
-  if (a.x !== b.x) {
-    return a.x - b.x;
-  }
-  return a.y - b.y;
-}
-
-function compareEndpointRefsDeterministic(a: WallEndpointRef, b: WallEndpointRef): number {
-  if (a.angleDeg !== b.angleDeg) {
-    return a.angleDeg - b.angleDeg;
-  }
-
-  const directionCmp = comparePointLex(a.direction, b.direction);
-  if (directionCmp !== 0) {
-    return directionCmp;
-  }
-
-  const leftCmp = comparePointLex(a.left.anchor, b.left.anchor);
-  if (leftCmp !== 0) {
-    return leftCmp;
-  }
-
-  const rightCmp = comparePointLex(a.right.anchor, b.right.anchor);
-  if (rightCmp !== 0) {
-    return rightCmp;
-  }
-
-  if (a.length !== b.length) {
-    return a.length - b.length;
-  }
-
-  if (a.endpoint !== b.endpoint) {
-    return a.endpoint === 'start' ? -1 : 1;
-  }
-
-  return a.key.localeCompare(b.key);
-}
-
 function buildEndpointNodes(walls: Wall[]): {
   nodes: EndpointNode[];
   nodeByEndpointKey: Map<string, EndpointNode>;
@@ -266,58 +228,27 @@ function buildEndpointNodes(walls: Wall[]): {
   ]);
   const nodes: EndpointNode[] = [];
   const nodeByEndpointKey = new Map<string, EndpointNode>();
-  const visited = new Array<boolean>(refs.length).fill(false);
 
-  for (let index = 0; index < refs.length; index += 1) {
-    if (visited[index]) {
-      continue;
+  for (const ref of refs) {
+    let node = nodes.find((candidate) => pointDistance(candidate.point, ref.point) <= NODE_TOLERANCE_MM);
+    if (!node) {
+      node = {
+        point: copyPoint(ref.point),
+        endpoints: [],
+      };
+      nodes.push(node);
+    } else if (node.endpoints.length > 0) {
+      const count = node.endpoints.length + 1;
+      node.point = {
+        x: (node.point.x * node.endpoints.length + ref.point.x) / count,
+        y: (node.point.y * node.endpoints.length + ref.point.y) / count,
+      };
     }
 
-    const queue: number[] = [index];
-    const componentIndexes: number[] = [];
-    visited[index] = true;
-
-    while (queue.length > 0) {
-      const currentIndex = queue.shift();
-      if (currentIndex === undefined) {
-        continue;
-      }
-
-      componentIndexes.push(currentIndex);
-      for (let otherIndex = 0; otherIndex < refs.length; otherIndex += 1) {
-        if (visited[otherIndex]) {
-          continue;
-        }
-        if (pointDistance(refs[currentIndex].point, refs[otherIndex].point) <= NODE_TOLERANCE_MM) {
-          visited[otherIndex] = true;
-          queue.push(otherIndex);
-        }
-      }
-    }
-
-    const componentRefs = componentIndexes
-      .map((componentIndex) => refs[componentIndex])
-      .sort(compareEndpointRefsDeterministic);
-    const sum = componentRefs.reduce(
-      (acc, ref) => ({
-        x: acc.x + ref.point.x,
-        y: acc.y + ref.point.y,
-      }),
-      { x: 0, y: 0 }
-    );
-    const node: EndpointNode = {
-      point: {
-        x: sum.x / componentRefs.length,
-        y: sum.y / componentRefs.length,
-      },
-      endpoints: componentRefs,
-    };
-
-    nodes.push(node);
-    componentRefs.forEach((ref) => nodeByEndpointKey.set(ref.key, node));
+    node.endpoints.push(ref);
+    nodeByEndpointKey.set(ref.key, node);
   }
 
-  nodes.sort((a, b) => comparePointLex(a.point, b.point));
   return { nodes, nodeByEndpointKey };
 }
 
@@ -371,7 +302,7 @@ function sectorKey(prev: WallEndpointRef, next: WallEndpointRef): string {
 }
 
 function solveEndpointNode(node: EndpointNode): EndpointNodeResolution[] {
-  const sorted = [...node.endpoints].sort(compareEndpointRefsDeterministic);
+  const sorted = [...node.endpoints].sort((a, b) => a.angleDeg - b.angleDeg);
   const sectors = new Map<string, SectorSolution>();
 
   for (let index = 0; index < sorted.length; index += 1) {

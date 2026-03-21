@@ -2,33 +2,19 @@ import * as turf from '@turf/turf';
 
 import type { JoinData, Point2D, Wall } from '../../../types';
 
-import { computeWallBodyPolygon, computeWallPolygon, isPolygonSelfIntersecting } from './WallGeometry';
+import { computeWallBodyPolygon, computeWallPolygon } from './WallGeometry';
 import { computeWallJoinMap } from './WallJoinNetwork';
 
 const COMPONENT_TOLERANCE_MM = 2;
 const COORDINATE_TOLERANCE_MM = 0.001;
 const MIN_PATCH_AREA_MM2 = 0.1;
-const MIN_NODE_PATCH_AREA_MM2 = 0.001;
-const MIN_RENDER_HOLE_AREA_MM2 = 200;
-const ACUTE_NODE_CENTER_PATCH_RADIUS_FACTOR = 0.55;
-const ACUTE_NODE_CENTER_PATCH_MIN_RADIUS_MM = 6;
-const ACUTE_NODE_HOLE_GUARD_RADIUS_FACTOR = 1.2;
-const ACUTE_NODE_HOLE_GUARD_RADIUS_PADDING_MM = 2;
-const ACUTE_NODE_HOLE_GUARD_MAX_RADIUS_MM = 32;
-const ACUTE_NODE_HOLE_GUARD_MAX_AREA_MM2 = 250_000;
-const ACUTE_NODE_PATCH_MAX_EXTENSION_FACTOR = 0.5;
-const ACUTE_NODE_PATCH_MIN_EXTENSION_MM = 2;
-const NODE_PATCH_ANGLE_MERGE_DEG = 0.75;
-const NODE_PATCH_MIN_EDGE_MM = 0.5;
-const NODE_PATCH_COLLINEAR_SINE = 0.01;
+const MIN_UNION_ENDPOINT_ANGLE_DEG = 0.5;
 const MIN_UNION_SEGMENT_ANGLE_DEG = 3;
 const SEGMENT_INTERIOR_TOLERANCE = 0.001;
 
 type Endpoint = 'start' | 'end';
 type RingCoordinate = number[];
 type PolygonFeature = ReturnType<typeof turf.polygon>;
-type MultiPolygonFeature = ReturnType<typeof turf.multiPolygon>;
-type AreaFeature = PolygonFeature | MultiPolygonFeature;
 type PolygonGeometry = PolygonFeature['geometry'];
 type MultiPolygonGeometry = ReturnType<typeof turf.multiPolygon>['geometry'];
 
@@ -51,12 +37,6 @@ interface WallEndpointRef {
 interface EndpointNode {
   point: Point2D;
   endpoints: WallEndpointRef[];
-}
-
-interface NodeHoleGuard {
-  point: Point2D;
-  radius: number;
-  maxHoleArea: number;
 }
 
 export interface WallUnionComponent {
@@ -124,8 +104,19 @@ function normalizeAngleDeg(angleDeg: number): number {
   return normalized;
 }
 
+function directionAwayFromWallEndpoint(wall: Wall, endpoint: Endpoint): Point2D {
+  return endpoint === 'start'
+    ? normalize(subtract(wall.endPoint, wall.startPoint))
+    : normalize(subtract(wall.startPoint, wall.endPoint));
+}
+
 function directionAlongWall(wall: Wall): Point2D {
   return normalize(subtract(wall.endPoint, wall.startPoint));
+}
+
+function angleBetweenDirectionsDeg(a: Point2D, b: Point2D): number {
+  const clampedDot = Math.max(-1, Math.min(1, dot(a, b)));
+  return Math.acos(clampedDot) * (180 / Math.PI);
 }
 
 function angleBetweenWallAxesDeg(wall: Wall, otherWall: Wall): number {
@@ -134,6 +125,31 @@ function angleBetweenWallAxesDeg(wall: Wall, otherWall: Wall): number {
     Math.min(1, Math.abs(dot(directionAlongWall(wall), directionAlongWall(otherWall))))
   );
   return Math.acos(axisDot) * (180 / Math.PI);
+}
+
+function wallsShareAcuteEndpointContact(wall: Wall, otherWall: Wall): boolean {
+  const endpointPairs: Array<[Point2D, Endpoint, Point2D, Endpoint]> = [
+    [wall.startPoint, 'start', otherWall.startPoint, 'start'],
+    [wall.startPoint, 'start', otherWall.endPoint, 'end'],
+    [wall.endPoint, 'end', otherWall.startPoint, 'start'],
+    [wall.endPoint, 'end', otherWall.endPoint, 'end'],
+  ];
+
+  for (const [wallPoint, wallEndpoint, otherPoint, otherEndpoint] of endpointPairs) {
+    if (!arePointsNear(wallPoint, otherPoint)) {
+      continue;
+    }
+
+    const angleDeg = angleBetweenDirectionsDeg(
+      directionAwayFromWallEndpoint(wall, wallEndpoint),
+      directionAwayFromWallEndpoint(otherWall, otherEndpoint)
+    );
+    if (angleDeg < MIN_UNION_ENDPOINT_ANGLE_DEG) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function wallsShareAcuteSegmentContact(wall: Wall, otherWall: Wall): boolean {
@@ -159,10 +175,10 @@ function wallsShareAcuteSegmentContact(wall: Wall, otherWall: Wall): boolean {
 }
 
 function canWallsShareUnionComponent(wall: Wall, otherWall: Wall): boolean {
-  // Keep endpoint-connected walls in the same union component so dense
-  // node fans render as one smooth junction. Only split near-collinear
-  // segment-to-segment contacts to avoid unstable strip unions.
-  return !wallsShareAcuteSegmentContact(wall, otherWall);
+  return !(
+    wallsShareAcuteEndpointContact(wall, otherWall) ||
+    wallsShareAcuteSegmentContact(wall, otherWall)
+  );
 }
 
 function polygonArea(points: Point2D[]): number {
@@ -268,12 +284,9 @@ function openRing(ring: ReadonlyArray<RingCoordinate>): Point2D[] {
   );
 }
 
-function makePolygonFeature(
-  vertices: Point2D[],
-  minAreaMm2: number = MIN_PATCH_AREA_MM2
-): PolygonFeature | null {
+function makePolygonFeature(vertices: Point2D[]): PolygonFeature | null {
   const ring = normalizeRing(vertices);
-  if (ring.length < 3 || Math.abs(polygonArea(ring)) < minAreaMm2) {
+  if (ring.length < 3 || Math.abs(polygonArea(ring)) < MIN_PATCH_AREA_MM2) {
     return null;
   }
 
@@ -296,11 +309,8 @@ function wallPolygonFeature(wall: Wall, joins?: JoinData[]): PolygonFeature | nu
   );
 }
 
-function patchPolygonFeature(
-  vertices: Point2D[],
-  minAreaMm2: number = MIN_PATCH_AREA_MM2
-): PolygonFeature | null {
-  return makePolygonFeature(vertices, minAreaMm2);
+function patchPolygonFeature(vertices: Point2D[]): PolygonFeature | null {
+  return makePolygonFeature(vertices);
 }
 
 function wallsTouch(wall: Wall, otherWall: Wall): boolean {
@@ -462,180 +472,11 @@ function buildConnectedComponents(
 function extractPolygons(
   geometry: PolygonGeometry | MultiPolygonGeometry
 ): Point2D[][][] {
-  const normalizePolygonRings = (rings: RingCoordinate[][]): Point2D[][] | null => {
-    if (rings.length === 0) {
-      return null;
-    }
-
-    const outer = openRing(rings[0]);
-    if (outer.length < 3 || Math.abs(polygonArea(outer)) < MIN_PATCH_AREA_MM2) {
-      return null;
-    }
-
-    const holes = rings
-      .slice(1)
-      .map(openRing)
-      .filter(
-        (ring) =>
-          ring.length >= 3 &&
-          Math.abs(polygonArea(ring)) >= MIN_RENDER_HOLE_AREA_MM2
-      );
-
-    return [outer, ...holes];
-  };
-
   if (geometry.type === 'Polygon') {
-    const polygon = normalizePolygonRings(geometry.coordinates as RingCoordinate[][]);
-    return polygon ? [polygon] : [];
+    return [geometry.coordinates.map(openRing)];
   }
 
-  return geometry.coordinates
-    .map((polygon) => normalizePolygonRings(polygon as RingCoordinate[][]))
-    .filter((polygon): polygon is Point2D[][] => Boolean(polygon));
-}
-
-function suppressAcuteNodeHoleArtifacts(
-  polygons: Point2D[][][],
-  holeGuards: NodeHoleGuard[]
-): Point2D[][][] {
-  if (holeGuards.length === 0) {
-    return polygons;
-  }
-
-  return polygons.map((polygon) => {
-    if (polygon.length <= 1) {
-      return polygon;
-    }
-
-    const holes = polygon.slice(1).filter((hole) => {
-      const holeArea = Math.abs(polygonArea(hole));
-      const holeFullyInsideGuard = (guard: NodeHoleGuard): boolean =>
-        hole.every(
-          (point) =>
-            pointDistance(point, guard.point) <= guard.radius + COORDINATE_TOLERANCE_MM
-        );
-      const shouldSuppress = holeGuards.some(
-        (guard) =>
-          holeArea <= guard.maxHoleArea &&
-          holeFullyInsideGuard(guard)
-      );
-      return !shouldSuppress;
-    });
-
-    return [polygon[0], ...holes];
-  });
-}
-
-function normalizePolygonFeaturesForUnion(feature: AreaFeature): PolygonFeature[] {
-  const cleaned = turf.cleanCoords(feature, { mutate: false }) as AreaFeature;
-
-  if (cleaned.geometry.type === 'Polygon') {
-    try {
-      const unkinked = turf.unkinkPolygon(cleaned as PolygonFeature);
-      if (unkinked.features.length > 0) {
-        return unkinked.features.map(
-          (piece) => turf.cleanCoords(piece, { mutate: false }) as PolygonFeature
-        );
-      }
-    } catch {
-      // Fall back to the cleaned polygon below.
-    }
-
-    return [cleaned as PolygonFeature];
-  }
-
-  return cleaned.geometry.coordinates.flatMap((polygon) => {
-    const polygonFeature = turf.cleanCoords(
-      turf.polygon(polygon as RingCoordinate[][]),
-      { mutate: false }
-    ) as PolygonFeature;
-
-    try {
-      const unkinked = turf.unkinkPolygon(polygonFeature);
-      if (unkinked.features.length > 0) {
-        return unkinked.features.map(
-          (piece) => turf.cleanCoords(piece, { mutate: false }) as PolygonFeature
-        );
-      }
-    } catch {
-      // Keep original polygon piece.
-    }
-
-    return [polygonFeature];
-  });
-}
-
-function tryUnionAreaFeatures(first: AreaFeature, second: AreaFeature): AreaFeature | null {
-  try {
-    const forward = turf.union(
-      turf.featureCollection<PolygonGeometry | MultiPolygonGeometry>([first, second])
-    );
-    if (forward) {
-      return turf.cleanCoords(forward, { mutate: false }) as AreaFeature;
-    }
-  } catch {
-    // Retry with reverse ordering below.
-  }
-
-  try {
-    const reverse = turf.union(
-      turf.featureCollection<PolygonGeometry | MultiPolygonGeometry>([second, first])
-    );
-    if (reverse) {
-      return turf.cleanCoords(reverse, { mutate: false }) as AreaFeature;
-    }
-  } catch {
-    // Keep both polygons when union fails in both directions.
-  }
-
-  return null;
-}
-
-function areaFeaturePolygons(feature: AreaFeature): RingCoordinate[][][] {
-  if (feature.geometry.type === 'Polygon') {
-    return [feature.geometry.coordinates as RingCoordinate[][]];
-  }
-
-  return feature.geometry.coordinates as RingCoordinate[][][];
-}
-
-function combineAreaFeatures(first: AreaFeature, second: AreaFeature): AreaFeature {
-  const polygons = [
-    ...areaFeaturePolygons(first),
-    ...areaFeaturePolygons(second),
-  ];
-
-  if (polygons.length === 1) {
-    return turf.polygon(polygons[0]) as PolygonFeature;
-  }
-
-  return turf.multiPolygon(polygons) as MultiPolygonFeature;
-}
-
-function unionPolygonFeaturesIncremental(features: PolygonFeature[]): AreaFeature | null {
-  if (features.length === 0) {
-    return null;
-  }
-
-  const normalizedInput = features.flatMap((feature) =>
-    normalizePolygonFeaturesForUnion(feature as AreaFeature)
-  );
-  if (normalizedInput.length === 0) {
-    return null;
-  }
-
-  let merged: AreaFeature = normalizedInput[0] as AreaFeature;
-
-  for (let index = 1; index < normalizedInput.length; index += 1) {
-    const unioned = tryUnionAreaFeatures(merged, normalizedInput[index] as AreaFeature);
-    if (unioned) {
-      merged = unioned;
-    } else {
-      merged = combineAreaFeatures(merged, normalizedInput[index] as AreaFeature);
-    }
-  }
-
-  return merged;
+  return geometry.coordinates.map((polygon) => polygon.map(openRing));
 }
 
 function endpointKey(wallId: string, endpoint: Endpoint): string {
@@ -680,99 +521,30 @@ function buildEndpointRef(wall: Wall, endpoint: Endpoint): WallEndpointRef {
   };
 }
 
-function comparePointLex(a: Point2D, b: Point2D): number {
-  if (a.x !== b.x) {
-    return a.x - b.x;
-  }
-  return a.y - b.y;
-}
-
-function compareEndpointRefsDeterministic(a: WallEndpointRef, b: WallEndpointRef): number {
-  if (a.angleDeg !== b.angleDeg) {
-    return a.angleDeg - b.angleDeg;
-  }
-
-  const directionCmp = comparePointLex(a.direction, b.direction);
-  if (directionCmp !== 0) {
-    return directionCmp;
-  }
-
-  const leftCmp = comparePointLex(a.left.anchor, b.left.anchor);
-  if (leftCmp !== 0) {
-    return leftCmp;
-  }
-
-  const rightCmp = comparePointLex(a.right.anchor, b.right.anchor);
-  if (rightCmp !== 0) {
-    return rightCmp;
-  }
-
-  if (a.thickness !== b.thickness) {
-    return a.thickness - b.thickness;
-  }
-
-  if (a.endpoint !== b.endpoint) {
-    return a.endpoint === 'start' ? -1 : 1;
-  }
-
-  return a.key.localeCompare(b.key);
-}
-
 function buildEndpointNodes(walls: Wall[]): EndpointNode[] {
   const refs = walls.flatMap((wall) => [
     buildEndpointRef(wall, 'start'),
     buildEndpointRef(wall, 'end'),
   ]);
   const nodes: EndpointNode[] = [];
-  const visited = new Array<boolean>(refs.length).fill(false);
 
-  for (let index = 0; index < refs.length; index += 1) {
-    if (visited[index]) {
-      continue;
+  for (const ref of refs) {
+    let node = nodes.find((candidate) => pointDistance(candidate.point, ref.point) <= COMPONENT_TOLERANCE_MM);
+    if (!node) {
+      node = {
+        point: copyPoint(ref.point),
+        endpoints: [],
+      };
+      nodes.push(node);
+    } else if (node.endpoints.length > 0) {
+      const count = node.endpoints.length + 1;
+      node.point = scale(add(scale(node.point, node.endpoints.length), ref.point), 1 / count);
     }
 
-    const queue: number[] = [index];
-    const componentIndexes: number[] = [];
-    visited[index] = true;
-
-    while (queue.length > 0) {
-      const currentIndex = queue.shift();
-      if (currentIndex === undefined) {
-        continue;
-      }
-
-      componentIndexes.push(currentIndex);
-      for (let otherIndex = 0; otherIndex < refs.length; otherIndex += 1) {
-        if (visited[otherIndex]) {
-          continue;
-        }
-        if (pointDistance(refs[currentIndex].point, refs[otherIndex].point) <= COMPONENT_TOLERANCE_MM) {
-          visited[otherIndex] = true;
-          queue.push(otherIndex);
-        }
-      }
-    }
-
-    const componentRefs = componentIndexes
-      .map((componentIndex) => refs[componentIndex])
-      .sort(compareEndpointRefsDeterministic);
-    const sum = componentRefs.reduce(
-      (acc, ref) => ({
-        x: acc.x + ref.point.x,
-        y: acc.y + ref.point.y,
-      }),
-      { x: 0, y: 0 }
-    );
-    nodes.push({
-      point: {
-        x: sum.x / componentRefs.length,
-        y: sum.y / componentRefs.length,
-      },
-      endpoints: componentRefs,
-    });
+    node.endpoints.push(ref);
   }
 
-  return nodes.sort((a, b) => comparePointLex(a.point, b.point));
+  return nodes;
 }
 
 function anchorAngleDeg(nodePoint: Point2D, anchor: Point2D): number {
@@ -833,391 +605,6 @@ function endpointResolvedCapVertices(
       leftVertex: resolved.exteriorVertex,
       rightVertex: resolved.interiorVertex,
     };
-}
-
-function sortedNodeEndpointsByAngle(node: EndpointNode): WallEndpointRef[] {
-  return [...node.endpoints].sort(compareEndpointRefsDeterministic);
-}
-
-function clampNodePatchVertex(
-  nodePoint: Point2D,
-  rawVertex: Point2D,
-  resolvedVertex: Point2D,
-  thickness: number
-): Point2D {
-  const rawDistance = pointDistance(nodePoint, rawVertex);
-  const resolvedDistance = pointDistance(nodePoint, resolvedVertex);
-  const extensionLimit = Math.max(
-    ACUTE_NODE_PATCH_MIN_EXTENSION_MM,
-    Math.max(0, thickness) * ACUTE_NODE_PATCH_MAX_EXTENSION_FACTOR
-  );
-  const maxAllowedDistance = Math.max(
-    rawDistance + extensionLimit,
-    rawDistance + COORDINATE_TOLERANCE_MM
-  );
-
-  // Acute-node patch should not retreat inside the raw wall cap because that
-  // creates center holes when many walls converge.
-  if (resolvedDistance <= rawDistance + COORDINATE_TOLERANCE_MM) {
-    return copyPoint(rawVertex);
-  }
-
-  if (resolvedDistance <= maxAllowedDistance + COORDINATE_TOLERANCE_MM) {
-    return copyPoint(resolvedVertex);
-  }
-
-  const direction = normalize(subtract(resolvedVertex, nodePoint));
-  if (Math.hypot(direction.x, direction.y) < 0.000001) {
-    return copyPoint(rawVertex);
-  }
-
-  return add(nodePoint, scale(direction, maxAllowedDistance));
-}
-
-function endpointNodePatchCapVertices(
-  endpointRef: WallEndpointRef,
-  joinsMap: Map<string, JoinData[]>,
-  nodePoint: Point2D
-): { leftVertex: Point2D; rightVertex: Point2D } {
-  const resolved = endpointResolvedCapVertices(endpointRef, joinsMap);
-  const raw = endpointRawCapVertices(endpointRef);
-  const rawSideVertices =
-    endpointRef.endpoint === 'start'
-      ? {
-        leftVertex: raw.interiorVertex,
-        rightVertex: raw.exteriorVertex,
-      }
-      : {
-        leftVertex: raw.exteriorVertex,
-        rightVertex: raw.interiorVertex,
-      };
-
-  return {
-    leftVertex: clampNodePatchVertex(
-      nodePoint,
-      rawSideVertices.leftVertex,
-      resolved.leftVertex,
-      endpointRef.thickness
-    ),
-    rightVertex: clampNodePatchVertex(
-      nodePoint,
-      rawSideVertices.rightVertex,
-      resolved.rightVertex,
-      endpointRef.thickness
-    ),
-  };
-}
-
-function collapsePatchVerticesByAngle(nodePoint: Point2D, vertices: Point2D[]): Point2D[] {
-  const bucketCount = Math.max(180, Math.round(360 / NODE_PATCH_ANGLE_MERGE_DEG));
-  const buckets = new Map<number, { point: Point2D; angleDeg: number; distance: number }>();
-
-  for (const vertex of vertices) {
-    const distance = pointDistance(nodePoint, vertex);
-    if (distance <= COORDINATE_TOLERANCE_MM) {
-      continue;
-    }
-
-    const angleDeg = normalizeAngleDeg(
-      Math.atan2(vertex.y - nodePoint.y, vertex.x - nodePoint.x) * (180 / Math.PI)
-    );
-    const bucket = ((Math.round((angleDeg / 360) * bucketCount) % bucketCount) + bucketCount) % bucketCount;
-    const existing = buckets.get(bucket);
-    if (!existing || distance < existing.distance) {
-      buckets.set(bucket, {
-        point: copyPoint(vertex),
-        angleDeg,
-        distance,
-      });
-    }
-  }
-
-  return [...buckets.values()]
-    .sort((a, b) => a.angleDeg - b.angleDeg || a.distance - b.distance)
-    .map((entry) => entry.point);
-}
-
-function simplifyPatchRingVertices(vertices: Point2D[]): Point2D[] {
-  if (vertices.length < 3) {
-    return vertices.map((vertex) => copyPoint(vertex));
-  }
-
-  let current = vertices.map((vertex) => copyPoint(vertex));
-  let changed = true;
-
-  while (changed && current.length > 3) {
-    changed = false;
-    const next: Point2D[] = [];
-
-    for (let index = 0; index < current.length; index += 1) {
-      const previous = current[(index - 1 + current.length) % current.length];
-      const vertex = current[index];
-      const after = current[(index + 1) % current.length];
-      const prevEdgeLength = pointDistance(previous, vertex);
-      const nextEdgeLength = pointDistance(vertex, after);
-
-      if (prevEdgeLength < NODE_PATCH_MIN_EDGE_MM || nextEdgeLength < NODE_PATCH_MIN_EDGE_MM) {
-        changed = true;
-        continue;
-      }
-
-      const prevVector = subtract(vertex, previous);
-      const nextVector = subtract(after, vertex);
-      const denominator =
-        Math.hypot(prevVector.x, prevVector.y) * Math.hypot(nextVector.x, nextVector.y);
-
-      if (denominator > 0) {
-        const sine =
-          Math.abs(prevVector.x * nextVector.y - prevVector.y * nextVector.x) / denominator;
-        if (sine < NODE_PATCH_COLLINEAR_SINE) {
-          changed = true;
-          continue;
-        }
-      }
-
-      next.push(vertex);
-    }
-
-    if (next.length < 3 || next.length === current.length) {
-      break;
-    }
-
-    current = next;
-  }
-
-  return current;
-}
-
-function convexHullPatchVertices(vertices: Point2D[]): Point2D[] {
-  const sorted = [...vertices].sort((a, b) => a.x - b.x || a.y - b.y);
-  const unique: Point2D[] = [];
-
-  for (const vertex of sorted) {
-    if (!unique.some((candidate) => pointDistance(candidate, vertex) <= COORDINATE_TOLERANCE_MM)) {
-      unique.push(copyPoint(vertex));
-    }
-  }
-
-  if (unique.length <= 3) {
-    return unique;
-  }
-
-  const cross = (origin: Point2D, a: Point2D, b: Point2D): number =>
-    (a.x - origin.x) * (b.y - origin.y) - (a.y - origin.y) * (b.x - origin.x);
-
-  const lower: Point2D[] = [];
-  for (const vertex of unique) {
-    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], vertex) <= 0) {
-      lower.pop();
-    }
-    lower.push(vertex);
-  }
-
-  const upper: Point2D[] = [];
-  for (let index = unique.length - 1; index >= 0; index -= 1) {
-    const vertex = unique[index];
-    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], vertex) <= 0) {
-      upper.pop();
-    }
-    upper.push(vertex);
-  }
-
-  lower.pop();
-  upper.pop();
-  return [...lower, ...upper];
-}
-
-function stableAcuteNodePatchRing(nodePoint: Point2D, vertices: Point2D[]): Point2D[] {
-  const collapsed = collapsePatchVerticesByAngle(nodePoint, vertices);
-  if (collapsed.length < 3) {
-    return collapsed;
-  }
-
-  const simplified = simplifyPatchRingVertices(collapsed);
-  if (simplified.length < 3) {
-    return simplified;
-  }
-
-  if (!isPolygonSelfIntersecting(simplified)) {
-    return simplified;
-  }
-
-  return convexHullPatchVertices(simplified);
-}
-
-function buildAcuteNodeHullPatchFeature(node: EndpointNode): PolygonFeature | null {
-  if (node.endpoints.length < 2) {
-    return null;
-  }
-
-  const rawVertices = node.endpoints.flatMap((endpointRef) => {
-    const raw = endpointRawCapVertices(endpointRef);
-    return endpointRef.endpoint === 'start'
-      ? [raw.interiorVertex, raw.exteriorVertex]
-      : [raw.exteriorVertex, raw.interiorVertex];
-  });
-  const uniqueVertices: Point2D[] = [];
-  rawVertices.forEach((vertex) => {
-    if (!uniqueVertices.some((candidate) => pointDistance(candidate, vertex) <= COORDINATE_TOLERANCE_MM)) {
-      uniqueVertices.push(copyPoint(vertex));
-    }
-  });
-
-  if (uniqueVertices.length < 3) {
-    return null;
-  }
-
-  const hull = convexHullPatchVertices(uniqueVertices);
-  if (hull.length < 3) {
-    return null;
-  }
-
-  return patchPolygonFeature(hull, MIN_NODE_PATCH_AREA_MM2);
-}
-
-function buildAcuteNodeUnifiedPatchFeature(
-  node: EndpointNode,
-  joinsMap: Map<string, JoinData[]>
-): PolygonFeature | null {
-  const sortedEndpoints = sortedNodeEndpointsByAngle(node);
-  if (sortedEndpoints.length < 2) {
-    return null;
-  }
-
-  const patchVertices = sortedEndpoints.flatMap((endpointRef) => {
-    const vertices = endpointNodePatchCapVertices(endpointRef, joinsMap, node.point);
-    return [vertices.rightVertex, vertices.leftVertex];
-  });
-  const uniqueVertices: Point2D[] = [];
-  patchVertices.forEach((vertex) => {
-    if (!uniqueVertices.some((candidate) => pointDistance(candidate, vertex) <= COORDINATE_TOLERANCE_MM)) {
-      uniqueVertices.push(copyPoint(vertex));
-    }
-  });
-
-  if (uniqueVertices.length < 3) {
-    return null;
-  }
-
-  const ring = stableAcuteNodePatchRing(node.point, uniqueVertices);
-  if (ring.length < 3) {
-    return null;
-  }
-
-  return patchPolygonFeature(ring, MIN_NODE_PATCH_AREA_MM2);
-}
-
-function shouldUseAcuteNodePatch(
-  node: EndpointNode,
-  joinsMap: Map<string, JoinData[]>
-): boolean {
-  return node.endpoints.some((endpointRef) => {
-    const join = endpointJoinForRef(endpointRef, joinsMap);
-    return Boolean(join && (join.joinType === 'bevel' || join.angle < 30));
-  });
-}
-
-function endpointCapVerticesForUnion(
-  endpointRef: WallEndpointRef,
-  joinsMap: Map<string, JoinData[]>,
-  acuteEndpointCaps: Map<string, { interiorVertex: Point2D; exteriorVertex: Point2D }>
-): { interiorVertex: Point2D; exteriorVertex: Point2D } {
-  const acuteCap = acuteEndpointCaps.get(endpointRef.key);
-  if (acuteCap) {
-    return {
-      interiorVertex: copyPoint(acuteCap.interiorVertex),
-      exteriorVertex: copyPoint(acuteCap.exteriorVertex),
-    };
-  }
-
-  const resolved = endpointResolvedCapVertices(endpointRef, joinsMap);
-  return endpointRef.endpoint === 'start'
-    ? {
-      interiorVertex: resolved.leftVertex,
-      exteriorVertex: resolved.rightVertex,
-    }
-    : {
-      interiorVertex: resolved.rightVertex,
-      exteriorVertex: resolved.leftVertex,
-    };
-}
-
-function buildAcuteEndpointCapMap(
-  walls: Wall[],
-  joinsMap: Map<string, JoinData[]>
-): Map<string, { interiorVertex: Point2D; exteriorVertex: Point2D }> {
-  const caps = new Map<string, { interiorVertex: Point2D; exteriorVertex: Point2D }>();
-  const nodes = buildEndpointNodes(walls);
-
-  for (const node of nodes) {
-    if (node.endpoints.length < 2 || !shouldUseAcuteNodePatch(node, joinsMap)) {
-      continue;
-    }
-
-    for (const endpointRef of node.endpoints) {
-      const raw = endpointRawCapVertices(endpointRef);
-      caps.set(endpointRef.key, {
-        interiorVertex: copyPoint(raw.interiorVertex),
-        exteriorVertex: copyPoint(raw.exteriorVertex),
-      });
-    }
-  }
-
-  return caps;
-}
-
-function buildAcuteNodeHoleGuards(
-  walls: Wall[],
-  joinsMap: Map<string, JoinData[]>
-): NodeHoleGuard[] {
-  const nodes = buildEndpointNodes(walls);
-
-  return nodes
-    .filter((node) => node.endpoints.length >= 2 && shouldUseAcuteNodePatch(node, joinsMap))
-    .map((node) => {
-      const minThickness = Math.min(...node.endpoints.map((endpoint) => Math.max(0, endpoint.thickness)));
-      const centerPatchRadius = Math.max(
-        ACUTE_NODE_CENTER_PATCH_MIN_RADIUS_MM,
-        minThickness * ACUTE_NODE_CENTER_PATCH_RADIUS_FACTOR
-      );
-      const radius = Math.min(
-        ACUTE_NODE_HOLE_GUARD_MAX_RADIUS_MM,
-        centerPatchRadius * ACUTE_NODE_HOLE_GUARD_RADIUS_FACTOR + ACUTE_NODE_HOLE_GUARD_RADIUS_PADDING_MM
-      );
-      const maxHoleArea = Math.min(
-        ACUTE_NODE_HOLE_GUARD_MAX_AREA_MM2,
-        Math.max(MIN_RENDER_HOLE_AREA_MM2 * 2, Math.PI * radius * radius * 1.25)
-      );
-
-      return {
-        point: copyPoint(node.point),
-        radius,
-        maxHoleArea,
-      };
-    });
-}
-
-function wallPolygonFeatureForUnion(
-  wall: Wall,
-  joinsMap: Map<string, JoinData[]>,
-  acuteEndpointCaps: Map<string, { interiorVertex: Point2D; exteriorVertex: Point2D }>
-): PolygonFeature | null {
-  const startRef = buildEndpointRef(wall, 'start');
-  const endRef = buildEndpointRef(wall, 'end');
-  const startCap = endpointCapVerticesForUnion(startRef, joinsMap, acuteEndpointCaps);
-  const endCap = endpointCapVerticesForUnion(endRef, joinsMap, acuteEndpointCaps);
-  const stablePolygon = makePolygonFeature([
-    startCap.interiorVertex,
-    endCap.interiorVertex,
-    endCap.exteriorVertex,
-    startCap.exteriorVertex,
-  ]);
-
-  if (stablePolygon) {
-    return stablePolygon;
-  }
-
-  return wallPolygonFeature(wall, joinsMap.get(wall.id));
 }
 
 function resolveJoinEdgeVertices(wall: Wall, join: JoinData): {
@@ -1311,19 +698,6 @@ function buildNodeCorePatchFeatures(
       continue;
     }
 
-    if (shouldUseAcuteNodePatch(node, joinsMap)) {
-      const hullPatch = buildAcuteNodeHullPatchFeature(node);
-      if (hullPatch) {
-        features.push(hullPatch);
-      } else {
-        const nodePatch = buildAcuteNodeUnifiedPatchFeature(node, joinsMap);
-        if (nodePatch) {
-          features.push(nodePatch);
-        }
-      }
-      continue;
-    }
-
     const resolvedVertices = node.endpoints.flatMap((endpointRef) => {
       const vertices = endpointResolvedCapVertices(endpointRef, joinsMap);
       return [vertices.leftVertex, vertices.rightVertex];
@@ -1350,27 +724,25 @@ function buildNodeCorePatchFeatures(
   return features;
 }
 
-function featureUnionPolygons(
-  features: PolygonFeature[],
-  holeGuards: NodeHoleGuard[] = []
-): Point2D[][][] {
+function featureUnionPolygons(features: PolygonFeature[]): Point2D[][][] {
   if (features.length === 0) {
     return [];
   }
 
   if (features.length === 1) {
-    return suppressAcuteNodeHoleArtifacts(
-      [features[0].geometry.coordinates.map(openRing)],
-      holeGuards
-    );
+    return [features[0].geometry.coordinates.map(openRing)];
   }
 
-  const merged = unionPolygonFeaturesIncremental(features);
-  if (!merged) {
-    return [];
+  try {
+    const merged = turf.union(turf.featureCollection(features));
+    if (merged && (merged.geometry.type === 'Polygon' || merged.geometry.type === 'MultiPolygon')) {
+      return extractPolygons(merged.geometry);
+    }
+  } catch {
+    // Fall through to the per-feature polygons below.
   }
 
-  return suppressAcuteNodeHoleArtifacts(extractPolygons(merged.geometry), holeGuards);
+  return features.map((feature) => feature.geometry.coordinates.map(openRing));
 }
 
 function unionWallComponent(
@@ -1381,11 +753,9 @@ function unionWallComponent(
     return { polygons: [], junctionOverlays: [] };
   }
 
-  const acuteEndpointCaps = buildAcuteEndpointCapMap(walls, joinsMap);
-  const acuteNodeHoleGuards = buildAcuteNodeHoleGuards(walls, joinsMap);
   const features = [
     ...walls.flatMap((wall) => {
-      const feature = wallPolygonFeatureForUnion(wall, joinsMap, acuteEndpointCaps);
+      const feature = wallPolygonFeature(wall, joinsMap.get(wall.id));
       return feature ? [feature] : [];
     }),
     ...buildNodeCorePatchFeatures(walls, joinsMap),
@@ -1406,8 +776,8 @@ function unionWallComponent(
   ];
 
   return {
-    polygons: featureUnionPolygons(features, acuteNodeHoleGuards),
-    junctionOverlays: featureUnionPolygons(overlayFeatures, acuteNodeHoleGuards),
+    polygons: featureUnionPolygons(features),
+    junctionOverlays: featureUnionPolygons(overlayFeatures),
   };
 }
 
