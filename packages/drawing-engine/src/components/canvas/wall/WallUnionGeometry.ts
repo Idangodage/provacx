@@ -8,8 +8,7 @@ import { computeWallJoinMap } from './WallJoinNetwork';
 const COMPONENT_TOLERANCE_MM = 2;
 const COORDINATE_TOLERANCE_MM = 0.001;
 const MIN_PATCH_AREA_MM2 = 0.1;
-const MIN_UNION_ENDPOINT_ANGLE_DEG = 0.5;
-const MIN_UNION_SEGMENT_ANGLE_DEG = 3;
+const MIN_UNION_ENDPOINT_ANGLE_DEG = 15;
 const SEGMENT_INTERIOR_TOLERANCE = 0.001;
 
 type Endpoint = 'start' | 'end';
@@ -153,7 +152,7 @@ function wallsShareAcuteEndpointContact(wall: Wall, otherWall: Wall): boolean {
 }
 
 function wallsShareAcuteSegmentContact(wall: Wall, otherWall: Wall): boolean {
-  if (angleBetweenWallAxesDeg(wall, otherWall) >= MIN_UNION_SEGMENT_ANGLE_DEG) {
+  if (angleBetweenWallAxesDeg(wall, otherWall) >= MIN_UNION_ENDPOINT_ANGLE_DEG) {
     return false;
   }
 

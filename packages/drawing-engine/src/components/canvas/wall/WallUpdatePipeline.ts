@@ -48,9 +48,7 @@ import {
 const MITER_LIMIT = 2.5;
 
 /** Minimum angle (degrees) for miter join — below this, use butt */
-const MIN_ENDPOINT_JOIN_ANGLE = 0.5;
-const MIN_ENDPOINT_MITER_ANGLE = 15;
-const MIN_SEGMENT_JOIN_ANGLE = 3;
+const MIN_MITER_ANGLE = 15;
 
 /** Maximum fraction of wall length the miter can extend */
 const MAX_MITER_LENGTH_FRACTION = 0.35;
@@ -136,7 +134,7 @@ function findJoinMatchesForWall(
 
     if (dStartToOtherStart <= tolerance) {
       const angle = computeAngle(wall, 'start', other, 'start');
-      if (angle >= MIN_ENDPOINT_JOIN_ANGLE) {
+      if (angle >= MIN_MITER_ANGLE) {
         matches.push({
           endpoint: 'start',
           joinPoint: midpoint2(wall.startPoint, other.startPoint),
@@ -148,7 +146,7 @@ function findJoinMatchesForWall(
       }
     } else if (dStartToOtherEnd <= tolerance) {
       const angle = computeAngle(wall, 'start', other, 'end');
-      if (angle >= MIN_ENDPOINT_JOIN_ANGLE) {
+      if (angle >= MIN_MITER_ANGLE) {
         matches.push({
           endpoint: 'start',
           joinPoint: midpoint2(wall.startPoint, other.endPoint),
@@ -166,7 +164,7 @@ function findJoinMatchesForWall(
 
     if (dEndToOtherStart <= tolerance) {
       const angle = computeAngle(wall, 'end', other, 'start');
-      if (angle >= MIN_ENDPOINT_JOIN_ANGLE) {
+      if (angle >= MIN_MITER_ANGLE) {
         matches.push({
           endpoint: 'end',
           joinPoint: midpoint2(wall.endPoint, other.startPoint),
@@ -178,7 +176,7 @@ function findJoinMatchesForWall(
       }
     } else if (dEndToOtherEnd <= tolerance) {
       const angle = computeAngle(wall, 'end', other, 'end');
-      if (angle >= MIN_ENDPOINT_JOIN_ANGLE) {
+      if (angle >= MIN_MITER_ANGLE) {
         matches.push({
           endpoint: 'end',
           joinPoint: midpoint2(wall.endPoint, other.endPoint),
@@ -200,7 +198,7 @@ function findJoinMatchesForWall(
       const proj = projectToSegment(pt, other.startPoint, other.endPoint);
       if (proj.distance <= tolerance && proj.t > 0.02 && proj.t < 0.98) {
         const angle = computeTJunctionAngle(wall, ep, other);
-        if (angle >= MIN_SEGMENT_JOIN_ANGLE) {
+        if (angle >= MIN_MITER_ANGLE) {
           matches.push({
             endpoint: ep,
             joinPoint: proj.point,
@@ -282,9 +280,6 @@ function computeJoinGeometry(
 
   const wFaces = getEndpointFaces(wall, ep);
   const oFaces = getEndpointFaces(other, otherEp);
-  const shortestLen = Math.min(wallLength(wall), wallLength(other));
-  const bevelDirection = computeBevelDirection(wall, other, ep, joinPoint);
-  const maxBevelOffset = shortestLen * 0.4;
 
   // Intersect offset lines to find miter vertices
   const intersect = (a: Point2D, aDir: Point2D, b: Point2D, bDir: Point2D): Point2D =>
@@ -293,33 +288,12 @@ function computeJoinGeometry(
   const leftV = intersect(wFaces.left, wFaces.dir, oFaces.right, oFaces.dir);
   const rightV = intersect(wFaces.right, wFaces.dir, oFaces.left, oFaces.dir);
 
-  const rightKind: 'interior' | 'exterior' =
-    wFaces.leftKind === 'interior' ? 'exterior' : 'interior';
   const intV = wFaces.leftKind === 'interior' ? leftV : rightV;
   const extV = wFaces.leftKind === 'exterior' ? leftV : rightV;
-  const leftReach = distance(joinPoint, leftV);
-  const rightReach = distance(joinPoint, rightV);
-  const outerKind = leftReach >= rightReach ? wFaces.leftKind : rightKind;
-  const outerReach = Math.max(leftReach, rightReach);
-
-  const buildBevelJoin = (): JoinData => {
-    const anchors = endpointAnchors(wall, ep);
-    return {
-      wallId: wall.id,
-      otherWallId: other.id,
-      endpoint: ep,
-      joinPoint,
-      joinType: 'bevel',
-      angle,
-      interiorVertex: outerKind === 'interior' ? anchors.interiorVertex : intV,
-      exteriorVertex: outerKind === 'exterior' ? anchors.exteriorVertex : extV,
-      bevelDirection,
-      maxBevelOffset,
-    };
-  };
 
   // === AGGRESSIVE CLAMPING ===
   const halfThickness = Math.max(wall.thickness, other.thickness) / 2;
+  const shortestLen = Math.min(wallLength(wall), wallLength(other));
 
   // Compute maximum allowed reach from join point
   const halfAngleRad = Math.max(0.05, (angle / 2) * (Math.PI / 180));
@@ -331,16 +305,12 @@ function computeJoinGeometry(
     shortestLen * MAX_MITER_LENGTH_FRACTION,
   );
 
-  if (!Number.isFinite(maxReach) || maxReach <= 0.0001) {
-    return buildBevelJoin();
-  }
-
-  if (angle < MIN_ENDPOINT_MITER_ANGLE || outerReach > maxReach) {
-    return buildBevelJoin();
-  }
+  // Clamp both vertices
+  const clampedInt = clampVertex(intV, joinPoint, maxReach);
+  const clampedExt = clampVertex(extV, joinPoint, maxReach);
 
   // Validate the resulting polygon won't self-intersect
-  const testPolygon = buildTestPolygon(wall, ep, intV, extV);
+  const testPolygon = buildTestPolygon(wall, ep, clampedInt, clampedExt);
   if (testPolygon && isPolygonSelfIntersecting(testPolygon)) {
     // Miter failed — fall back to basic offset vertices
     return {
@@ -348,12 +318,12 @@ function computeJoinGeometry(
       otherWallId: other.id,
       endpoint: ep,
       joinPoint,
-      joinType: 'bevel',
+      joinType: 'butt',
       angle,
-      interiorVertex: outerKind === 'interior' ? endpointAnchors(wall, ep).interiorVertex : intV,
-      exteriorVertex: outerKind === 'exterior' ? endpointAnchors(wall, ep).exteriorVertex : extV,
-      bevelDirection,
-      maxBevelOffset,
+      interiorVertex: ep === 'start' ? wall.interiorLine.start : wall.interiorLine.end,
+      exteriorVertex: ep === 'start' ? wall.exteriorLine.start : wall.exteriorLine.end,
+      bevelDirection: computeBevelDirection(wall, other, ep, joinPoint),
+      maxBevelOffset: shortestLen * 0.4,
     };
   }
 
@@ -364,10 +334,10 @@ function computeJoinGeometry(
     joinPoint,
     joinType: 'miter',
     angle,
-    interiorVertex: intV,
-    exteriorVertex: extV,
-    bevelDirection,
-    maxBevelOffset,
+    interiorVertex: clampedInt,
+    exteriorVertex: clampedExt,
+    bevelDirection: computeBevelDirection(wall, other, ep, joinPoint),
+    maxBevelOffset: shortestLen * 0.4,
   };
 }
 
@@ -399,15 +369,6 @@ function buildTestPolygon(
   } else {
     return [wall.interiorLine.start, intV, extV, wall.exteriorLine.start];
   }
-}
-
-function endpointAnchors(
-  wall: Wall,
-  ep: 'start' | 'end',
-): { interiorVertex: Point2D; exteriorVertex: Point2D } {
-  return ep === 'start'
-    ? { interiorVertex: wall.interiorLine.start, exteriorVertex: wall.exteriorLine.start }
-    : { interiorVertex: wall.interiorLine.end, exteriorVertex: wall.exteriorLine.end };
 }
 
 /**
