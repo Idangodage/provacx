@@ -254,6 +254,10 @@ export function DrawingCanvas({
     const hvacRendererRef = useRef<HvacPlanRenderer | null>(null);
     const zoomRef = useRef(1);
     const panOffsetRef = useRef<Point2D>({ x: 0, y: 0 });
+    // Smooth-zoom: rAF-batched store sync (one React update per frame)
+    const wheelRafId = useRef<number | null>(null);
+    const wheelPendingZoom = useRef<number>(1);
+    const wheelPendingPan = useRef<Point2D>({ x: 0, y: 0 });
     const paperScaleRatioRef = useRef(1);
     const placementCursorRef = useRef<Point2D | null>(null);
     const mousePositionRef = useRef<Point2D>({ x: 0, y: 0 });
@@ -3892,29 +3896,73 @@ export function DrawingCanvas({
         finishOpeningPointerInteraction,
     ]);
 
+    // ── Wheel zoom handler ─────────────────────────────────────────────
     const handleWheel = useCallback(
         (e: fabric.TPointerEventInfo<WheelEvent>) => {
             e.e.preventDefault();
             const canvas = fabricRef.current;
             if (!canvas) return;
 
-            const pointer = canvas.getViewportPoint(e.e);
-            const scenePoint = canvas.getScenePoint(e.e);
-            const currentZoom = zoom;
+            // Read zoom from ref so rapid wheel ticks compound correctly
+            // without waiting for React re-renders.
+            const currentVpZoom = zoomRef.current;
+            const currentZoom = currentVpZoom / safePaperPerRealRatio;
+
+            // Exponential zoom factor from wheel delta.
             const zoomFactor = Math.exp(-e.e.deltaY * WHEEL_ZOOM_SENSITIVITY);
             const newZoom = Math.min(Math.max(currentZoom * zoomFactor, MIN_ZOOM), MAX_ZOOM);
             if (Math.abs(newZoom - currentZoom) < 0.0001) return;
-            const newViewportZoom = newZoom * safePaperPerRealRatio;
+            const newVpZoom = newZoom * safePaperPerRealRatio;
 
-            const nextPan = {
-                x: scenePoint.x - pointer.x / newViewportZoom,
-                y: scenePoint.y - pointer.y / newViewportZoom,
+            // Compute cursor position in viewport-pixel space.
+            const canvasEl = canvas.upperCanvasEl ?? canvas.lowerCanvasEl;
+            const rect = canvasEl.getBoundingClientRect();
+            const vpX = e.e.clientX - rect.left;
+            const vpY = e.e.clientY - rect.top;
+
+            // Scene-space point under cursor (from refs, not canvas — avoids lag).
+            const curPan = panOffsetRef.current;
+            const sceneX = curPan.x + vpX / currentVpZoom;
+            const sceneY = curPan.y + vpY / currentVpZoom;
+
+            // New pan so that scenePoint stays pinned under cursor.
+            const nextPan: Point2D = {
+                x: sceneX - vpX / newVpZoom,
+                y: sceneY - vpY / newVpZoom,
             };
-            zoomRef.current = newViewportZoom;
+
+            // Apply immediately to Fabric canvas for instant visual feedback.
+            const vt: fabric.TMat2D = [
+                newVpZoom, 0, 0, newVpZoom,
+                -nextPan.x * newVpZoom,
+                -nextPan.y * newVpZoom,
+            ];
+            canvas.setViewportTransform(vt);
+            roomRendererRef.current?.setViewportZoom(newVpZoom);
+            wallRenderer?.setViewportZoom(newVpZoom);
+            dimensionRendererRef.current?.setViewportZoom(newVpZoom);
+            canvas.requestRenderAll();
+
+            // Update refs for next tick.
+            zoomRef.current = newVpZoom;
             panOffsetRef.current = nextPan;
-            setViewTransform(newZoom, nextPan);
+
+            // Batch store update via rAF — coalesces multiple wheel events
+            // within the same frame into one React update, so overlays
+            // (PageLayout, Grid, Rulers) stay in sync every frame.
+            wheelPendingZoom.current = newZoom;
+            wheelPendingPan.current = nextPan;
+            if (!wheelRafId.current) {
+                wheelRafId.current = requestAnimationFrame(() => {
+                    wheelRafId.current = null;
+                    setViewTransform(
+                        wheelPendingZoom.current,
+                        wheelPendingPan.current
+                    );
+                });
+            }
         },
-        [zoom, safePaperPerRealRatio, setViewTransform]
+        [safePaperPerRealRatio, setViewTransform, wallRenderer]
     );
 
     // ---------------------------------------------------------------------------
@@ -4863,6 +4911,11 @@ export function DrawingCanvas({
             window.removeEventListener('blur', handleWindowBlur);
             window.removeEventListener('keydown', handleWallKeyDown);
             window.removeEventListener('keyup', handleWallKeyUp);
+            // Cancel any pending wheel rAF store sync.
+            if (wheelRafId.current) {
+                cancelAnimationFrame(wheelRafId.current);
+                wheelRafId.current = null;
+            }
         };
     }, [
         handleMouseDown,
