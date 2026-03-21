@@ -105,17 +105,6 @@ export interface UseSelectModeOptions {
     innerOffset: number;
   } | null;
   moveRoom: (id: string, delta: Point2D, options?: RoomMoveOptions) => void;
-  translateAttachedSymbolsForRooms: (
-    roomIds: string[],
-    delta: Point2D,
-    options?: { skipHistory?: boolean }
-  ) => void;
-  rotateRoomAttachedSymbols: (
-    id: string,
-    pivot: Point2D,
-    deltaAngleRad: number,
-    options?: { skipHistory?: boolean }
-  ) => void;
   connectWalls: (wallId: string, otherWallId: string) => void;
   detectRooms: (options?: { debounce?: boolean }) => void;
   saveToHistory: (action: string) => void;
@@ -172,10 +161,8 @@ interface ThicknessDragState {
 interface MoveDragState {
   mode: 'move';
   wallIds: string[];
-  attachedRoomIds: string[];
   anchorWallId: string;
   startPointer: Point2D;
-  lastAppliedDelta: Point2D;
   baselineWalls: Map<string, Wall>;
   constrainedNormal: Point2D | null;
   endpointConstraints: MoveEndpointConstraint[];
@@ -223,7 +210,6 @@ interface RoomRotateDragState {
   roomId: string;
   pivot: Point2D;
   baselineAngleRad: number;
-  lastAppliedAngleRad: number;
   baselineReferenceAngleRad: number;
   baselineRoom: Room;
   baselineWalls: Map<string, Wall>;
@@ -621,8 +607,6 @@ export function useSelectMode({
   resetWallBevel,
   getCornerBevelDots,
   moveRoom,
-  translateAttachedSymbolsForRooms,
-  rotateRoomAttachedSymbols,
   connectWalls,
   detectRooms,
   saveToHistory,
@@ -664,8 +648,6 @@ export function useSelectMode({
     resetWallBevel,
     getCornerBevelDots,
     moveRoom,
-    translateAttachedSymbolsForRooms,
-    rotateRoomAttachedSymbols,
     connectWalls,
     detectRooms,
     saveToHistory,
@@ -697,8 +679,6 @@ export function useSelectMode({
       resetWallBevel,
       getCornerBevelDots,
       moveRoom,
-      translateAttachedSymbolsForRooms,
-      rotateRoomAttachedSymbols,
       connectWalls,
       detectRooms,
       saveToHistory,
@@ -720,8 +700,6 @@ export function useSelectMode({
     resetWallBevel,
     getCornerBevelDots,
     moveRoom,
-    translateAttachedSymbolsForRooms,
-    rotateRoomAttachedSymbols,
     connectWalls,
     detectRooms,
     saveToHistory,
@@ -1751,7 +1729,6 @@ export function useSelectMode({
         roomId: room.id,
         pivot,
         baselineAngleRad,
-        lastAppliedAngleRad: 0,
         baselineReferenceAngleRad: getRoomPrimaryAxisAngleRad(room.vertices),
         baselineRoom: {
           ...room,
@@ -1817,9 +1794,6 @@ export function useSelectMode({
         ? optionsRef.current.selectedIds.filter((id) => Boolean(findWallById(id)))
         : [wall.id];
       const selectedWallIdSet = new Set(selectedWallIds);
-      const attachedRoomIds = optionsRef.current.rooms
-        .filter((room) => room.wallIds.length > 0 && room.wallIds.every((wallId) => selectedWallIdSet.has(wallId)))
-        .map((room) => room.id);
       const baselineWalls = new Map<string, Wall>();
       for (const wallId of selectedWallIds) {
         const selectedWall = findWallById(wallId);
@@ -1862,10 +1836,8 @@ export function useSelectMode({
       dragStateRef.current = {
         mode: 'move',
         wallIds: Array.from(baselineWalls.keys()),
-        attachedRoomIds,
         anchorWallId: wall.id,
         startPointer: { ...point },
-        lastAppliedDelta: { x: 0, y: 0 },
         baselineWalls,
         constrainedNormal,
         endpointConstraints,
@@ -2224,18 +2196,6 @@ export function useSelectMode({
         dragUpdates.push({ id: wallId, updates });
       });
       updateWallsIfChanged(dragUpdates, { skipHistory: true, source: 'drag' });
-      const roomDelta = {
-        x: translation.x - state.lastAppliedDelta.x,
-        y: translation.y - state.lastAppliedDelta.y,
-      };
-      if (state.attachedRoomIds.length > 0) {
-        optionsRef.current.translateAttachedSymbolsForRooms(
-          state.attachedRoomIds,
-          roomDelta,
-          { skipHistory: true }
-        );
-      }
-      state.lastAppliedDelta = translation;
 
       const anchor = candidates.get(state.anchorWallId);
       if (anchor) {
@@ -2512,13 +2472,6 @@ export function useSelectMode({
       });
 
       updateWallsIfChanged(roomRotateUpdates, { skipHistory: true, source: 'drag' });
-      optionsRef.current.rotateRoomAttachedSymbols(
-        state.roomId,
-        state.pivot,
-        deltaAngle - state.lastAppliedAngleRad,
-        { skipHistory: true }
-      );
-      state.lastAppliedAngleRad = deltaAngle;
 
       const angleDeg = (deltaAngle * 180) / Math.PI;
       const currentReferenceAngleRad = normalizeAngleRadians(
