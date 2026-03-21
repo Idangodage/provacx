@@ -1,0 +1,1083 @@
+/**
+ * useRendererSync
+ *
+ * Encapsulates all renderer-synchronisation useEffect / useCallback blocks
+ * that were previously inlined in DrawingCanvas.tsx (lines 1087-1814).
+ *
+ * These effects keep the wall, room, dimension, section-line, HVAC and object
+ * renderers in sync with React state changes.
+ */
+
+import * as fabric from 'fabric';
+import { useEffect, useCallback, useRef } from 'react';
+
+import type { ArchitecturalObjectDefinition } from '../../../data';
+import type {
+    Point2D,
+    Wall,
+    Room,
+    DrawingTool,
+    SymbolInstance2D,
+    Dimension2D,
+    DimensionSettings,
+    WallDrawingState,
+    WallSettings,
+    SectionLine,
+    SectionLineDrawingState,
+    HvacElement,
+} from '../../../types';
+import {
+    hideActiveSelectionChrome,
+    OPENING_RESIZE_HANDLE_SIZE_PX,
+    OPENING_RESIZE_HANDLE_COLOR,
+} from '../../DrawingCanvas.types';
+import type {
+    CanvasState,
+    MarqueeSelectionState,
+    OpeningPointerInteraction,
+} from '../../DrawingCanvas.types';
+import { getToolCursor } from '../toolUtils';
+import { MM_TO_PX } from '../scale';
+import { formatDimensionLength } from '../dimension/dimensionGeometry';
+import type { WallRenderer } from '../wall/WallRenderer';
+import type { RoomRenderer } from '../room/RoomRenderer';
+import type { DimensionRenderer } from '../dimension/DimensionRenderer';
+import type { ObjectRenderer } from '../object/ObjectRenderer';
+import type { SectionLineRenderer } from '../elevation/SectionLineRenderer';
+import type { HvacPlanRenderer } from '../hvac/HvacPlanRenderer';
+import { startDragPerfTimer, endDragPerfTimer } from '../perf/dragPerf';
+
+// =============================================================================
+// Types
+// =============================================================================
+
+export interface UseRendererSyncOptions {
+    // Refs
+    fabricRef: React.RefObject<fabric.Canvas | null>;
+    roomRendererRef: React.RefObject<RoomRenderer | null>;
+    dimensionRendererRef: React.RefObject<DimensionRenderer | null>;
+    objectRendererRef: React.RefObject<ObjectRenderer | null>;
+    sectionLineRendererRef: React.RefObject<SectionLineRenderer | null>;
+    hvacRendererRef: React.RefObject<HvacPlanRenderer | null>;
+    wallsRef: React.MutableRefObject<Wall[]>;
+    symbolsRef: React.MutableRefObject<SymbolInstance2D[]>;
+    dimensionRefreshFrameRef: React.MutableRefObject<number | null>;
+    autoDimensionSyncFrameRef: React.MutableRefObject<number | null>;
+    zoomRef: React.MutableRefObject<number>;
+    panOffsetRef: React.MutableRefObject<Point2D>;
+    mousePositionRef: React.MutableRefObject<Point2D>;
+    placementCursorRef: React.MutableRefObject<Point2D | null>;
+    openingResizeHandlesRef: React.MutableRefObject<fabric.Object[]>;
+    openingPointerInteractionRef: React.MutableRefObject<OpeningPointerInteraction | null>;
+    canvasStateRef: React.MutableRefObject<CanvasState>;
+    marqueeSelectionRef: React.MutableRefObject<MarqueeSelectionState>;
+    lastMarqueeSelectionRef: React.MutableRefObject<MarqueeSelectionState>;
+    applyMarqueeFilterRef: React.MutableRefObject<boolean>;
+
+    // Renderers
+    wallRenderer: WallRenderer | null;
+
+    // Fabric canvas state ref
+    fabricCanvas: fabric.Canvas | null;
+
+    // State values
+    tool: DrawingTool;
+    viewportZoom: number;
+    panOffset: Point2D;
+    walls: Wall[];
+    rooms: Room[];
+    symbols: SymbolInstance2D[];
+    dimensions: Dimension2D[];
+    dimensionSettings: DimensionSettings;
+    wallSettings: WallSettings;
+    wallDrawingState: WallDrawingState;
+    sectionLines: SectionLine[];
+    sectionLineDrawingState: SectionLineDrawingState;
+    hvacElements: HvacElement[];
+    selectedIds: string[];
+    hoveredElementId: string | null;
+    wallIdSet: Set<string>;
+    objectDefinitions: ArchitecturalObjectDefinition[];
+    objectDefinitionsById: Map<string, ArchitecturalObjectDefinition>;
+    doorWindowSymbolsSignature: string;
+    isSpacePressed: boolean;
+    canvasState: CanvasState;
+    isHandleDragging: boolean;
+    activeRoomDragId: string | null;
+    persistentRoomControlId: string | null;
+    openingInteractionActive: boolean;
+    pendingPlacementDefinition: ArchitecturalObjectDefinition | null;
+    placementRotationDeg: number;
+
+    // State setters
+    setPlacementRotationDeg: React.Dispatch<React.SetStateAction<number>>;
+    setPlacementValid: React.Dispatch<React.SetStateAction<boolean>>;
+    setOpeningInteractionActive: React.Dispatch<React.SetStateAction<boolean>>;
+    setActiveRoomDragId: React.Dispatch<React.SetStateAction<string | null>>;
+    setPersistentRoomControlId: React.Dispatch<React.SetStateAction<string | null>>;
+
+    // Callbacks
+    restackInteractiveOverlays: (canvas: fabric.Canvas) => void;
+    cancelDimensionPlacement: () => void;
+    syncAutoDimensions: () => void;
+    updateWall: (
+        id: string,
+        updates: Partial<Wall>,
+        options?: { skipHistory?: boolean; source?: 'ui' | 'drag'; skipRoomDetection?: boolean }
+    ) => void;
+    updateSymbol: (
+        id: string,
+        updates: Partial<SymbolInstance2D>,
+        options?: { skipHistory?: boolean }
+    ) => void;
+    clearOpeningResizeHandles: () => void;
+    buildHostedOpeningSymbolProperties: (
+        definition: ArchitecturalObjectDefinition,
+        wall: Wall,
+        positionAlongWallMm: number,
+        sourceProperties: Record<string, unknown> | undefined,
+        openingWidthMm: number,
+        openingHeightMm: number,
+        openingSillHeightMm: number
+    ) => Record<string, unknown>;
+    fitOpeningToWall: (
+        wall: Wall,
+        opening: { position: number; width: number }
+    ) => { position: number; width: number };
+    resolveOpeningSillHeightMm: (
+        definition: ArchitecturalObjectDefinition,
+        properties?: Record<string, unknown>
+    ) => number;
+    computePlacement: (
+        point: Point2D,
+        definition: ArchitecturalObjectDefinition,
+        options?: { ignoreSymbolId?: string; ignoreOpeningId?: string; openingWidthMm?: number }
+    ) => {
+        point: Point2D;
+        rotationDeg: number;
+        snappedWall: { wall: Wall; positionAlongWall: number } | null;
+        alignmentPoint: Point2D | null;
+        valid: boolean;
+    };
+    buildOpeningPreviewProperties: (
+        definition: ArchitecturalObjectDefinition,
+        snappedWall?: { wall: Wall; positionAlongWall: number } | null
+    ) => Record<string, unknown> | undefined;
+
+    // Tool hooks that need cleanup
+    offsetTool: { cleanup: () => void };
+    trimTool: { cleanup: () => void };
+    extendTool: { cleanup: () => void };
+}
+
+export interface UseRendererSyncResult {
+    /** Full re-render of dimension layer. Used by mouse handlers. */
+    refreshDimensionLayer: () => void;
+    /** rAF-throttled wrapper around refreshDimensionLayer. Used by mouse handlers. */
+    scheduleDimensionLayerRefresh: () => void;
+}
+
+// =============================================================================
+// Hook
+// =============================================================================
+
+export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyncResult {
+    const {
+        fabricRef,
+        roomRendererRef,
+        dimensionRendererRef,
+        objectRendererRef,
+        sectionLineRendererRef,
+        hvacRendererRef,
+        wallsRef,
+        symbolsRef,
+        dimensionRefreshFrameRef,
+        autoDimensionSyncFrameRef,
+        zoomRef,
+        panOffsetRef,
+        mousePositionRef,
+        placementCursorRef,
+        openingResizeHandlesRef,
+        openingPointerInteractionRef,
+        canvasStateRef,
+        marqueeSelectionRef,
+        lastMarqueeSelectionRef,
+        applyMarqueeFilterRef,
+
+        wallRenderer,
+        fabricCanvas,
+
+        tool,
+        viewportZoom,
+        panOffset,
+        walls,
+        rooms,
+        symbols,
+        dimensions,
+        dimensionSettings,
+        wallSettings,
+        wallDrawingState,
+        sectionLines,
+        sectionLineDrawingState,
+        hvacElements,
+        selectedIds,
+        hoveredElementId,
+        wallIdSet,
+        objectDefinitions,
+        objectDefinitionsById,
+        doorWindowSymbolsSignature,
+        isSpacePressed,
+        canvasState,
+        isHandleDragging,
+        activeRoomDragId,
+        persistentRoomControlId,
+        openingInteractionActive,
+        pendingPlacementDefinition,
+        placementRotationDeg,
+
+        setPlacementRotationDeg,
+        setPlacementValid,
+        setOpeningInteractionActive,
+        setActiveRoomDragId,
+        setPersistentRoomControlId,
+
+        restackInteractiveOverlays,
+        cancelDimensionPlacement,
+        syncAutoDimensions,
+        updateWall,
+        updateSymbol,
+        clearOpeningResizeHandles,
+        buildHostedOpeningSymbolProperties,
+        fitOpeningToWall,
+        resolveOpeningSillHeightMm,
+        computePlacement,
+        buildOpeningPreviewProperties,
+
+        offsetTool,
+        trimTool,
+        extendTool,
+    } = options;
+
+    // Debounce timer: after zoom/pan settles, refresh dimension labels so
+    // they render at the correct screen-space size for the new zoom level.
+    const zoomSettleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // Stable ref to the latest refreshDimensionLayer so the settle timer
+    // can call it without a declaration-order dependency.
+    const refreshDimensionLayerRef = useRef<(() => void) | null>(null);
+
+    // ── Sync view transform ──────────────────────────────────────────────
+    useEffect(() => {
+        const canvas = fabricRef.current;
+        if (!canvas) return;
+        const viewportTransform: fabric.TMat2D = [
+            viewportZoom,
+            0,
+            0,
+            viewportZoom,
+            -panOffset.x * viewportZoom,
+            -panOffset.y * viewportZoom,
+        ];
+        canvas.setViewportTransform(viewportTransform);
+        roomRendererRef.current?.setViewportZoom(viewportZoom);
+        wallRenderer?.setViewportZoom(viewportZoom);
+        dimensionRendererRef.current?.setViewportZoom(viewportZoom);
+        hideActiveSelectionChrome(canvas);
+        canvas.requestRenderAll();
+        zoomRef.current = viewportZoom;
+        panOffsetRef.current = panOffset;
+
+        // Schedule a deferred dimension refresh so label sizes adjust to the
+        // final zoom level once the user stops scrolling.  The 150 ms delay
+        // ensures we don't trigger expensive full rebuilds on every wheel tick.
+        if (zoomSettleTimerRef.current !== null) {
+            clearTimeout(zoomSettleTimerRef.current);
+        }
+        zoomSettleTimerRef.current = setTimeout(() => {
+            zoomSettleTimerRef.current = null;
+            refreshDimensionLayerRef.current?.();
+        }, 150);
+    }, [viewportZoom, panOffset, wallRenderer, fabricRef, roomRendererRef, dimensionRendererRef, zoomRef, panOffsetRef]);
+
+    useEffect(() => {
+        if (tool === 'select') {
+            return;
+        }
+        const hoveredWallId = hoveredElementId && wallIdSet.has(hoveredElementId)
+            ? hoveredElementId
+            : null;
+        wallRenderer?.setHoveredWall(hoveredWallId);
+    }, [wallRenderer, hoveredElementId, wallIdSet, tool]);
+
+    useEffect(() => {
+        if (tool !== 'dimension') {
+            cancelDimensionPlacement();
+        }
+    }, [tool, cancelDimensionPlacement]);
+
+    useEffect(() => {
+        if (tool !== 'offset') {
+            offsetTool.cleanup();
+        }
+    }, [tool, offsetTool]);
+
+    useEffect(() => {
+        if (tool !== 'trim') {
+            trimTool.cleanup();
+        }
+    }, [tool, trimTool]);
+
+    useEffect(() => {
+        if (tool !== 'extend') {
+            extendTool.cleanup();
+        }
+    }, [tool, extendTool]);
+
+    // Live elastic dimension shown while drawing a wall.
+    useEffect(() => {
+        const renderer = dimensionRendererRef.current;
+        if (!renderer) return;
+        if (
+            tool === 'wall' &&
+            wallDrawingState.isDrawing &&
+            wallDrawingState.startPoint &&
+            wallDrawingState.currentPoint
+        ) {
+            const start = wallDrawingState.startPoint;
+            const end = wallDrawingState.currentPoint;
+            const lengthMm = Math.hypot(end.x - start.x, end.y - start.y);
+            const label = formatDimensionLength(lengthMm, dimensionSettings);
+            renderer.setViewportZoom(viewportZoom);
+            renderer.renderLiveDimension(start, end, label);
+        } else {
+            renderer.clearLiveDimension();
+        }
+    }, [tool, wallDrawingState, dimensionSettings, viewportZoom, dimensionRendererRef]);
+
+    // Read zoom from ref so this callback identity stays stable across zoom
+    // changes. This prevents the cascading re-render chain where every zoom
+    // tick would trigger full wall/room/dimension rebuilds.
+    const refreshDimensionLayer = useCallback(() => {
+        const perfStart = startDragPerfTimer();
+        const renderer = dimensionRendererRef.current;
+        const canvas = fabricRef.current;
+        if (!renderer || !canvas) {
+            endDragPerfTimer('canvas.refreshDimensionLayer', perfStart, {
+                dimensions: dimensions.length,
+                walls: walls.length,
+                rooms: rooms.length,
+            });
+            return;
+        }
+        renderer.setViewportZoom(zoomRef.current);
+        renderer.setContext(walls, rooms, dimensionSettings);
+        renderer.renderAllDimensions(dimensions);
+        const dimensionIdSet = new Set(dimensions.map((dimension) => dimension.id));
+        const selectedDimensionIds = selectedIds.filter((id) => dimensionIdSet.has(id));
+        const hoveredDimensionId =
+            hoveredElementId && dimensionIdSet.has(hoveredElementId)
+                ? hoveredElementId
+                : null;
+        renderer.setSelectedDimensions(selectedDimensionIds);
+        renderer.setHoveredDimension(hoveredDimensionId);
+        restackInteractiveOverlays(canvas);
+        canvas.requestRenderAll();
+        endDragPerfTimer('canvas.refreshDimensionLayer', perfStart, {
+            dimensions: dimensions.length,
+            walls: walls.length,
+            rooms: rooms.length,
+        });
+    }, [
+        walls,
+        rooms,
+        dimensionSettings,
+        dimensions,
+        // viewportZoom intentionally excluded — read from zoomRef to keep
+        // this callback reference stable during zoom and avoid cascading
+        // full rebuilds of walls, rooms, and dimensions on every wheel tick.
+        selectedIds,
+        hoveredElementId,
+        restackInteractiveOverlays,
+        fabricRef,
+        dimensionRendererRef,
+        zoomRef,
+    ]);
+    // Keep the ref in sync so the zoom-settle timer always calls the latest version.
+    refreshDimensionLayerRef.current = refreshDimensionLayer;
+
+    const scheduleAutoDimensionSync = useCallback(() => {
+        if (typeof window === 'undefined') {
+            syncAutoDimensions();
+            return;
+        }
+        if (autoDimensionSyncFrameRef.current !== null) return;
+        autoDimensionSyncFrameRef.current = window.requestAnimationFrame(() => {
+            autoDimensionSyncFrameRef.current = null;
+            syncAutoDimensions();
+        });
+    }, [syncAutoDimensions, autoDimensionSyncFrameRef]);
+
+    // Automatically rebuild all auto-generated dimensions whenever walls, rooms,
+    // or dimension settings change — so dimensions are always visible without
+    // requiring a manual "Auto Dimension" button press.
+    // During handle dragging, frame-throttle updates so wall dimensions stay live.
+    useEffect(() => {
+        if (wallDrawingState.isDrawing) return;
+        if (walls.length === 0 && rooms.length === 0) return;
+        if (isHandleDragging) {
+            scheduleAutoDimensionSync();
+            return;
+        }
+        syncAutoDimensions();
+    }, [
+        walls,
+        rooms,
+        dimensionSettings,
+        wallDrawingState.isDrawing,
+        isHandleDragging,
+        scheduleAutoDimensionSync,
+        syncAutoDimensions,
+    ]);
+
+    const scheduleDimensionLayerRefresh = useCallback(() => {
+        if (typeof window === 'undefined') {
+            refreshDimensionLayer();
+            return;
+        }
+        if (dimensionRefreshFrameRef.current !== null) return;
+        dimensionRefreshFrameRef.current = window.requestAnimationFrame(() => {
+            dimensionRefreshFrameRef.current = null;
+            refreshDimensionLayer();
+        });
+    }, [refreshDimensionLayer, dimensionRefreshFrameRef]);
+
+    useEffect(() => {
+        roomRendererRef.current?.setWallContext(walls);
+        roomRendererRef.current?.renderAllRooms(rooms);
+        // Rebuild dimensions after room re-renders, then restore edit-handle priority.
+        if (isHandleDragging) {
+            scheduleDimensionLayerRefresh();
+            return;
+        }
+        refreshDimensionLayer();
+    }, [rooms, walls, fabricCanvas, refreshDimensionLayer, isHandleDragging, scheduleDimensionLayerRefresh, roomRendererRef]);
+
+    useEffect(() => {
+        return () => {
+            if (zoomSettleTimerRef.current !== null) {
+                clearTimeout(zoomSettleTimerRef.current);
+                zoomSettleTimerRef.current = null;
+            }
+            if (
+                dimensionRefreshFrameRef.current !== null &&
+                typeof window !== 'undefined'
+            ) {
+                window.cancelAnimationFrame(dimensionRefreshFrameRef.current);
+                dimensionRefreshFrameRef.current = null;
+            }
+            if (
+                autoDimensionSyncFrameRef.current !== null &&
+                typeof window !== 'undefined'
+            ) {
+                window.cancelAnimationFrame(autoDimensionSyncFrameRef.current);
+                autoDimensionSyncFrameRef.current = null;
+            }
+        };
+    }, [dimensionRefreshFrameRef, autoDimensionSyncFrameRef]);
+
+    useEffect(() => {
+        roomRendererRef.current?.setShowTemperatureIcons(wallSettings.showRoomTemperatureIcons);
+        roomRendererRef.current?.setShowVentilationBadges(wallSettings.showRoomVentilationBadges);
+    }, [wallSettings.showRoomTemperatureIcons, wallSettings.showRoomVentilationBadges, fabricCanvas, roomRendererRef]);
+
+    useEffect(() => {
+        if (isHandleDragging) {
+            scheduleDimensionLayerRefresh();
+            return;
+        }
+        refreshDimensionLayer();
+    }, [refreshDimensionLayer, scheduleDimensionLayerRefresh, fabricCanvas, isHandleDragging]);
+
+    useEffect(() => {
+        const roomIdSet = new Set(rooms.map((room) => room.id));
+        const selectedRoomIds = selectedIds.filter((id) => roomIdSet.has(id));
+        roomRendererRef.current?.setSelectedRooms(selectedRoomIds);
+        if (selectedRoomIds.length > 0) {
+            setPersistentRoomControlId(selectedRoomIds[0] ?? null);
+        }
+    }, [rooms, selectedIds, roomRendererRef, setPersistentRoomControlId]);
+
+    useEffect(() => {
+        const roomIdSet = new Set(rooms.map((room) => room.id));
+        const resolvedRoomDragId =
+            activeRoomDragId && roomIdSet.has(activeRoomDragId)
+                ? activeRoomDragId
+                : null;
+        roomRendererRef.current?.setActiveDragRoom(resolvedRoomDragId);
+        if (resolvedRoomDragId !== activeRoomDragId) {
+            setActiveRoomDragId(resolvedRoomDragId);
+        }
+    }, [rooms, activeRoomDragId, roomRendererRef, setActiveRoomDragId]);
+
+    useEffect(() => {
+        const roomIdSet = new Set(rooms.map((room) => room.id));
+        const resolvedPersistentRoomControlId =
+            persistentRoomControlId && roomIdSet.has(persistentRoomControlId)
+                ? persistentRoomControlId
+                : null;
+        roomRendererRef.current?.setPersistentControlRoom(resolvedPersistentRoomControlId);
+        if (resolvedPersistentRoomControlId !== persistentRoomControlId) {
+            setPersistentRoomControlId(resolvedPersistentRoomControlId);
+        }
+    }, [rooms, persistentRoomControlId, roomRendererRef, setPersistentRoomControlId]);
+
+    useEffect(() => {
+        const dimensionIdSet = new Set(dimensions.map((dimension) => dimension.id));
+        const selectedDimensionIds = selectedIds.filter((id) => dimensionIdSet.has(id));
+        dimensionRendererRef.current?.setSelectedDimensions(selectedDimensionIds);
+    }, [dimensions, selectedIds, dimensionRendererRef]);
+
+    useEffect(() => {
+        const roomIdSet = new Set(rooms.map((room) => room.id));
+        const hoveredRoomId = hoveredElementId && roomIdSet.has(hoveredElementId)
+            ? hoveredElementId
+            : null;
+        roomRendererRef.current?.setHoveredRoom(hoveredRoomId);
+    }, [rooms, hoveredElementId, roomRendererRef]);
+
+    useEffect(() => {
+        const dimensionIdSet = new Set(dimensions.map((dimension) => dimension.id));
+        const hoveredDimensionId = hoveredElementId && dimensionIdSet.has(hoveredElementId)
+            ? hoveredElementId
+            : null;
+        dimensionRendererRef.current?.setHoveredDimension(hoveredDimensionId);
+    }, [dimensions, hoveredElementId, dimensionRendererRef]);
+
+    useEffect(() => {
+        if (!objectRendererRef.current) return;
+        objectRendererRef.current.setDefinitions(objectDefinitions);
+    }, [objectDefinitions, fabricCanvas, objectRendererRef]);
+
+    useEffect(() => {
+        if (isHandleDragging) return;
+        objectRendererRef.current?.renderIncremental(symbols);
+    }, [symbols, objectDefinitions, fabricCanvas, isHandleDragging, objectRendererRef]);
+
+    useEffect(() => {
+        if (!wallRenderer) return;
+        const openingSymbols = symbolsRef.current.filter((instance) => {
+            const definition = objectDefinitionsById.get(instance.symbolId);
+            return definition?.category === 'doors' || definition?.category === 'windows';
+        });
+        wallRenderer.setOpeningSymbolInstances(openingSymbols);
+        if (isHandleDragging) {
+            wallRenderer.renderWallsInteractive(wallsRef.current);
+            if (fabricRef.current) {
+                restackInteractiveOverlays(fabricRef.current);
+            }
+            scheduleDimensionLayerRefresh();
+            return;
+        }
+        // Keep wall visuals identical while dragging and idle.
+        wallRenderer.renderAllWalls(wallsRef.current);
+        // Rebuild dimensions after wall re-renders, then restore edit-handle priority.
+        refreshDimensionLayer();
+    }, [
+        wallRenderer,
+        walls,
+        doorWindowSymbolsSignature,
+        objectDefinitionsById,
+        refreshDimensionLayer,
+        scheduleDimensionLayerRefresh,
+        restackInteractiveOverlays,
+        isHandleDragging,
+        symbolsRef,
+        wallsRef,
+        fabricRef,
+    ]);
+
+    useEffect(() => {
+        if (isHandleDragging) return;
+        if (walls.length === 0 || symbols.length === 0) return;
+
+        let adjustedAnyWall = false;
+        for (const wall of walls) {
+            if (wall.openings.length === 0) continue;
+            let hasWallChange = false;
+            const nextOpenings = wall.openings.map((opening) => {
+                const fitted = fitOpeningToWall(wall, opening);
+                if (
+                    Math.abs(fitted.position - opening.position) > 0.01 ||
+                    Math.abs(fitted.width - opening.width) > 0.01
+                ) {
+                    hasWallChange = true;
+                    return {
+                        ...opening,
+                        position: fitted.position,
+                        width: fitted.width,
+                    };
+                }
+                return opening;
+            });
+
+            if (hasWallChange) {
+                adjustedAnyWall = true;
+                updateWall(
+                    wall.id,
+                    { openings: nextOpenings },
+                    { skipHistory: true, source: 'drag' }
+                );
+            }
+        }
+
+        if (adjustedAnyWall) {
+            return;
+        }
+
+        const openingLookup = new Map<string, { wall: Wall; opening: Wall['openings'][number] }>();
+        for (const wall of walls) {
+            for (const opening of wall.openings) {
+                openingLookup.set(opening.id, { wall, opening });
+            }
+        }
+
+        for (const instance of symbols) {
+            const definition = objectDefinitionsById.get(instance.symbolId);
+            if (!definition) continue;
+            if (definition.category !== 'doors' && definition.category !== 'windows') continue;
+
+            const linked = openingLookup.get(instance.id);
+            if (!linked) continue;
+
+            const { wall, opening } = linked;
+            const dx = wall.endPoint.x - wall.startPoint.x;
+            const dy = wall.endPoint.y - wall.startPoint.y;
+            const wallLength = Math.hypot(dx, dy) || 1;
+            const t = opening.position / wallLength;
+            const nextPosition = {
+                x: wall.startPoint.x + dx * t,
+                y: wall.startPoint.y + dy * t,
+            };
+            const nextRotation = (Math.atan2(dy, dx) * 180) / Math.PI;
+            const nextWidthMm = Math.max(1, opening.width - 50);
+            const nextHeightMm = Math.max(1, opening.height);
+            const nextSillHeightMm =
+                definition.category === 'windows'
+                    ? Math.max(0, opening.sillHeight ?? resolveOpeningSillHeightMm(definition, instance.properties))
+                    : 0;
+            const nextBaseElevationMm =
+                definition.category === 'windows'
+                    ? (wall.properties3D.baseElevation ?? 0) + nextSillHeightMm
+                    : (wall.properties3D.baseElevation ?? 0);
+            const nextProperties = buildHostedOpeningSymbolProperties(
+                definition,
+                wall,
+                opening.position,
+                instance.properties,
+                nextWidthMm,
+                nextHeightMm,
+                nextSillHeightMm
+            );
+
+            const properties = instance.properties ?? {};
+            const changed =
+                Math.abs(instance.position.x - nextPosition.x) > 0.01 ||
+                Math.abs(instance.position.y - nextPosition.y) > 0.01 ||
+                Math.abs(instance.rotation - nextRotation) > 0.01 ||
+                Math.abs(Number(properties.widthMm ?? 0) - nextWidthMm) > 0.01 ||
+                Math.abs(Number(properties.depthMm ?? 0) - wall.thickness) > 0.01 ||
+                Math.abs(Number(properties.heightMm ?? 0) - nextHeightMm) > 0.01 ||
+                Math.abs(Number(properties.positionAlongWallMm ?? 0) - opening.position) > 0.01 ||
+                String(properties.hostWallId ?? '') !== wall.id ||
+                Math.abs(Number(properties.baseElevationMm ?? 0) - nextBaseElevationMm) > 0.01 ||
+                String(properties.doorOpenSide ?? '') !== String(nextProperties.doorOpenSide ?? '') ||
+                (definition.category === 'windows' &&
+                    Math.abs(Number(properties.sillHeightMm ?? 0) - nextSillHeightMm) > 0.01);
+
+            if (!changed) continue;
+
+            updateSymbol(
+                instance.id,
+                {
+                    position: nextPosition,
+                    rotation: nextRotation,
+                    properties: nextProperties,
+                },
+                { skipHistory: true }
+            );
+        }
+    }, [
+        walls,
+        symbols,
+        objectDefinitionsById,
+        buildHostedOpeningSymbolProperties,
+        fitOpeningToWall,
+        resolveOpeningSillHeightMm,
+        updateWall,
+        updateSymbol,
+        isHandleDragging,
+    ]);
+
+    useEffect(() => {
+        const symbolIdSet = new Set(symbols.map((symbol) => symbol.id));
+        const selectedSymbolIds = selectedIds.filter((id) => symbolIdSet.has(id));
+        objectRendererRef.current?.setSelectedObjects(selectedSymbolIds);
+        if (tool === 'select' && selectedIds.length === 1 && selectedSymbolIds.length === 1) {
+            objectRendererRef.current?.activateObject(selectedSymbolIds[0]);
+            hideActiveSelectionChrome(fabricRef.current);
+        }
+    }, [symbols, selectedIds, objectRendererRef, fabricRef]);
+
+    useEffect(() => {
+        const symbolIdSet = new Set(symbols.map((symbol) => symbol.id));
+        const hoveredSymbolId = hoveredElementId && symbolIdSet.has(hoveredElementId)
+            ? hoveredElementId
+            : null;
+        objectRendererRef.current?.setHoveredObject(hoveredSymbolId);
+    }, [symbols, hoveredElementId, objectRendererRef]);
+
+    // Track which opening+wall the handles were built for so we can skip
+    // full recreation when only zoom changes.
+    const resizeHandleContextRef = useRef<{
+        openingId: string;
+        wallId: string;
+        zoom: number;
+    } | null>(null);
+
+    // Create or update opening resize handles.  When only zoom changes we
+    // update existing handle geometry in-place instead of destroying and
+    // recreating, which avoids expensive canvas.add/remove cycles.
+    useEffect(() => {
+        const canvas = fabricRef.current;
+        if (!canvas) return;
+
+        if (tool !== 'select' || selectedIds.length === 0) {
+            if (openingResizeHandlesRef.current.length > 0) {
+                clearOpeningResizeHandles();
+                resizeHandleContextRef.current = null;
+            }
+            return;
+        }
+
+        const selectedId = selectedIds.find((id) =>
+            walls.some((wall) => wall.openings.some((opening) => opening.id === id))
+        );
+        if (!selectedId) {
+            if (openingResizeHandlesRef.current.length > 0) {
+                clearOpeningResizeHandles();
+                resizeHandleContextRef.current = null;
+            }
+            return;
+        }
+        const hostWall = walls.find((wall) => wall.openings.some((opening) => opening.id === selectedId));
+        if (!hostWall) {
+            clearOpeningResizeHandles();
+            resizeHandleContextRef.current = null;
+            return;
+        }
+        const hostOpening = hostWall.openings.find((opening) => opening.id === selectedId);
+        if (!hostOpening) {
+            clearOpeningResizeHandles();
+            resizeHandleContextRef.current = null;
+            return;
+        }
+
+        const dx = hostWall.endPoint.x - hostWall.startPoint.x;
+        const dy = hostWall.endPoint.y - hostWall.startPoint.y;
+        const wallLength = Math.hypot(dx, dy);
+        if (!Number.isFinite(wallLength) || wallLength <= 0.001) return;
+
+        const currentZoom = zoomRef.current;
+        const angleDeg = (Math.atan2(dy, dx) * 180) / Math.PI;
+        const direction = { x: dx / wallLength, y: dy / wallLength };
+        const startEdge = hostOpening.position - hostOpening.width / 2;
+        const endEdge = hostOpening.position + hostOpening.width / 2;
+        const handleSizePx = OPENING_RESIZE_HANDLE_SIZE_PX / Math.max(currentZoom, 0.01);
+        const strokeW = 2 / Math.max(currentZoom, 0.01);
+
+        // Fast path: if only zoom changed and handles already exist for the
+        // same opening, just update their size/stroke in place.
+        const ctx = resizeHandleContextRef.current;
+        if (
+            ctx &&
+            ctx.openingId === selectedId &&
+            ctx.wallId === hostWall.id &&
+            openingResizeHandlesRef.current.length === 2
+        ) {
+            for (const handle of openingResizeHandlesRef.current) {
+                handle.set({ width: handleSizePx, height: handleSizePx, strokeWidth: strokeW });
+                handle.setCoords();
+            }
+            resizeHandleContextRef.current = { openingId: selectedId, wallId: hostWall.id, zoom: currentZoom };
+            canvas.requestRenderAll();
+            return;
+        }
+
+        // Full rebuild (selection changed or first time).
+        clearOpeningResizeHandles();
+
+        const createHandle = (side: 'start' | 'end', edgeAlongWallMm: number) => {
+            const pointMm = {
+                x: hostWall.startPoint.x + direction.x * edgeAlongWallMm,
+                y: hostWall.startPoint.y + direction.y * edgeAlongWallMm,
+            };
+            const angle = side === 'start' ? angleDeg + 270 : angleDeg + 90;
+            const handle = new fabric.Triangle({
+                left: pointMm.x * MM_TO_PX,
+                top: pointMm.y * MM_TO_PX,
+                width: handleSizePx,
+                height: handleSizePx,
+                angle,
+                fill: OPENING_RESIZE_HANDLE_COLOR,
+                stroke: '#ffffff',
+                strokeWidth: strokeW,
+                originX: 'center',
+                originY: 'center',
+                selectable: false,
+                evented: true,
+                hasControls: false,
+                hasBorders: false,
+                objectCaching: false,
+                hoverCursor: 'ew-resize',
+                moveCursor: 'ew-resize',
+            });
+            const typedHandle = handle as fabric.Object & {
+                id?: string;
+                name?: string;
+                openingId?: string;
+                wallId?: string;
+                openingResizeSide?: 'start' | 'end';
+                isOpeningResizeHandle?: boolean;
+            };
+            typedHandle.id = `${selectedId}-resize-${side}`;
+            typedHandle.name = `opening-resize-${side}`;
+            typedHandle.openingId = selectedId;
+            typedHandle.wallId = hostWall.id;
+            typedHandle.openingResizeSide = side;
+            typedHandle.isOpeningResizeHandle = true;
+            canvas.add(handle);
+            canvas.bringObjectToFront(handle);
+            openingResizeHandlesRef.current.push(handle);
+        };
+
+        createHandle('start', startEdge);
+        createHandle('end', endEdge);
+        resizeHandleContextRef.current = { openingId: selectedId, wallId: hostWall.id, zoom: currentZoom };
+        canvas.requestRenderAll();
+    }, [
+        tool,
+        selectedIds,
+        symbols,
+        walls,
+        objectDefinitionsById,
+        viewportZoom,
+        clearOpeningResizeHandles,
+        fabricRef,
+        openingResizeHandlesRef,
+        zoomRef,
+    ]);
+
+    useEffect(() => {
+        if (tool !== 'select') {
+            openingPointerInteractionRef.current = null;
+            setOpeningInteractionActive(false);
+        }
+    }, [tool, openingPointerInteractionRef, setOpeningInteractionActive]);
+
+    useEffect(() => {
+        if (!sectionLineRendererRef.current) return;
+        sectionLineRendererRef.current.setShowReferenceIndicators(wallSettings.showSectionReferenceLines);
+        sectionLineRendererRef.current.renderAll(sectionLines);
+    }, [sectionLines, wallSettings.showSectionReferenceLines, fabricCanvas, sectionLineRendererRef]);
+
+    // Render HVAC elements on plan canvas
+    useEffect(() => {
+        if (!hvacRendererRef.current) return;
+        hvacRendererRef.current.renderAll(hvacElements);
+    }, [hvacElements, fabricCanvas, hvacRendererRef]);
+
+    useEffect(() => {
+        const sectionIds = new Set(sectionLines.map((line) => line.id));
+        const selectedSectionIds = selectedIds.filter((id) => sectionIds.has(id));
+        sectionLineRendererRef.current?.setSelectedSectionLines(selectedSectionIds);
+    }, [sectionLines, selectedIds, sectionLineRendererRef]);
+
+    useEffect(() => {
+        const sectionIds = new Set(sectionLines.map((line) => line.id));
+        const hoveredSectionId = hoveredElementId && sectionIds.has(hoveredElementId)
+            ? hoveredElementId
+            : null;
+        sectionLineRendererRef.current?.setHoveredSectionLine(hoveredSectionId);
+    }, [sectionLines, hoveredElementId, sectionLineRendererRef]);
+
+    useEffect(() => {
+        const renderer = sectionLineRendererRef.current;
+        if (!renderer) return;
+        if (
+            tool === 'section-line' &&
+            sectionLineDrawingState.isDrawing &&
+            sectionLineDrawingState.startPoint &&
+            sectionLineDrawingState.currentPoint
+        ) {
+            renderer.renderPreview(
+                sectionLineDrawingState.startPoint,
+                sectionLineDrawingState.currentPoint,
+                sectionLineDrawingState.direction,
+                sectionLineDrawingState.nextLabel
+            );
+            return;
+        }
+        renderer.clearPreview();
+    }, [tool, sectionLineDrawingState, sectionLineRendererRef]);
+
+    useEffect(() => {
+        if (!pendingPlacementDefinition) {
+            objectRendererRef.current?.clearPlacementPreview();
+            placementCursorRef.current = null;
+            setPlacementValid(true);
+            return;
+        }
+        setPlacementRotationDeg(pendingPlacementDefinition.defaultRotationDeg ?? 0);
+        if (!placementCursorRef.current) {
+            const seedPoint = {
+                x: mousePositionRef.current.x / MM_TO_PX,
+                y: mousePositionRef.current.y / MM_TO_PX,
+            };
+            placementCursorRef.current = seedPoint;
+            const placement = computePlacement(seedPoint, pendingPlacementDefinition);
+            setPlacementValid(placement.valid);
+            objectRendererRef.current?.renderPlacementPreview(
+                pendingPlacementDefinition,
+                placement.point,
+                placement.rotationDeg,
+                placement.valid,
+                placement.snappedWall ? {
+                    wall: placement.snappedWall.wall,
+                    positionAlongWall: placement.snappedWall.positionAlongWall,
+                } : null,
+                buildOpeningPreviewProperties(
+                    pendingPlacementDefinition,
+                    placement.snappedWall ? {
+                        wall: placement.snappedWall.wall,
+                        positionAlongWall: placement.snappedWall.positionAlongWall,
+                    } : null
+                ),
+            );
+        }
+    }, [pendingPlacementDefinition, buildOpeningPreviewProperties, computePlacement, objectRendererRef, placementCursorRef, mousePositionRef, setPlacementValid, setPlacementRotationDeg]);
+
+    useEffect(() => {
+        if (!pendingPlacementDefinition || !placementCursorRef.current) return;
+        const placement = computePlacement(placementCursorRef.current, pendingPlacementDefinition);
+        setPlacementValid(placement.valid);
+        objectRendererRef.current?.renderPlacementPreview(
+            pendingPlacementDefinition,
+            placement.point,
+            placement.rotationDeg,
+            placement.valid,
+            placement.snappedWall ? {
+                wall: placement.snappedWall.wall,
+                positionAlongWall: placement.snappedWall.positionAlongWall,
+            } : null,
+            buildOpeningPreviewProperties(
+                pendingPlacementDefinition,
+                placement.snappedWall ? {
+                    wall: placement.snappedWall.wall,
+                    positionAlongWall: placement.snappedWall.positionAlongWall,
+                } : null
+            ),
+        );
+    }, [pendingPlacementDefinition, placementRotationDeg, buildOpeningPreviewProperties, computePlacement, objectRendererRef, placementCursorRef, setPlacementValid]);
+
+    useEffect(() => { canvasStateRef.current = canvasState; }, [canvasState, canvasStateRef]);
+
+    // ── Tool Change Handler ──────────────────────────────────────────────
+    useEffect(() => {
+        const canvas = fabricRef.current;
+        if (!canvas) return;
+
+        const effectiveTool = isSpacePressed ? 'pan' : tool;
+        const allowSelection =
+            effectiveTool === 'select' &&
+            !pendingPlacementDefinition &&
+            !openingInteractionActive;
+        const pointerCursor = canvasState.isPanning
+            ? 'grabbing'
+            : pendingPlacementDefinition
+                ? 'crosshair'
+                : getToolCursor(effectiveTool);
+
+        canvas.selection = allowSelection;
+        (canvas as fabric.Canvas & { selectionFullyContained?: boolean }).selectionFullyContained = allowSelection;
+        canvas.defaultCursor = pointerCursor;
+        canvas.hoverCursor = pointerCursor;
+        if (!allowSelection) {
+            marqueeSelectionRef.current = { active: false, start: null, current: null, mode: 'window' };
+            lastMarqueeSelectionRef.current = { active: false, start: null, current: null, mode: 'window' };
+            applyMarqueeFilterRef.current = false;
+        }
+
+        canvas.forEachObject((obj) => {
+            const typed = obj as fabric.Object & {
+                isWallControl?: boolean;
+                isWallControlDecoration?: boolean;
+                isRoomControl?: boolean;
+                isRoomControlDecoration?: boolean;
+                isDimensionControl?: boolean;
+                isDimensionControlDecoration?: boolean;
+                sectionLineId?: string;
+                isOpeningResizeHandle?: boolean;
+            };
+            if (typed.isWallControlDecoration) {
+                obj.selectable = false;
+                obj.evented = false;
+                return;
+            }
+            if (typed.isRoomControlDecoration) {
+                obj.selectable = false;
+                obj.evented = false;
+                return;
+            }
+            if (typed.isWallControl) {
+                obj.selectable = allowSelection;
+                obj.evented = allowSelection;
+                return;
+            }
+            if (typed.isRoomControl) {
+                obj.selectable = allowSelection;
+                obj.evented = allowSelection;
+                return;
+            }
+            if (typed.isDimensionControlDecoration) {
+                obj.selectable = false;
+                obj.evented = false;
+                return;
+            }
+            if (typed.isDimensionControl) {
+                obj.selectable = allowSelection;
+                obj.evented = allowSelection;
+                return;
+            }
+            if (typed.sectionLineId) {
+                obj.selectable = false;
+                obj.evented = allowSelection;
+                return;
+            }
+            if (typed.isOpeningResizeHandle) {
+                obj.selectable = false;
+                obj.evented = allowSelection;
+                return;
+            }
+            obj.selectable = allowSelection;
+            obj.evented = allowSelection;
+        });
+        if (allowSelection) {
+            hideActiveSelectionChrome(canvas);
+        }
+        canvas.renderAll();
+    }, [tool, isSpacePressed, canvasState.isPanning, pendingPlacementDefinition, openingInteractionActive, fabricRef, marqueeSelectionRef, lastMarqueeSelectionRef, applyMarqueeFilterRef]);
+
+    return {
+        refreshDimensionLayer,
+        scheduleDimensionLayerRefresh,
+    };
+}

@@ -40,3 +40,27 @@ export { useTrimTool, type UseTrimToolOptions, type UseTrimToolResult } from './
 
 // Extend tool
 export { useExtendTool, type UseExtendToolOptions, type UseExtendToolResult } from './useExtendTool';
+
+// Target resolvers
+export { useTargetResolvers, type UseTargetResolversResult } from './useTargetResolvers';
+
+// Context menu handlers
+export { useContextMenuHandlers, type UseContextMenuHandlersOptions, type UseContextMenuHandlersResult } from './useContextMenuHandlers';
+
+// Geometry helpers
+export { useGeometryHelpers, type UseGeometryHelpersOptions, type UseGeometryHelpersResult, type WallPlacementSnap, type PointProjection } from './useGeometryHelpers';
+
+// Opening placement
+export { useOpeningPlacement, type UseOpeningPlacementOptions, type UseOpeningPlacementResult } from './useOpeningPlacement';
+
+// Opening interaction
+export { useOpeningInteraction, type UseOpeningInteractionOptions, type UseOpeningInteractionResult } from './useOpeningInteraction';
+
+// Renderer synchronisation
+export { useRendererSync, type UseRendererSyncOptions, type UseRendererSyncResult } from './useRendererSync';
+
+// Canvas mouse handlers
+export { useCanvasMouseHandlers, type UseCanvasMouseHandlersOptions, type UseCanvasMouseHandlersResult } from './useCanvasMouseHandlers';
+
+// Canvas event binding
+export { useCanvasEventBinding, type UseCanvasEventBindingOptions, type UseCanvasEventBindingResult } from './useCanvasEventBinding';
