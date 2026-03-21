@@ -4,9 +4,13 @@
  * Handles middle mouse button panning for the canvas.
  */
 
+import type * as fabric from 'fabric';
 import { useRef, useCallback } from 'react';
-
 import type { Point2D } from '../../../types';
+import {
+    buildViewportTransform,
+    panFromViewportDelta,
+} from '../viewTransform';
 
 export interface MiddlePanState {
     active: boolean;
@@ -15,9 +19,14 @@ export interface MiddlePanState {
 }
 
 export interface UseMiddlePanOptions {
+    fabricRef: React.RefObject<fabric.Canvas | null>;
     zoomRef: React.MutableRefObject<number>;
     panOffsetRef: React.MutableRefObject<Point2D>;
-    setPanOffset: (offset: Point2D) => void;
+    safePaperPerRealRatio: number;
+    setViewTransform: (zoom: number, offset: Point2D) => void;
+    wheelPendingZoom: React.MutableRefObject<number>;
+    wheelPendingPan: React.MutableRefObject<Point2D>;
+    wheelRafId: React.MutableRefObject<number | null>;
     setCanvasState: React.Dispatch<React.SetStateAction<{
         isPanning: boolean;
         lastPanPoint: Point2D | null;
@@ -33,9 +42,14 @@ export interface UseMiddlePanOptions {
 }
 
 export function useMiddlePan({
+    fabricRef,
     zoomRef,
     panOffsetRef,
-    setPanOffset,
+    safePaperPerRealRatio,
+    setViewTransform,
+    wheelPendingZoom,
+    wheelPendingPan,
+    wheelRafId,
     setCanvasState,
     canvasStateRef,
 }: UseMiddlePanOptions) {
@@ -61,20 +75,24 @@ export function useMiddlePan({
         (event: MouseEvent) => {
             if (event.button !== 1) return;
             event.preventDefault();
+            const canvas = fabricRef.current;
+            const downViewportPoint = canvas
+                ? canvas.getViewportPoint(event as unknown as fabric.TPointerEvent)
+                : { x: event.clientX, y: event.clientY };
             middlePanRef.current = {
                 active: true,
-                lastX: event.clientX,
-                lastY: event.clientY,
+                lastX: downViewportPoint.x,
+                lastY: downViewportPoint.y,
             };
             const nextState = {
                 ...canvasStateRef.current,
                 isPanning: true,
-                lastPanPoint: { x: event.clientX, y: event.clientY },
+                lastPanPoint: { x: downViewportPoint.x, y: downViewportPoint.y },
             };
             canvasStateRef.current = nextState;
             setCanvasState(nextState);
         },
-        [canvasStateRef, setCanvasState]
+        [fabricRef, canvasStateRef, setCanvasState]
     );
 
     const handleMiddleMouseMove = useCallback(
@@ -86,20 +104,52 @@ export function useMiddlePan({
             }
             event.preventDefault();
 
-            const dx = event.clientX - middlePanRef.current.lastX;
-            const dy = event.clientY - middlePanRef.current.lastY;
+            const canvas = fabricRef.current;
+            const viewportPoint = canvas
+                ? canvas.getViewportPoint(event as unknown as fabric.TPointerEvent)
+                : { x: event.clientX, y: event.clientY };
+            const dx = viewportPoint.x - middlePanRef.current.lastX;
+            const dy = viewportPoint.y - middlePanRef.current.lastY;
 
-            middlePanRef.current.lastX = event.clientX;
-            middlePanRef.current.lastY = event.clientY;
+            middlePanRef.current.lastX = viewportPoint.x;
+            middlePanRef.current.lastY = viewportPoint.y;
 
-            const nextPan = {
-                x: panOffsetRef.current.x - dx / zoomRef.current,
-                y: panOffsetRef.current.y - dy / zoomRef.current,
-            };
+            const nextPan = panFromViewportDelta(
+                panOffsetRef.current,
+                dx,
+                dy,
+                zoomRef.current
+            );
             panOffsetRef.current = nextPan;
-            setPanOffset(nextPan);
+            if (canvas) {
+                canvas.setViewportTransform(
+                    buildViewportTransform(zoomRef.current, nextPan)
+                );
+                canvas.requestRenderAll();
+            }
+            wheelPendingZoom.current = zoomRef.current / safePaperPerRealRatio;
+            wheelPendingPan.current = nextPan;
+            if (!wheelRafId.current) {
+                wheelRafId.current = requestAnimationFrame(() => {
+                    wheelRafId.current = null;
+                    setViewTransform(
+                        wheelPendingZoom.current,
+                        wheelPendingPan.current
+                    );
+                });
+            }
         },
-        [zoomRef, panOffsetRef, setPanOffset, stopMiddlePan]
+        [
+            fabricRef,
+            zoomRef,
+            panOffsetRef,
+            safePaperPerRealRatio,
+            wheelPendingZoom,
+            wheelPendingPan,
+            wheelRafId,
+            setViewTransform,
+            stopMiddlePan,
+        ]
     );
 
     const handleMiddleMouseUp = useCallback(

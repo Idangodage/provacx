@@ -74,6 +74,109 @@ export class DimensionRenderer {
     this.viewportZoom = Math.max(zoom, 0.0001);
   }
 
+  /**
+   * Lightweight in-place update of zoom-dependent visual properties on every
+   * existing dimension group.  Unlike renderAllDimensions() this does NOT
+   * destroy / recreate fabric objects — it only patches strokeWidth, fontSize,
+   * radius, and similar screen-pixel-sized properties so they stay visually
+   * consistent at the new zoom level.
+   *
+   * Call this after setViewportZoom() when only the zoom changed and the
+   * underlying dimension data hasn't been modified.
+   */
+  updateZoomVisuals(): void {
+    const prevZoom = (this as any)._lastZoomVisuals as number | undefined;
+    const zoom = this.viewportZoom;
+    if (prevZoom !== undefined && Math.abs(zoom - prevZoom) / Math.max(prevZoom, 0.01) < 0.005) {
+      return; // zoom didn't meaningfully change
+    }
+    (this as any)._lastZoomVisuals = zoom;
+
+    this.dimensionGroups.forEach((group, dimId) => {
+      const dimension = this.dimensionData.get(dimId);
+      if (!dimension) return;
+
+      const profile = getDimensionStyleProfile(this.settings, dimension.style);
+
+      group.getObjects().forEach((obj) => {
+        const typed = obj as NamedObject;
+        const name = typed.name ?? '';
+
+        // Extension lines
+        if (name === 'extensionA' || name === 'extensionB') {
+          obj.set('strokeWidth', this.sp(profile.extensionStrokeWidth));
+        }
+        // Dimension line
+        else if (name === 'dimensionLine' || name === 'angularArc') {
+          obj.set('strokeWidth', this.sp(profile.dimensionStrokeWidth));
+        }
+        // Selection / hover halos
+        else if (name === 'selectionHalo') {
+          obj.set('strokeWidth', this.sp(5));
+          if (obj instanceof fabric.Rect) {
+            obj.set({ strokeDashArray: [this.sp(6), this.sp(4)] });
+          }
+        }
+        else if (name === 'hoverHalo') {
+          obj.set('strokeWidth', this.sp(3.5));
+          if (obj instanceof fabric.Rect) {
+            obj.set({ strokeDashArray: [this.sp(5), this.sp(5)] });
+          }
+        }
+        // Angular legs
+        else if (name === 'angularLegA' || name === 'angularLegB') {
+          obj.set('strokeWidth', this.sp(profile.extensionStrokeWidth));
+        }
+        // Terminators (arrows / ticks)
+        else if (name === 'terminator') {
+          obj.set('strokeWidth', this.sp(0.7));
+        }
+        // Text label
+        else if (name === 'dimensionText') {
+          obj.set('fontSize', this.sp(profile.textSizePx));
+        }
+        // Text background
+        else if (name === 'dimensionTextBg') {
+          obj.set({
+            strokeWidth: this.sp(1.2),
+            rx: this.sp(2),
+            ry: this.sp(2),
+          });
+        }
+        // Text handle guide (dashed line to handle)
+        else if (name === 'dimension-text-handle-guide') {
+          obj.set({
+            strokeWidth: this.sp(1.4),
+            strokeDashArray: [this.sp(4), this.sp(3)],
+          });
+        }
+        // Text handle axis
+        else if (name === 'dimension-text-handle-axis') {
+          obj.set('strokeWidth', this.sp(1.2));
+        }
+        // Control handles (text-handle / offset-handle)
+        else if (typed.isDimensionControl) {
+          if (typed.controlType === 'dimension-text-handle') {
+            const size = this.sp(9);
+            obj.set({ width: size, height: size, strokeWidth: this.sp(2.2) });
+          } else if (typed.controlType === 'dimension-offset-handle') {
+            const size = this.sp(12);
+            obj.set({ width: size, height: size, strokeWidth: this.sp(2.2) });
+          } else if (obj instanceof fabric.Circle) {
+            obj.set({ radius: this.sp(6), strokeWidth: this.sp(2.2) });
+          }
+          obj.setCoords();
+        }
+
+        obj.set('dirty', true);
+      });
+
+      group.set('dirty', true);
+    });
+
+    this.canvas.requestRenderAll();
+  }
+
   setContext(walls: Wall[], rooms: Room[], settings: DimensionSettings): void {
     this.walls = walls;
     this.rooms = rooms;

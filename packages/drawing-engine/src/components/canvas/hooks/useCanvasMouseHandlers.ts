@@ -8,7 +8,7 @@
  * All logic is preserved verbatim — only moved into hook form.
  */
 
-import * as fabric from 'fabric';
+import type * as fabric from 'fabric';
 import { useCallback } from 'react';
 
 import type { ArchitecturalObjectDefinition } from '../../../data';
@@ -20,6 +20,13 @@ import type {
     WallSettings,
 } from '../../../types';
 import type { CanvasState, MarqueeSelectionState } from '../../DrawingCanvas.types';
+import type { DimensionRenderer } from '../dimension/DimensionRenderer';
+import type { ObjectRenderer } from '../object/ObjectRenderer';
+import type { RoomRenderer } from '../room/RoomRenderer';
+import type { WallRenderer } from '../wall/WallRenderer';
+import type { UseExtendToolResult } from './useExtendTool';
+import type { UseOffsetToolResult } from './useOffsetTool';
+import type { UseTrimToolResult } from './useTrimTool';
 import {
     MIN_ZOOM,
     MAX_ZOOM,
@@ -28,15 +35,12 @@ import {
 import { MM_TO_PX } from '../scale';
 import { snapPointToGrid } from '../snapping';
 import { isDrawingTool, renderDrawingPreview } from '../toolUtils';
+import {
+    buildViewportTransform,
+    panForZoomAtViewportPoint,
+    panFromViewportDelta,
+} from '../viewTransform';
 import { snapWallPoint } from '../wall/WallSnapping';
-import type { WallRenderer } from '../wall/WallRenderer';
-import type { RoomRenderer } from '../room/RoomRenderer';
-import type { DimensionRenderer } from '../dimension/DimensionRenderer';
-import type { ObjectRenderer } from '../object/ObjectRenderer';
-
-import type { UseOffsetToolResult } from './useOffsetTool';
-import type { UseTrimToolResult } from './useTrimTool';
-import type { UseExtendToolResult } from './useExtendTool';
 
 // =============================================================================
 // Types
@@ -132,7 +136,6 @@ export interface UseCanvasMouseHandlersOptions {
     ) => Record<string, unknown> | undefined;
     scheduleDimensionLayerRefresh: () => void;
     setViewTransform: (zoom: number, pan: Point2D) => void;
-    setPanOffset: (pan: Point2D) => void;
     setCanvasState: (state: CanvasState) => void;
     setPlacementValid: (valid: boolean) => void;
     setHoveredElement: (id: string | null) => void;
@@ -241,7 +244,6 @@ export function useCanvasMouseHandlers(
         buildOpeningPreviewProperties,
         scheduleDimensionLayerRefresh,
         setViewTransform,
-        setPanOffset,
         setCanvasState,
         setPlacementValid,
         setHoveredElement,
@@ -260,6 +262,42 @@ export function useCanvasMouseHandlers(
         trimTool,
         extendTool,
     } = options;
+
+    const scheduleViewTransformSync = useCallback(
+        (viewportZoomValue: number, panOffsetValue: Point2D) => {
+            wheelPendingZoom.current = viewportZoomValue / safePaperPerRealRatio;
+            wheelPendingPan.current = panOffsetValue;
+            if (wheelRafId.current) return;
+            wheelRafId.current = requestAnimationFrame(() => {
+                wheelRafId.current = null;
+                setViewTransform(
+                    wheelPendingZoom.current,
+                    wheelPendingPan.current
+                );
+            });
+        },
+        [
+            wheelPendingZoom,
+            wheelPendingPan,
+            wheelRafId,
+            safePaperPerRealRatio,
+            setViewTransform,
+        ]
+    );
+
+    const applyViewportTransformImmediate = useCallback(
+        (nextViewportZoom: number, nextPanOffset: Point2D) => {
+            const canvas = fabricRef.current;
+            if (!canvas) return;
+            canvas.setViewportTransform(
+                buildViewportTransform(nextViewportZoom, nextPanOffset)
+            );
+            canvas.requestRenderAll();
+            zoomRef.current = nextViewportZoom;
+            panOffsetRef.current = nextPanOffset;
+        },
+        [fabricRef, zoomRef, panOffsetRef]
+    );
 
     // ── handleMouseDown ─────────────────────────────────────────────────
     const handleMouseDown = useCallback(
@@ -463,9 +501,14 @@ export function useCanvasMouseHandlers(
             if (currentState.isPanning && currentState.lastPanPoint) {
                 const dx = viewportPoint.x - currentState.lastPanPoint.x;
                 const dy = viewportPoint.y - currentState.lastPanPoint.y;
-                const nextPan = { x: panOffsetRef.current.x - dx / zoomRef.current, y: panOffsetRef.current.y - dy / zoomRef.current };
-                panOffsetRef.current = nextPan;
-                setPanOffset(nextPan);
+                const nextPan = panFromViewportDelta(
+                    panOffsetRef.current,
+                    dx,
+                    dy,
+                    zoomRef.current
+                );
+                applyViewportTransformImmediate(zoomRef.current, nextPan);
+                scheduleViewTransformSync(zoomRef.current, nextPan);
                 const nextState: CanvasState = { ...currentState, lastPanPoint: { x: viewportPoint.x, y: viewportPoint.y } };
                 canvasStateRef.current = nextState;
                 setCanvasState(nextState);
@@ -721,7 +764,6 @@ export function useCanvasMouseHandlers(
             tool,
             resolvedSnapToGrid,
             effectiveSnapGridSize,
-            setPanOffset,
             queueMousePositionUpdate,
             middlePanRef,
             pendingPlacementDefinition,
@@ -754,6 +796,8 @@ export function useCanvasMouseHandlers(
             setHoveredElement,
             setMarqueeSelectionMode,
             updateOpeningPointerInteraction,
+            applyViewportTransformImmediate,
+            scheduleViewTransformSync,
         ]
     );
 
@@ -851,55 +895,38 @@ export function useCanvasMouseHandlers(
             if (Math.abs(newZoom - currentZoom) < 0.0001) return;
             const newVpZoom = newZoom * safePaperPerRealRatio;
 
-            // Compute cursor position in viewport-pixel space.
-            const canvasEl = canvas.upperCanvasEl ?? canvas.lowerCanvasEl;
-            const rect = canvasEl.getBoundingClientRect();
-            const vpX = e.e.clientX - rect.left;
-            const vpY = e.e.clientY - rect.top;
+            // Use Fabric pointer conversion so zoom anchor is correct on
+            // retina scaling and any canvas offset/layout shifts.
+            const viewportPoint = canvas.getViewportPoint(e.e);
+            const vpX = viewportPoint.x;
+            const vpY = viewportPoint.y;
 
             // Scene-space point under cursor (from refs, not canvas — avoids lag).
-            const curPan = panOffsetRef.current;
-            const sceneX = curPan.x + vpX / currentVpZoom;
-            const sceneY = curPan.y + vpY / currentVpZoom;
+            const nextPan = panForZoomAtViewportPoint(
+                panOffsetRef.current,
+                currentVpZoom,
+                newVpZoom,
+                { x: vpX, y: vpY }
+            );
 
-            // New pan so that scenePoint stays pinned under cursor.
-            const nextPan: Point2D = {
-                x: sceneX - vpX / newVpZoom,
-                y: sceneY - vpY / newVpZoom,
-            };
-
-            // Apply immediately to Fabric canvas for instant visual feedback.
-            const vt: fabric.TMat2D = [
-                newVpZoom, 0, 0, newVpZoom,
-                -nextPan.x * newVpZoom,
-                -nextPan.y * newVpZoom,
-            ];
-            canvas.setViewportTransform(vt);
+            // Apply immediately for low-latency feedback.
+            applyViewportTransformImmediate(newVpZoom, nextPan);
             roomRendererRef.current?.setViewportZoom(newVpZoom);
             wallRenderer?.setViewportZoom(newVpZoom);
             dimensionRendererRef.current?.setViewportZoom(newVpZoom);
-            canvas.requestRenderAll();
+            scheduleViewTransformSync(newVpZoom, nextPan);
 
-            // Update refs for next tick.
-            zoomRef.current = newVpZoom;
-            panOffsetRef.current = nextPan;
-
-            // Batch store update via rAF — coalesces multiple wheel events
-            // within the same frame into one React update, so overlays
-            // (PageLayout, Grid, Rulers) stay in sync every frame.
-            wheelPendingZoom.current = newZoom;
-            wheelPendingPan.current = nextPan;
-            if (!wheelRafId.current) {
-                wheelRafId.current = requestAnimationFrame(() => {
-                    wheelRafId.current = null;
-                    setViewTransform(
-                        wheelPendingZoom.current,
-                        wheelPendingPan.current
-                    );
-                });
-            }
         },
-        [safePaperPerRealRatio, setViewTransform, wallRenderer]
+        [
+            safePaperPerRealRatio,
+            wallRenderer,
+            panOffsetRef,
+            zoomRef,
+            roomRendererRef,
+            dimensionRendererRef,
+            applyViewportTransformImmediate,
+            scheduleViewTransformSync,
+        ]
     );
 
     return {

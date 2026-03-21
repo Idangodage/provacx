@@ -63,6 +63,7 @@ export interface UseRendererSyncOptions {
     symbolsRef: React.MutableRefObject<SymbolInstance2D[]>;
     dimensionRefreshFrameRef: React.MutableRefObject<number | null>;
     autoDimensionSyncFrameRef: React.MutableRefObject<number | null>;
+    wheelRafId: React.MutableRefObject<number | null>;
     zoomRef: React.MutableRefObject<number>;
     panOffsetRef: React.MutableRefObject<Point2D>;
     mousePositionRef: React.MutableRefObject<Point2D>;
@@ -193,6 +194,7 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
         symbolsRef,
         dimensionRefreshFrameRef,
         autoDimensionSyncFrameRef,
+        wheelRafId,
         zoomRef,
         panOffsetRef,
         mousePositionRef,
@@ -266,9 +268,26 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
     const refreshDimensionLayerRef = useRef<(() => void) | null>(null);
 
     // ── Sync view transform ──────────────────────────────────────────────
+    // HOT PATH — runs on every zoom tick and every pan frame.
+    // Only the O(1) viewport-transform update + a single requestRenderAll
+    // happen here.  All per-object visual updates (wall stroke widths, room
+    // label scales, dimension font sizes) are deferred to the settle timer
+    // so that complex drawings don't stutter during active zoom / pan.
     useEffect(() => {
         const canvas = fabricRef.current;
         if (!canvas) return;
+        // During active drag/wheel interactions we optimistically apply view
+        // transforms directly to Fabric. If a store commit for an older frame
+        // lands while a newer frame is already queued, skip this stale sync
+        // so we don't briefly jump backward.
+        if (wheelRafId.current !== null) {
+            const panMismatchX = Math.abs(panOffsetRef.current.x - panOffset.x);
+            const panMismatchY = Math.abs(panOffsetRef.current.y - panOffset.y);
+            const zoomMismatch = Math.abs(zoomRef.current - viewportZoom);
+            if (panMismatchX > 0.0001 || panMismatchY > 0.0001 || zoomMismatch > 0.0001) {
+                return;
+            }
+        }
         const viewportTransform: fabric.TMat2D = [
             viewportZoom,
             0,
@@ -278,25 +297,31 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
             -panOffset.y * viewportZoom,
         ];
         canvas.setViewportTransform(viewportTransform);
-        roomRendererRef.current?.setViewportZoom(viewportZoom);
-        wallRenderer?.setViewportZoom(viewportZoom);
-        dimensionRendererRef.current?.setViewportZoom(viewportZoom);
         hideActiveSelectionChrome(canvas);
         canvas.requestRenderAll();
         zoomRef.current = viewportZoom;
         panOffsetRef.current = panOffset;
 
-        // Schedule a deferred dimension refresh so label sizes adjust to the
-        // final zoom level once the user stops scrolling.  The 150 ms delay
-        // ensures we don't trigger expensive full rebuilds on every wheel tick.
+        // Schedule a deferred visual-property update for ALL renderers.
+        // Wall stroke widths, room label scales, and dimension font sizes
+        // only need to match the final zoom level — not every intermediate
+        // tick — so we batch them into a single update after 150 ms of
+        // inactivity.  This keeps the hot path O(1).
         if (zoomSettleTimerRef.current !== null) {
             clearTimeout(zoomSettleTimerRef.current);
         }
         zoomSettleTimerRef.current = setTimeout(() => {
             zoomSettleTimerRef.current = null;
-            refreshDimensionLayerRef.current?.();
+            const currentZoom = zoomRef.current;
+            wallRenderer?.setViewportZoom(currentZoom);
+            roomRendererRef.current?.setViewportZoom(currentZoom);
+            const dimRenderer = dimensionRendererRef.current;
+            if (dimRenderer) {
+                dimRenderer.setViewportZoom(currentZoom);
+                dimRenderer.updateZoomVisuals();
+            }
         }, 150);
-    }, [viewportZoom, panOffset, wallRenderer, fabricRef, roomRendererRef, dimensionRendererRef, zoomRef, panOffsetRef]);
+    }, [viewportZoom, panOffset, wallRenderer, fabricRef, roomRendererRef, dimensionRendererRef, wheelRafId, zoomRef, panOffsetRef]);
 
     useEffect(() => {
         if (tool === 'select') {

@@ -106,7 +106,7 @@ export function DrawingCanvas({
     const hvacRendererRef = useRef<HvacPlanRenderer | null>(null);
     const zoomRef = useRef(1);
     const panOffsetRef = useRef<Point2D>({ x: 0, y: 0 });
-    // Smooth-zoom: rAF-batched store sync (one React update per frame)
+    // Smooth view transform sync: one store update per frame for zoom/pan.
     const wheelRafId = useRef<number | null>(null);
     const wheelPendingZoom = useRef<number>(1);
     const wheelPendingPan = useRef<Point2D>({ x: 0, y: 0 });
@@ -575,9 +575,14 @@ export function DrawingCanvas({
         handleMiddleMouseUp,
         preventMiddleAuxClick,
     } = useMiddlePan({
+        fabricRef,
         zoomRef,
         panOffsetRef,
-        setPanOffset,
+        safePaperPerRealRatio,
+        setViewTransform,
+        wheelPendingZoom,
+        wheelPendingPan,
+        wheelRafId,
         setCanvasState,
         canvasStateRef,
     });
@@ -1080,7 +1085,7 @@ export function DrawingCanvas({
     const { refreshDimensionLayer, scheduleDimensionLayerRefresh } = useRendererSync({
         fabricRef, roomRendererRef, dimensionRendererRef, objectRendererRef,
         sectionLineRendererRef, hvacRendererRef, wallsRef, symbolsRef,
-        dimensionRefreshFrameRef, autoDimensionSyncFrameRef, zoomRef, panOffsetRef,
+        dimensionRefreshFrameRef, autoDimensionSyncFrameRef, wheelRafId, zoomRef, panOffsetRef,
         mousePositionRef, placementCursorRef, openingResizeHandlesRef,
         openingPointerInteractionRef, canvasStateRef, marqueeSelectionRef,
         lastMarqueeSelectionRef, applyMarqueeFilterRef,
@@ -1127,7 +1132,7 @@ export function DrawingCanvas({
         findOpeningAtPoint, updateOpeningPointerInteraction,
         finishOpeningPointerInteraction, computePlacement,
         buildOpeningPreviewProperties, scheduleDimensionLayerRefresh,
-        setViewTransform, setPanOffset, setCanvasState, setPlacementValid,
+        setViewTransform, setCanvasState, setPlacementValid,
         setHoveredElement, setMarqueeSelectionMode, addSketch, getSelectionRect,
         getTargetMeta, resolveObjectIdFromTarget, resolveRoomIdFromTarget,
         resolveSectionLineIdFromTarget, startSectionLineDrawing,
