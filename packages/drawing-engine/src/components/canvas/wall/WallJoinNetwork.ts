@@ -448,24 +448,50 @@ function computeButtJoinVertices(
     x: -hostVector.y / hostLength,
     y: hostVector.x / hostLength,
   };
-  const useInteriorFace =
-    approachDir.x * hostNormal.x + approachDir.y * hostNormal.y < 0;
-  const hostFace = useInteriorFace ? hostWall.interiorLine : hostWall.exteriorLine;
+
+  // For a T-junction, the incoming wall's interior and exterior edges should
+  // each extend to the host wall face they naturally intersect, so that the
+  // incoming wall cuts through the full width of the host wall.  Previously
+  // both edges were projected to the same face, leaving a visible seam on
+  // one side.
+  //
+  // Determine which host face each edge of the incoming wall is closer to
+  // by checking which side of the host each offset line falls on.
+  const wallInteriorAnchor =
+    endpointRef.endpoint === 'start'
+      ? endpointRef.wall.interiorLine.start
+      : endpointRef.wall.interiorLine.end;
+  const wallExteriorAnchor =
+    endpointRef.endpoint === 'start'
+      ? endpointRef.wall.exteriorLine.start
+      : endpointRef.wall.exteriorLine.end;
+
+  const interiorSide =
+    (wallInteriorAnchor.x - hostWall.startPoint.x) * hostNormal.x +
+    (wallInteriorAnchor.y - hostWall.startPoint.y) * hostNormal.y;
+  const exteriorSide =
+    (wallExteriorAnchor.x - hostWall.startPoint.x) * hostNormal.x +
+    (wallExteriorAnchor.y - hostWall.startPoint.y) * hostNormal.y;
+
+  // Pick the host face that is on the same side as the incoming edge.
+  // Interior face is on the +normal side, exterior face on the –normal side.
+  const interiorHostFace = interiorSide >= 0 ? hostWall.interiorLine : hostWall.exteriorLine;
+  const exteriorHostFace = exteriorSide >= 0 ? hostWall.interiorLine : hostWall.exteriorLine;
 
   return {
     interiorVertex:
       lineIntersection(
         endpointRef.wall.interiorLine.start,
         endpointRef.wall.interiorLine.end,
-        hostFace.start,
-        hostFace.end
+        interiorHostFace.start,
+        interiorHostFace.end
       ) ?? interiorFallback,
     exteriorVertex:
       lineIntersection(
         endpointRef.wall.exteriorLine.start,
         endpointRef.wall.exteriorLine.end,
-        hostFace.start,
-        hostFace.end
+        exteriorHostFace.start,
+        exteriorHostFace.end
       ) ?? exteriorFallback,
   };
 }
