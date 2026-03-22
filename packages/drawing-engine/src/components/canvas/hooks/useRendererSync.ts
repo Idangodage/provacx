@@ -47,6 +47,8 @@ import type { SectionLineRenderer } from '../elevation/SectionLineRenderer';
 import type { HvacPlanRenderer } from '../hvac/HvacPlanRenderer';
 import { startDragPerfTimer, endDragPerfTimer } from '../perf/dragPerf';
 
+const DRAG_AUTO_DIMENSION_MIN_INTERVAL_MS = 120;
+
 // =============================================================================
 // Types
 // =============================================================================
@@ -266,6 +268,7 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
     // Stable ref to the latest refreshDimensionLayer so the settle timer
     // can call it without a declaration-order dependency.
     const refreshDimensionLayerRef = useRef<(() => void) | null>(null);
+    const lastDragAutoDimensionSyncAtRef = useRef(0);
 
     // ── Sync view transform ──────────────────────────────────────────────
     // HOT PATH — runs on every zoom tick and every pan frame.
@@ -449,9 +452,18 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
         if (wallDrawingState.isDrawing) return;
         if (walls.length === 0 && rooms.length === 0) return;
         if (isHandleDragging) {
+            const now =
+                typeof performance !== 'undefined' && typeof performance.now === 'function'
+                    ? performance.now()
+                    : Date.now();
+            if (now - lastDragAutoDimensionSyncAtRef.current < DRAG_AUTO_DIMENSION_MIN_INTERVAL_MS) {
+                return;
+            }
+            lastDragAutoDimensionSyncAtRef.current = now;
             scheduleAutoDimensionSync();
             return;
         }
+        lastDragAutoDimensionSyncAtRef.current = 0;
         syncAutoDimensions();
     }, [
         walls,
@@ -476,15 +488,13 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
     }, [refreshDimensionLayer, dimensionRefreshFrameRef]);
 
     useEffect(() => {
-        roomRendererRef.current?.setWallContext(walls);
-        roomRendererRef.current?.renderAllRooms(rooms);
-        // Rebuild dimensions after room re-renders, then restore edit-handle priority.
         if (isHandleDragging) {
-            scheduleDimensionLayerRefresh();
             return;
         }
+        roomRendererRef.current?.setWallContext(walls);
+        roomRendererRef.current?.renderAllRooms(rooms);
         refreshDimensionLayer();
-    }, [rooms, walls, fabricCanvas, refreshDimensionLayer, isHandleDragging, scheduleDimensionLayerRefresh, roomRendererRef]);
+    }, [rooms, walls, fabricCanvas, refreshDimensionLayer, isHandleDragging, roomRendererRef]);
 
     useEffect(() => {
         return () => {
@@ -515,12 +525,9 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
     }, [wallSettings.showRoomTemperatureIcons, wallSettings.showRoomVentilationBadges, fabricCanvas, roomRendererRef]);
 
     useEffect(() => {
-        if (isHandleDragging) {
-            scheduleDimensionLayerRefresh();
-            return;
-        }
+        if (isHandleDragging) return;
         refreshDimensionLayer();
-    }, [refreshDimensionLayer, scheduleDimensionLayerRefresh, fabricCanvas, isHandleDragging]);
+    }, [refreshDimensionLayer, fabricCanvas, isHandleDragging]);
 
     useEffect(() => {
         const roomIdSet = new Set(rooms.map((room) => room.id));
@@ -599,7 +606,6 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
             if (fabricRef.current) {
                 restackInteractiveOverlays(fabricRef.current);
             }
-            scheduleDimensionLayerRefresh();
             return;
         }
         // Keep wall visuals identical while dragging and idle.
@@ -612,7 +618,6 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
         doorWindowSymbolsSignature,
         objectDefinitionsById,
         refreshDimensionLayer,
-        scheduleDimensionLayerRefresh,
         restackInteractiveOverlays,
         isHandleDragging,
         symbolsRef,

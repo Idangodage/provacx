@@ -71,6 +71,7 @@ interface WallUpdateOptions {
   skipHistory?: boolean;
   source?: 'ui' | 'drag';
   skipRoomDetection?: boolean;
+  skipElevationRegeneration?: boolean;
 }
 
 interface RoomMoveOptions {
@@ -107,6 +108,7 @@ export interface UseSelectModeOptions {
   moveRoom: (id: string, delta: Point2D, options?: RoomMoveOptions) => void;
   connectWalls: (wallId: string, otherWallId: string) => void;
   detectRooms: (options?: { debounce?: boolean }) => void;
+  regenerateElevations: (options?: { debounce?: boolean }) => void;
   saveToHistory: (action: string) => void;
   setProcessingStatus: (status: string, isProcessing: boolean) => void;
   onDragStateChange?: (isDragging: boolean) => void;
@@ -609,6 +611,7 @@ export function useSelectMode({
   moveRoom,
   connectWalls,
   detectRooms,
+  regenerateElevations,
   saveToHistory,
   setProcessingStatus,
   onDragStateChange,
@@ -650,6 +653,7 @@ export function useSelectMode({
     moveRoom,
     connectWalls,
     detectRooms,
+    regenerateElevations,
     saveToHistory,
     setProcessingStatus,
     onDragStateChange,
@@ -681,6 +685,7 @@ export function useSelectMode({
       moveRoom,
       connectWalls,
       detectRooms,
+      regenerateElevations,
       saveToHistory,
       setProcessingStatus,
       onDragStateChange,
@@ -702,6 +707,7 @@ export function useSelectMode({
     moveRoom,
     connectWalls,
     detectRooms,
+    regenerateElevations,
     saveToHistory,
     setProcessingStatus,
     onDragStateChange,
@@ -1128,10 +1134,17 @@ export function useSelectMode({
   }, []);
 
   const withDragPerfOptions = useCallback((options?: WallUpdateOptions): WallUpdateOptions | undefined => {
-    // Keep room detection enabled during drag so room-area relationships
-    // (and linked area dimensions) update in real time.
-    // The store already frame-throttles drag-time detection.
-    return options;
+    if (!options || options.source !== 'drag') {
+      return options;
+    }
+
+    // Drag interactions should keep geometry updates light and defer expensive
+    // derived recomputations to drag-finalization for smoother control.
+    return {
+      ...options,
+      skipRoomDetection: options.skipRoomDetection ?? true,
+      skipElevationRegeneration: options.skipElevationRegeneration ?? true,
+    };
   }, []);
 
   const getWallUpdateThreshold = useCallback((options?: WallUpdateOptions): number => {
@@ -1876,6 +1889,8 @@ export function useSelectMode({
             optionsRef.current.updateWall(id, updates, {
               skipHistory: true,
               source: 'drag',
+              skipRoomDetection: true,
+              skipElevationRegeneration: true,
             }),
         }),
       };
@@ -2895,6 +2910,7 @@ export function useSelectMode({
                       ? 'Move room'
                       : 'Edit wall endpoint';
       optionsRef.current.detectRooms();
+      optionsRef.current.regenerateElevations();
       optionsRef.current.saveToHistory(action);
     }
 

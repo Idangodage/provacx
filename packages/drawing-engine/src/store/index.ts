@@ -1596,17 +1596,32 @@ export interface DrawingState {
   updateWall: (
     id: string,
     updates: Partial<Wall>,
-    options?: { skipHistory?: boolean; source?: 'ui' | 'drag'; skipRoomDetection?: boolean }
+    options?: {
+      skipHistory?: boolean;
+      source?: 'ui' | 'drag';
+      skipRoomDetection?: boolean;
+      skipElevationRegeneration?: boolean;
+    }
   ) => void;
   updateWalls: (
     updates: Array<{ id: string; updates: Partial<Wall> }>,
-    options?: { skipHistory?: boolean; source?: 'ui' | 'drag'; skipRoomDetection?: boolean }
+    options?: {
+      skipHistory?: boolean;
+      source?: 'ui' | 'drag';
+      skipRoomDetection?: boolean;
+      skipElevationRegeneration?: boolean;
+    }
   ) => void;
   updateWallBevel: (
     wallId: string,
     end: CornerEnd,
     bevel: Partial<BevelControl>,
-    options?: { skipHistory?: boolean; source?: 'ui' | 'drag'; skipRoomDetection?: boolean }
+    options?: {
+      skipHistory?: boolean;
+      source?: 'ui' | 'drag';
+      skipRoomDetection?: boolean;
+      skipElevationRegeneration?: boolean;
+    }
   ) => void;
   resetWallBevel: (wallId: string, end: CornerEnd) => void;
   getCornerBevelDots: (
@@ -2507,7 +2522,7 @@ export const useDrawingStore = create<DrawingState>()(
         if (geometryChanged && !options?.skipRoomDetection) {
           get().detectRooms({ debounce: options?.source === 'drag' });
         }
-        if (elevationChanged) {
+        if (elevationChanged && !options?.skipElevationRegeneration) {
           get().regenerateElevations({ debounce: options?.source === 'drag' });
         }
       },
@@ -2605,7 +2620,7 @@ export const useDrawingStore = create<DrawingState>()(
         if (geometryChanged && !options?.skipRoomDetection) {
           get().detectRooms({ debounce: options?.source === 'drag' });
         }
-        if (elevationChanged) {
+        if (elevationChanged && !options?.skipElevationRegeneration) {
           get().regenerateElevations({ debounce: options?.source === 'drag' });
         }
       },
@@ -2946,13 +2961,16 @@ export const useDrawingStore = create<DrawingState>()(
           get().updateWalls(updates, {
             skipHistory: true,
             source: 'drag',
-            // Keep room geometry and area labels live while dragging a room.
-            skipRoomDetection: false,
+            // Defer expensive room recomputation to drag finalization.
+            skipRoomDetection: options?.skipHistory ?? false,
+            // Defer elevation regeneration to drag finalization.
+            skipElevationRegeneration: options?.skipHistory ?? false,
           });
         }
 
         if (!options?.skipHistory) {
           get().detectRooms();
+          get().regenerateElevations();
           get().saveToHistory('Move room');
         }
       },
