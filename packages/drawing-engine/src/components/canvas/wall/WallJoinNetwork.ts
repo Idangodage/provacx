@@ -650,9 +650,116 @@ function mergeJoin(joinsMap: Map<string, JoinData[]>, join: JoinData): void {
   joinsMap.set(join.wallId, filtered);
 }
 
+/**
+ * Detect walls that share the same centerline (within tolerance) and return
+ * a set of wall IDs that should be excluded from join computation.
+ * When two rooms from the room tool share an edge, both create a wall at
+ * that position.  Keeping both walls causes degenerate 0° sectors in
+ * endpoint nodes and confuses T-junction host selection.
+ *
+ * For each group of coincident walls we keep the one with the most
+ * connections (or the first one if tied) and shadow the rest.
+ */
+function findCoincidentShadowedWalls(walls: Wall[]): Set<string> {
+  const shadowed = new Set<string>();
+  const checked = new Set<string>();
+
+  for (let i = 0; i < walls.length; i++) {
+    if (shadowed.has(walls[i].id) || checked.has(walls[i].id)) continue;
+
+    const group: Wall[] = [walls[i]];
+    checked.add(walls[i].id);
+
+    for (let j = i + 1; j < walls.length; j++) {
+      if (shadowed.has(walls[j].id) || checked.has(walls[j].id)) continue;
+
+      if (areCenterlinesCoincident(walls[i], walls[j])) {
+        group.push(walls[j]);
+        checked.add(walls[j].id);
+      }
+    }
+
+    if (group.length < 2) continue;
+
+    // Keep the wall with the most connections (or first if tied)
+    group.sort((a, b) => {
+      const connDiff = b.connectedWalls.length - a.connectedWalls.length;
+      if (connDiff !== 0) return connDiff;
+      // Prefer thicker walls
+      return b.thickness - a.thickness;
+    });
+
+    for (let k = 1; k < group.length; k++) {
+      shadowed.add(group[k].id);
+    }
+  }
+
+  return shadowed;
+}
+
+/**
+ * Check whether two walls occupy the same centerline segment (within tolerance).
+ * Handles both same-direction and reverse-direction overlaps.
+ */
+function areCenterlinesCoincident(a: Wall, b: Wall): boolean {
+  const tolerance = NODE_TOLERANCE_MM;
+
+  const sameDir =
+    pointDistance(a.startPoint, b.startPoint) <= tolerance &&
+    pointDistance(a.endPoint, b.endPoint) <= tolerance;
+  const reverseDir =
+    pointDistance(a.startPoint, b.endPoint) <= tolerance &&
+    pointDistance(a.endPoint, b.startPoint) <= tolerance;
+
+  if (sameDir || reverseDir) return true;
+
+  // Also check for overlapping collinear segments.  Two walls are
+  // collinear-coincident if they lie on the same line AND substantially
+  // overlap (not merely share a single endpoint).
+  const dirA = { x: a.endPoint.x - a.startPoint.x, y: a.endPoint.y - a.startPoint.y };
+  const dirB = { x: b.endPoint.x - b.startPoint.x, y: b.endPoint.y - b.startPoint.y };
+  const lenA = Math.hypot(dirA.x, dirA.y);
+  const lenB = Math.hypot(dirB.x, dirB.y);
+  if (lenA < 0.001 || lenB < 0.001) return false;
+
+  const crossVal = Math.abs(dirA.x * dirB.y - dirA.y * dirB.x) / (lenA * lenB);
+  if (crossVal > 0.02) return false; // Not parallel
+
+  // Check perpendicular distance between centerlines
+  const perpA = { x: -dirA.y / lenA, y: dirA.x / lenA };
+  const perpDist = Math.abs(
+    (b.startPoint.x - a.startPoint.x) * perpA.x +
+    (b.startPoint.y - a.startPoint.y) * perpA.y
+  );
+  if (perpDist > tolerance) return false;
+
+  // Require substantial overlap: BOTH endpoints of the shorter wall must
+  // project onto the longer wall's segment (within tolerance).  This
+  // prevents collinear walls that merely share a single endpoint (like
+  // Room 1's right wall and Room 2's right wall) from being treated as
+  // coincident.
+  const projB0 = projectPointToSegment(b.startPoint, a.startPoint, a.endPoint);
+  const projB1 = projectPointToSegment(b.endPoint, a.startPoint, a.endPoint);
+  const bFullyOnA = projB0.distance <= tolerance && projB1.distance <= tolerance;
+
+  const projA0 = projectPointToSegment(a.startPoint, b.startPoint, b.endPoint);
+  const projA1 = projectPointToSegment(a.endPoint, b.startPoint, b.endPoint);
+  const aFullyOnB = projA0.distance <= tolerance && projA1.distance <= tolerance;
+
+  // At least one wall must be fully contained within the other
+  return bFullyOnA || aFullyOnB;
+}
+
 export function computeWallJoinMap(walls: Wall[]): Map<string, JoinData[]> {
   const joinsMap = new Map<string, JoinData[]>();
-  const { nodes, nodeByEndpointKey } = buildEndpointNodes(walls);
+
+  // Deduplicate coincident walls (e.g. shared edges from adjacent rooms)
+  const shadowedIds = findCoincidentShadowedWalls(walls);
+  const effectiveWalls = shadowedIds.size > 0
+    ? walls.filter((w) => !shadowedIds.has(w.id))
+    : walls;
+
+  const { nodes, nodeByEndpointKey } = buildEndpointNodes(effectiveWalls);
 
   for (const node of nodes) {
     if (node.endpoints.length < 2) {
@@ -685,7 +792,7 @@ export function computeWallJoinMap(walls: Wall[]): Map<string, JoinData[]> {
       continue;
     }
 
-    const attachment = findSegmentAttachment(endpointRef, walls, nodeByEndpointKey);
+    const attachment = findSegmentAttachment(endpointRef, effectiveWalls, nodeByEndpointKey);
     if (!attachment) {
       continue;
     }
@@ -703,7 +810,49 @@ export function computeWallJoinMap(walls: Wall[]): Map<string, JoinData[]> {
     });
   }
 
+  // Propagate joins from representative walls to their shadowed duplicates.
+  // Shadowed walls share the same geometry, so they get the same join data
+  // (with wallId updated).
+  if (shadowedIds.size > 0) {
+    for (const wall of walls) {
+      if (!shadowedIds.has(wall.id)) continue;
+
+      // Find the representative (non-shadowed) wall with coincident centerline
+      const representative = effectiveWalls.find((ew) => areCenterlinesCoincident(ew, wall));
+      if (!representative) continue;
+
+      const repJoins = joinsMap.get(representative.id);
+      if (repJoins && repJoins.length > 0) {
+        const isReversed =
+          pointDistance(wall.startPoint, representative.endPoint) <
+          pointDistance(wall.startPoint, representative.startPoint);
+
+        const mappedJoins = repJoins.map((join) => ({
+          ...join,
+          wallId: wall.id,
+          endpoint: isReversed
+            ? (join.endpoint === 'start' ? 'end' : 'start') as Endpoint
+            : join.endpoint,
+        }));
+        joinsMap.set(wall.id, mappedJoins);
+      }
+    }
+  }
+
   return joinsMap;
+}
+
+/**
+ * Like computeWallJoinMap but also returns the set of shadowed (coincident
+ * duplicate) wall IDs so callers can exclude them from polygon rendering.
+ */
+export function computeWallJoinMapWithShadows(walls: Wall[]): {
+  joinsMap: Map<string, JoinData[]>;
+  shadowedWallIds: Set<string>;
+} {
+  const shadowedWallIds = findCoincidentShadowedWalls(walls);
+  const joinsMap = computeWallJoinMap(walls);
+  return { joinsMap, shadowedWallIds };
 }
 
 export function buildTemporaryWall(

@@ -3,7 +3,7 @@ import * as turf from '@turf/turf';
 import type { JoinData, Point2D, Wall } from '../../../types';
 
 import { computeWallBodyPolygon, computeWallPolygon } from './WallGeometry';
-import { computeWallJoinMap } from './WallJoinNetwork';
+import { computeWallJoinMap, computeWallJoinMapWithShadows } from './WallJoinNetwork';
 
 const COMPONENT_TOLERANCE_MM = 2;
 const COORDINATE_TOLERANCE_MM = 0.001;
@@ -234,6 +234,20 @@ function projectPointToSegment(
   };
 }
 
+/**
+ * Snap a coordinate to a fixed precision grid (0.01 mm) to prevent
+ * floating-point noise from creating micro-notches in turf.js unions.
+ * Miter vertices at a junction are computed from different line pairs
+ * that should intersect at the same point, but floating-point arithmetic
+ * can produce results that differ by a few ULPs.  Snapping eliminates
+ * these micro-differences.
+ */
+const COORDINATE_SNAP_PRECISION = 100; // 1/100 mm = 0.01 mm
+
+function snapCoordinate(value: number): number {
+  return Math.round(value * COORDINATE_SNAP_PRECISION) / COORDINATE_SNAP_PRECISION;
+}
+
 function normalizeRing(ring: Point2D[]): Point2D[] {
   const cleaned: Point2D[] = [];
 
@@ -241,9 +255,10 @@ function normalizeRing(ring: Point2D[]): Point2D[] {
     if (!isFinitePoint(point)) {
       continue;
     }
+    const snapped = { x: snapCoordinate(point.x), y: snapCoordinate(point.y) };
     const previous = cleaned[cleaned.length - 1];
-    if (!previous || pointDistance(previous, point) > COORDINATE_TOLERANCE_MM) {
-      cleaned.push({ x: point.x, y: point.y });
+    if (!previous || pointDistance(previous, snapped) > COORDINATE_TOLERANCE_MM) {
+      cleaned.push(snapped);
     }
   }
 
@@ -784,18 +799,39 @@ export function computeWallUnionRenderData(
   walls: Wall[],
   precomputedJoinsMap?: Map<string, JoinData[]>
 ): WallUnionRenderData {
-  const joinsMap = precomputedJoinsMap ?? computeWallJoinMap(walls);
+  // When no precomputed joins are provided, use the shadow-aware variant
+  // so that coincident duplicate walls (e.g. shared room edges) are excluded
+  // from the polygon union — preventing double-thickness artifacts.
+  let joinsMap: Map<string, JoinData[]>;
+  let shadowedWallIds: Set<string>;
+
+  if (precomputedJoinsMap) {
+    joinsMap = precomputedJoinsMap;
+    shadowedWallIds = new Set<string>();
+  } else {
+    const result = computeWallJoinMapWithShadows(walls);
+    joinsMap = result.joinsMap;
+    shadowedWallIds = result.shadowedWallIds;
+  }
+
   const wallsById = new Map(walls.map((wall) => [wall.id, wall]));
   const components = buildConnectedComponents(walls, joinsMap)
     .map((wallIds, index) => {
+      // Exclude shadowed walls from the polygon union — the representative
+      // wall already covers the same geometry.  Keep shadowed IDs in the
+      // component's wallIds list so hit-testing / selection still works.
       const componentWalls = wallIds
         .map((wallId) => wallsById.get(wallId))
         .filter((wall): wall is Wall => Boolean(wall));
 
+      const unionWalls = shadowedWallIds.size > 0
+        ? componentWalls.filter((w) => !shadowedWallIds.has(w.id))
+        : componentWalls;
+
       return {
         id: `wall-component-${index}`,
         wallIds,
-        ...unionWallComponent(componentWalls, joinsMap),
+        ...unionWallComponent(unionWalls, joinsMap),
       };
     })
     .filter((component) => component.polygons.length > 0 || component.junctionOverlays.length > 0);

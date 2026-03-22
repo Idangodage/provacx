@@ -416,32 +416,39 @@ function computeButtJoin(
   const approachLen = distance(epPt, oppPt);
   if (approachLen < 0.001) return null;
 
-  const approachDir = direction(oppPt, epPt);
   const hostVec = subtract(host.endPoint, host.startPoint);
   const hostNormal = normalize({ x: -hostVec.y, y: hostVec.x });
-  const dotProduct = dot(approachDir, hostNormal);
 
-  // Pick the host face. Use distance-based fallback in the dead zone.
-  let useInterior: boolean;
-  if (Math.abs(dotProduct) < 0.1) {
-    const wallMid = midpoint2(epPt, oppPt);
-    const intMid = midpoint2(host.interiorLine.start, host.interiorLine.end);
-    const extMid = midpoint2(host.exteriorLine.start, host.exteriorLine.end);
-    useInterior = distance(wallMid, intMid) < distance(wallMid, extMid);
-  } else {
-    useInterior = dotProduct < 0;
-  }
+  // For a T-junction, each edge of the incoming wall should independently
+  // project to the host face it naturally intersects, so the incoming wall
+  // cuts through the full width of the host wall.  Previously both edges
+  // were projected to the same face, leaving a visible seam on one side.
+  const wallInteriorAnchor = ep === 'start'
+    ? wall.interiorLine.start
+    : wall.interiorLine.end;
+  const wallExteriorAnchor = ep === 'start'
+    ? wall.exteriorLine.start
+    : wall.exteriorLine.end;
 
-  const hostFace = useInterior ? host.interiorLine : host.exteriorLine;
+  const interiorSide =
+    (wallInteriorAnchor.x - host.startPoint.x) * hostNormal.x +
+    (wallInteriorAnchor.y - host.startPoint.y) * hostNormal.y;
+  const exteriorSide =
+    (wallExteriorAnchor.x - host.startPoint.x) * hostNormal.x +
+    (wallExteriorAnchor.y - host.startPoint.y) * hostNormal.y;
+
+  // Pick the host face that is on the same side as each incoming edge.
+  const interiorHostFace = interiorSide >= 0 ? host.interiorLine : host.exteriorLine;
+  const exteriorHostFace = exteriorSide >= 0 ? host.interiorLine : host.exteriorLine;
 
   const intV = lineIntersection(
     wall.interiorLine.start, wall.interiorLine.end,
-    hostFace.start, hostFace.end,
+    interiorHostFace.start, interiorHostFace.end,
   ) ?? intFallback;
 
   const extV = lineIntersection(
     wall.exteriorLine.start, wall.exteriorLine.end,
-    hostFace.start, hostFace.end,
+    exteriorHostFace.start, exteriorHostFace.end,
   ) ?? extFallback;
 
   // Validate — if the computed vertices are too far, fall back
@@ -630,18 +637,105 @@ export function refreshPartialWallGeometry(
   return computeJoinMapForWalls(targetWallIds, allWalls);
 }
 
+/**
+ * Detect walls that share the same centerline (within tolerance) and return
+ * a set of wall IDs that should be excluded from join matching.
+ * When two rooms from the room tool share an edge, both create a wall at
+ * that position — keeping both causes degenerate geometry at junctions.
+ */
+function findCoincidentShadowedWalls(walls: Wall[]): Set<string> {
+  const shadowed = new Set<string>();
+  const checked = new Set<string>();
+  const tol = ENDPOINT_TOLERANCE;
+
+  for (let i = 0; i < walls.length; i++) {
+    if (shadowed.has(walls[i].id) || checked.has(walls[i].id)) continue;
+
+    const group: Wall[] = [walls[i]];
+    checked.add(walls[i].id);
+
+    for (let j = i + 1; j < walls.length; j++) {
+      if (shadowed.has(walls[j].id) || checked.has(walls[j].id)) continue;
+
+      if (areCenterlinesCoincident(walls[i], walls[j], tol)) {
+        group.push(walls[j]);
+        checked.add(walls[j].id);
+      }
+    }
+
+    if (group.length < 2) continue;
+
+    // Keep the wall with the most connections (or first if tied)
+    group.sort((a, b) => {
+      const connDiff = b.connectedWalls.length - a.connectedWalls.length;
+      if (connDiff !== 0) return connDiff;
+      return b.thickness - a.thickness;
+    });
+
+    for (let k = 1; k < group.length; k++) {
+      shadowed.add(group[k].id);
+    }
+  }
+
+  return shadowed;
+}
+
+function areCenterlinesCoincident(a: Wall, b: Wall, tol: number): boolean {
+  const sameDir =
+    distance(a.startPoint, b.startPoint) <= tol &&
+    distance(a.endPoint, b.endPoint) <= tol;
+  const reverseDir =
+    distance(a.startPoint, b.endPoint) <= tol &&
+    distance(a.endPoint, b.startPoint) <= tol;
+
+  if (sameDir || reverseDir) return true;
+
+  // Also check collinear overlapping segments
+  const dirA = subtract(a.endPoint, a.startPoint);
+  const dirB = subtract(b.endPoint, b.startPoint);
+  const lenA = Math.hypot(dirA.x, dirA.y);
+  const lenB = Math.hypot(dirB.x, dirB.y);
+  if (lenA < 0.001 || lenB < 0.001) return false;
+
+  const crossVal = Math.abs(cross(dirA, dirB)) / (lenA * lenB);
+  if (crossVal > 0.02) return false;
+
+  const perpA = perpendicular(normalize(dirA));
+  const perpDist = Math.abs(dot(subtract(b.startPoint, a.startPoint), perpA));
+  if (perpDist > tol) return false;
+
+  // Require substantial overlap: BOTH endpoints of the shorter wall must
+  // project onto the longer wall's segment.  Prevents collinear walls
+  // sharing only a single endpoint from being treated as coincident.
+  const projB0 = projectToSegment(b.startPoint, a.startPoint, a.endPoint);
+  const projB1 = projectToSegment(b.endPoint, a.startPoint, a.endPoint);
+  const bFullyOnA = projB0.distance <= tol && projB1.distance <= tol;
+
+  const projA0 = projectToSegment(a.startPoint, b.startPoint, b.endPoint);
+  const projA1 = projectToSegment(a.endPoint, b.startPoint, b.endPoint);
+  const aFullyOnB = projA0.distance <= tol && projA1.distance <= tol;
+
+  return bFullyOnA || aFullyOnB;
+}
+
 function computeJoinMapForWalls(
   targetWallIds: Set<string>,
   allWalls: Wall[],
 ): Map<string, JoinData[]> {
   const joinsMap = new Map<string, JoinData[]>();
 
-  for (const wall of allWalls) {
+  // Deduplicate coincident walls before join matching
+  const shadowedIds = findCoincidentShadowedWalls(allWalls);
+  const effectiveWalls = shadowedIds.size > 0
+    ? allWalls.filter((w) => !shadowedIds.has(w.id))
+    : allWalls;
+
+  for (const wall of effectiveWalls) {
     if (!targetWallIds.has(wall.id)) {
       continue;
     }
 
-    const matches = findJoinMatchesForWall(wall, allWalls);
+    const matches = findJoinMatchesForWall(wall, effectiveWalls);
 
     // Pick best match per endpoint (highest angle wins)
     const bestByEndpoint = new Map<'start' | 'end', JoinMatch>();
@@ -662,6 +756,36 @@ function computeJoinMapForWalls(
     }
 
     joinsMap.set(wall.id, joins);
+  }
+
+  // Propagate joins to shadowed walls
+  if (shadowedIds.size > 0) {
+    for (const wall of allWalls) {
+      if (!shadowedIds.has(wall.id) || !targetWallIds.has(wall.id)) continue;
+
+      const representative = effectiveWalls.find((ew) =>
+        areCenterlinesCoincident(ew, wall, ENDPOINT_TOLERANCE)
+      );
+      if (!representative) continue;
+
+      const repJoins = joinsMap.get(representative.id);
+      if (repJoins && repJoins.length > 0) {
+        const isReversed =
+          distance(wall.startPoint, representative.endPoint) <
+          distance(wall.startPoint, representative.startPoint);
+
+        joinsMap.set(
+          wall.id,
+          repJoins.map((join) => ({
+            ...join,
+            wallId: wall.id,
+            endpoint: isReversed
+              ? (join.endpoint === 'start' ? 'end' : 'start') as 'start' | 'end'
+              : join.endpoint,
+          }))
+        );
+      }
+    }
   }
 
   return joinsMap;
