@@ -383,6 +383,28 @@ function addGraphEdge(graph: Map<string, Set<string>>, a: string, b: string): vo
   graph.get(b)?.add(a);
 }
 
+/**
+ * Spatial grid for fast proximity lookups — replaces O(n²) all-pairs
+ * wallsTouch checks with O(n) insert + O(k) per-cell neighbor queries.
+ */
+const SPATIAL_GRID_CELL_SIZE_MM = 500; // ~50 cm cells, tuned for typical wall lengths
+
+function wallSpatialKeys(wall: Wall): string[] {
+  const keys = new Set<string>();
+  const points = [wall.startPoint, wall.endPoint];
+  for (const point of points) {
+    const cx = Math.floor(point.x / SPATIAL_GRID_CELL_SIZE_MM);
+    const cy = Math.floor(point.y / SPATIAL_GRID_CELL_SIZE_MM);
+    // Insert into cell and all 8 neighbors to handle walls near cell borders
+    for (let dx = -1; dx <= 1; dx += 1) {
+      for (let dy = -1; dy <= 1; dy += 1) {
+        keys.add(`${cx + dx},${cy + dy}`);
+      }
+    }
+  }
+  return Array.from(keys);
+}
+
 function buildComponentGraph(
   walls: Wall[],
   joinsMap: Map<string, JoinData[]>
@@ -430,13 +452,36 @@ function buildComponentGraph(
     }
   });
 
-  for (let index = 0; index < walls.length; index += 1) {
-    for (let otherIndex = index + 1; otherIndex < walls.length; otherIndex += 1) {
-      if (
-        shouldLinkWalls(walls[index], walls[otherIndex]) &&
-        wallsTouch(walls[index], walls[otherIndex])
-      ) {
-        addGraphEdge(graph, walls[index].id, walls[otherIndex].id);
+  // Spatial grid: only test wall pairs that share a grid cell — O(n·k)
+  // instead of O(n²) where k is the average number of neighbors per cell.
+  const spatialGrid = new Map<string, Wall[]>();
+  for (const wall of walls) {
+    for (const key of wallSpatialKeys(wall)) {
+      let cell = spatialGrid.get(key);
+      if (!cell) {
+        cell = [];
+        spatialGrid.set(key, cell);
+      }
+      cell.push(wall);
+    }
+  }
+
+  const testedPairs = new Set<string>();
+  for (const cell of spatialGrid.values()) {
+    for (let i = 0; i < cell.length; i += 1) {
+      for (let j = i + 1; j < cell.length; j += 1) {
+        const pairKey = cell[i].id < cell[j].id
+          ? `${cell[i].id}|${cell[j].id}`
+          : `${cell[j].id}|${cell[i].id}`;
+        if (testedPairs.has(pairKey)) continue;
+        testedPairs.add(pairKey);
+
+        if (
+          shouldLinkWalls(cell[i], cell[j]) &&
+          wallsTouch(cell[i], cell[j])
+        ) {
+          addGraphEdge(graph, cell[i].id, cell[j].id);
+        }
       }
     }
   }
@@ -840,6 +885,146 @@ export function computeWallUnionRenderData(
     joinsMap,
     components,
   };
+}
+
+// =============================================================================
+// Wall Union Cache — avoids recomputing turf.js unions from scratch every frame
+// =============================================================================
+
+/**
+ * Fingerprint a wall's geometry-relevant properties.
+ * If any of these change the union polygon for its component is stale.
+ */
+function wallGeometryFingerprint(wall: Wall): string {
+  return `${wall.startPoint.x},${wall.startPoint.y}|${wall.endPoint.x},${wall.endPoint.y}|${wall.thickness}|${wall.centerlineOffset ?? 0}|${wall.connectedWalls.join(',')}|${wall.startBevel?.outerOffset ?? 0},${wall.startBevel?.innerOffset ?? 0}|${wall.endBevel?.outerOffset ?? 0},${wall.endBevel?.innerOffset ?? 0}`;
+}
+
+interface CachedUnionData {
+  /** Fingerprints at time of last computation, keyed by wall id */
+  fingerprints: Map<string, string>;
+  /** The full render data result */
+  renderData: WallUnionRenderData;
+  /** Wall IDs that were in each component, indexed by component id */
+  componentWallIds: Map<string, string[]>;
+}
+
+let unionCache: CachedUnionData | null = null;
+
+/**
+ * Invalidate the union cache.  Call this when walls are added or removed,
+ * or when a full recomputation is explicitly needed.
+ */
+export function invalidateUnionCache(): void {
+  unionCache = null;
+}
+
+/**
+ * Compute wall union render data with caching.
+ *
+ * On the first call (or after invalidation) this does a full computation.
+ * On subsequent calls it checks wall fingerprints and only recomputes
+ * components that contain changed walls, reusing cached results for
+ * unchanged components.
+ */
+export function computeWallUnionRenderDataCached(
+  walls: Wall[],
+  precomputedJoinsMap?: Map<string, JoinData[]>
+): WallUnionRenderData {
+  // Build current fingerprints
+  const currentFingerprints = new Map<string, string>();
+  for (const wall of walls) {
+    currentFingerprints.set(wall.id, wallGeometryFingerprint(wall));
+  }
+
+  // Check if cache is usable: same set of wall IDs and no geometry changes
+  if (unionCache) {
+    const cached = unionCache;
+    const wallIdsMatch =
+      currentFingerprints.size === cached.fingerprints.size &&
+      [...currentFingerprints.keys()].every((id) => cached.fingerprints.has(id));
+
+    if (wallIdsMatch) {
+      // Find which walls changed
+      const changedWallIds = new Set<string>();
+      for (const [id, fp] of currentFingerprints) {
+        if (cached.fingerprints.get(id) !== fp) {
+          changedWallIds.add(id);
+        }
+      }
+
+      if (changedWallIds.size === 0) {
+        // Nothing changed — return cached result directly
+        return cached.renderData;
+      }
+
+      // Find which components are affected by the changed walls
+      const dirtyComponentIds = new Set<string>();
+      for (const component of cached.renderData.components) {
+        if (component.wallIds.some((id) => changedWallIds.has(id))) {
+          dirtyComponentIds.add(component.id);
+        }
+      }
+
+      // If fewer than half of components are dirty, do a partial recompute
+      if (dirtyComponentIds.size < cached.renderData.components.length / 2) {
+        // Recompute joins for the full set (needed for correct geometry)
+        let joinsMap: Map<string, JoinData[]>;
+        let shadowedWallIds: Set<string>;
+        if (precomputedJoinsMap) {
+          joinsMap = precomputedJoinsMap;
+          shadowedWallIds = new Set<string>();
+        } else {
+          const result = computeWallJoinMapWithShadows(walls);
+          joinsMap = result.joinsMap;
+          shadowedWallIds = result.shadowedWallIds;
+        }
+
+        const wallsById = new Map(walls.map((w) => [w.id, w]));
+
+        // Rebuild only dirty components; keep clean ones from cache
+        const freshComponents: WallUnionComponent[] = [];
+        for (const component of cached.renderData.components) {
+          if (!dirtyComponentIds.has(component.id)) {
+            freshComponents.push(component);
+            continue;
+          }
+          // Recompute this component
+          const componentWalls = component.wallIds
+            .map((id) => wallsById.get(id))
+            .filter((w): w is Wall => Boolean(w));
+          const unionWalls = shadowedWallIds.size > 0
+            ? componentWalls.filter((w) => !shadowedWallIds.has(w.id))
+            : componentWalls;
+          const rebuilt = unionWallComponent(unionWalls, joinsMap);
+          if (rebuilt.polygons.length > 0 || rebuilt.junctionOverlays.length > 0) {
+            freshComponents.push({
+              id: component.id,
+              wallIds: component.wallIds,
+              ...rebuilt,
+            });
+          }
+        }
+
+        const renderData: WallUnionRenderData = { joinsMap, components: freshComponents };
+        // Update cache
+        unionCache = {
+          fingerprints: currentFingerprints,
+          renderData,
+          componentWallIds: new Map(freshComponents.map((c) => [c.id, c.wallIds])),
+        };
+        return renderData;
+      }
+    }
+  }
+
+  // Full computation (cache miss, wall set changed, or too many dirty components)
+  const renderData = computeWallUnionRenderData(walls, precomputedJoinsMap);
+  unionCache = {
+    fingerprints: currentFingerprints,
+    renderData,
+    componentWallIds: new Map(renderData.components.map((c) => [c.id, c.wallIds])),
+  };
+  return renderData;
 }
 
 /**
