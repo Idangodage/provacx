@@ -272,10 +272,10 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
 
     // ── Sync view transform ──────────────────────────────────────────────
     // HOT PATH — runs on every zoom tick and every pan frame.
-    // The viewport-transform update is O(1).  Dimension zoom visuals are
-    // updated inline (with viewport culling so only visible dimensions
-    // are touched).  Wall stroke widths and room label scales are less
-    // noticeable during zoom and deferred to a 150 ms settle timer.
+    // Only the O(1) viewport-transform update + a single requestRenderAll
+    // happen here.  All per-object visual updates (wall stroke widths, room
+    // label scales, dimension font sizes) are deferred to the settle timer
+    // so that complex drawings don't stutter during active zoom / pan.
     useEffect(() => {
         const canvas = fabricRef.current;
         if (!canvas) return;
@@ -301,25 +301,15 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
         ];
         canvas.setViewportTransform(viewportTransform);
         hideActiveSelectionChrome(canvas);
-
-        // Update dimension zoom visuals in the hot path so text sizes and
-        // stroke widths stay correct during active zooming (no more 150ms
-        // delay).  The updateZoomVisuals method has an early-exit for < 0.5%
-        // zoom change and viewport-culls off-screen dimensions, so this is
-        // cheap per frame.
-        const dimRenderer = dimensionRendererRef.current;
-        if (dimRenderer) {
-            dimRenderer.setViewportZoom(viewportZoom);
-            dimRenderer.updateZoomVisuals();
-        }
-
         canvas.requestRenderAll();
         zoomRef.current = viewportZoom;
         panOffsetRef.current = panOffset;
 
-        // Schedule a deferred visual-property update for wall and room
-        // renderers whose zoom-dependent visuals (stroke widths, label
-        // scales) are less visually noticeable during active zoom/pan.
+        // Schedule a deferred visual-property update for ALL renderers.
+        // Wall stroke widths, room label scales, and dimension font sizes
+        // only need to match the final zoom level — not every intermediate
+        // tick — so we batch them into a single update after 150 ms of
+        // inactivity.  This keeps the hot path O(1).
         if (zoomSettleTimerRef.current !== null) {
             clearTimeout(zoomSettleTimerRef.current);
         }
@@ -328,6 +318,11 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
             const currentZoom = zoomRef.current;
             wallRenderer?.setViewportZoom(currentZoom);
             roomRendererRef.current?.setViewportZoom(currentZoom);
+            const dimRenderer = dimensionRendererRef.current;
+            if (dimRenderer) {
+                dimRenderer.setViewportZoom(currentZoom);
+                dimRenderer.updateZoomVisuals();
+            }
         }, 150);
     }, [viewportZoom, panOffset, wallRenderer, fabricRef, roomRendererRef, dimensionRendererRef, wheelRafId, zoomRef, panOffsetRef]);
 
@@ -403,7 +398,7 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
         }
         renderer.setViewportZoom(zoomRef.current);
         renderer.setContext(walls, rooms, dimensionSettings);
-        renderer.renderDimensionsIncremental(dimensions);
+        renderer.renderAllDimensions(dimensions);
         const dimensionIdSet = new Set(dimensions.map((dimension) => dimension.id));
         const selectedDimensionIds = selectedIds.filter((id) => dimensionIdSet.has(id));
         const hoveredDimensionId =
@@ -606,19 +601,17 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
             return definition?.category === 'doors' || definition?.category === 'windows';
         });
         wallRenderer.setOpeningSymbolInstances(openingSymbols);
-        // Use incremental rendering for both drag and idle updates —
-        // renderWallsInteractive only re-renders walls whose geometry
-        // actually changed, and the union cache avoids recomputing
-        // unchanged merged components.  This replaces the previous
-        // renderAllWalls call that destroyed and recreated ALL Fabric
-        // objects on every state change.
-        wallRenderer.renderWallsInteractive(wallsRef.current);
-        if (fabricRef.current) {
-            restackInteractiveOverlays(fabricRef.current);
+        if (isHandleDragging) {
+            wallRenderer.renderWallsInteractive(wallsRef.current);
+            if (fabricRef.current) {
+                restackInteractiveOverlays(fabricRef.current);
+            }
+            return;
         }
-        if (!isHandleDragging) {
-            refreshDimensionLayer();
-        }
+        // Keep wall visuals identical while dragging and idle.
+        wallRenderer.renderAllWalls(wallsRef.current);
+        // Rebuild dimensions after wall re-renders, then restore edit-handle priority.
+        refreshDimensionLayer();
     }, [
         wallRenderer,
         walls,

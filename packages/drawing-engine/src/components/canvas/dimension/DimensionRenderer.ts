@@ -84,29 +84,6 @@ export class DimensionRenderer {
    * Call this after setViewportZoom() when only the zoom changed and the
    * underlying dimension data hasn't been modified.
    */
-  /**
-   * Check whether a Fabric group is inside (or near) the visible viewport.
-   * Uses screen-space bounding rect from Fabric, compared against the
-   * canvas element dimensions.  Generous margin avoids popping artifacts.
-   */
-  private isGroupInViewport(group: fabric.Group): boolean {
-    try {
-      const cw = this.canvas.getWidth();
-      const ch = this.canvas.getHeight();
-      // getBoundingRect() returns screen-pixel coordinates (post-transform)
-      const bound = group.getBoundingRect();
-      const margin = 200; // px — generous to avoid pop-in
-      return !(
-        bound.left + bound.width + margin < 0 ||
-        bound.left - margin > cw ||
-        bound.top + bound.height + margin < 0 ||
-        bound.top - margin > ch
-      );
-    } catch {
-      return true; // if bounding rect fails, assume visible
-    }
-  }
-
   updateZoomVisuals(): void {
     const prevZoom = (this as any)._lastZoomVisuals as number | undefined;
     const zoom = this.viewportZoom;
@@ -119,13 +96,7 @@ export class DimensionRenderer {
       const dimension = this.dimensionData.get(dimId);
       if (!dimension) return;
 
-      // Skip off-screen dimensions — they'll get updated when they
-      // scroll into view or on the next full render.
-      if (!this.isGroupInViewport(group)) return;
-
       const profile = getDimensionStyleProfile(this.settings, dimension.style);
-      const extSW = this.sp(profile.extensionStrokeWidth);
-      const dimSW = this.sp(profile.dimensionStrokeWidth);
 
       group.getObjects().forEach((obj) => {
         const typed = obj as NamedObject;
@@ -133,11 +104,11 @@ export class DimensionRenderer {
 
         // Extension lines
         if (name === 'extensionA' || name === 'extensionB') {
-          obj.set('strokeWidth', extSW);
+          obj.set('strokeWidth', this.sp(profile.extensionStrokeWidth));
         }
         // Dimension line
         else if (name === 'dimensionLine' || name === 'angularArc') {
-          obj.set('strokeWidth', dimSW);
+          obj.set('strokeWidth', this.sp(profile.dimensionStrokeWidth));
         }
         // Selection / hover halos
         else if (name === 'selectionHalo') {
@@ -154,7 +125,7 @@ export class DimensionRenderer {
         }
         // Angular legs
         else if (name === 'angularLegA' || name === 'angularLegB') {
-          obj.set('strokeWidth', extSW);
+          obj.set('strokeWidth', this.sp(profile.extensionStrokeWidth));
         }
         // Terminators (arrows / ticks)
         else if (name === 'terminator') {
@@ -788,70 +759,6 @@ export class DimensionRenderer {
     dimensions.forEach((dimension) => this.renderDimension(dimension));
     this.setSelectedDimensions([...this.selectedDimensionIds]);
     this.canvas.requestRenderAll();
-  }
-
-  /**
-   * Incremental dimension update: only re-renders dimensions whose data
-   * changed since the last render.  Dimensions that haven't changed keep
-   * their existing Fabric groups untouched.
-   */
-  renderDimensionsIncremental(dimensions: Dimension2D[]): void {
-    const nextIds = new Set(dimensions.map((d) => d.id));
-
-    // Remove dimensions that no longer exist
-    for (const [id, group] of this.dimensionGroups) {
-      if (!nextIds.has(id)) {
-        this.canvas.remove(group);
-        this.dimensionGroups.delete(id);
-        this.dimensionData.delete(id);
-      }
-    }
-
-    // Add or update changed dimensions
-    for (const dimension of dimensions) {
-      const prev = this.dimensionData.get(dimension.id);
-      if (prev && prev === dimension) {
-        // Same object reference — nothing changed
-        continue;
-      }
-      if (prev && this.dimensionUnchanged(prev, dimension)) {
-        continue;
-      }
-      this.renderDimension(dimension);
-    }
-
-    this.setSelectedDimensions([...this.selectedDimensionIds]);
-    this.canvas.requestRenderAll();
-  }
-
-  /**
-   * Quick structural equality check for dimension data.
-   * Returns true if all render-relevant properties match.
-   */
-  private dimensionUnchanged(a: Dimension2D, b: Dimension2D): boolean {
-    if (a.type !== b.type) return false;
-    if (a.value !== b.value) return false;
-    if (a.visible !== b.visible) return false;
-    if ((a.text ?? '') !== (b.text ?? '')) return false;
-    if (a.style !== b.style) return false;
-    if (a.offset !== b.offset) return false;
-    if (a.unit !== b.unit) return false;
-    if (a.precision !== b.precision) return false;
-    if (a.displayFormat !== b.displayFormat) return false;
-    if (a.linearMode !== b.linearMode) return false;
-    if (a.showPerimeter !== b.showPerimeter) return false;
-    if (
-      Math.abs(a.textPosition.x - b.textPosition.x) > 0.01 ||
-      Math.abs(a.textPosition.y - b.textPosition.y) > 0.01
-    ) return false;
-    if (a.points.length !== b.points.length) return false;
-    for (let i = 0; i < a.points.length; i++) {
-      if (
-        Math.abs(a.points[i].x - b.points[i].x) > 0.01 ||
-        Math.abs(a.points[i].y - b.points[i].y) > 0.01
-      ) return false;
-    }
-    return true;
   }
 
   setSelectedDimensions(dimensionIds: string[]): void {

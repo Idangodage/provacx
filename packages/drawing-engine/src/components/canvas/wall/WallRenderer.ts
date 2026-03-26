@@ -52,7 +52,7 @@ import {
   type WallSelectionPlan,
 } from './WallSelectionGeometry';
 import type { EnhancedSnapResult } from './WallSnapping';
-import { computeWallUnionRenderDataCached, invalidateUnionCache, type WallUnionComponent } from './WallUnionGeometry';
+import { computeWallUnionRenderData, type WallUnionComponent } from './WallUnionGeometry';
 import {
   refreshAllWalls, // [PATCH APPLIED]
   refreshAfterPointMove, // [PATCH APPLIED]
@@ -518,9 +518,7 @@ export class WallRenderer {
       return;
     }
 
-    // Drag ended: invalidate union cache so the full rebuild recomputes
-    // fresh geometry (component membership may have changed during drag).
-    invalidateUnionCache();
+    // Drag ended: rebuild full merged/textured wall rendering.
     const allWalls = Array.from(this.wallData.values());
     if (allWalls.length > 0) {
       this.renderAllWalls(allWalls);
@@ -717,7 +715,7 @@ export class WallRenderer {
   private rebuildMergedComponents(walls: Wall[]): Map<string, Wall[]> {
     this.clearMergedComponents();
 
-    const renderData = computeWallUnionRenderDataCached(walls);
+    const renderData = computeWallUnionRenderData(walls);
     const wallsById = new Map(walls.map((wall) => [wall.id, wall]));
     const componentWallsByWallId = new Map<string, Wall[]>();
 
@@ -1983,8 +1981,6 @@ export class WallRenderer {
 
       // [PATCH APPLIED] Use pre-computed joins if available, otherwise compute fresh
       const joinsMap = precomputedJoinsMap ?? refreshAllWalls(walls); // [PATCH APPLIED]
-      // Use cached union geometry — the cache internally checks fingerprints
-      // and only recomputes components whose walls actually changed.
       const componentWallsByWallId = this.rebuildMergedComponents(walls);
 
       for (const wall of walls) {
