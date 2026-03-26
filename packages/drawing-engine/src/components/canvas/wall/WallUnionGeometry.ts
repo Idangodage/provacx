@@ -8,7 +8,7 @@ import { computeWallJoinMap, computeWallJoinMapWithShadows } from './WallJoinNet
 const COMPONENT_TOLERANCE_MM = 2;
 const COORDINATE_TOLERANCE_MM = 0.001;
 const MIN_PATCH_AREA_MM2 = 0.1;
-const MIN_UNION_ENDPOINT_ANGLE_DEG = 15;
+const MIN_UNION_ENDPOINT_ANGLE_DEG = 1;
 const SEGMENT_INTERIOR_TOLERANCE = 0.001;
 
 type Endpoint = 'start' | 'end';
@@ -234,6 +234,36 @@ function projectPointToSegment(
   };
 }
 
+function segmentIntersectionPoint(
+  aStart: Point2D,
+  aEnd: Point2D,
+  bStart: Point2D,
+  bEnd: Point2D
+): { point: Point2D; t: number; u: number } | null {
+  const r = subtract(aEnd, aStart);
+  const s = subtract(bEnd, bStart);
+  const denominator = r.x * s.y - r.y * s.x;
+
+  if (Math.abs(denominator) <= COORDINATE_TOLERANCE_MM) {
+    return null;
+  }
+
+  const qp = subtract(bStart, aStart);
+  const t = (qp.x * s.y - qp.y * s.x) / denominator;
+  const u = (qp.x * r.y - qp.y * r.x) / denominator;
+  const epsilon = 0.001;
+
+  if (t < -epsilon || t > 1 + epsilon || u < -epsilon || u > 1 + epsilon) {
+    return null;
+  }
+
+  return {
+    point: add(aStart, scale(r, t)),
+    t,
+    u,
+  };
+}
+
 /**
  * Snap a coordinate to a fixed precision grid (0.01 mm) to prevent
  * floating-point noise from creating micro-notches in turf.js unions.
@@ -362,6 +392,20 @@ function wallsTouch(wall: Wall, otherWall: Wall): boolean {
     ) {
       return true;
     }
+  }
+
+  // Pure X-crossings do not place either wall endpoint on the other segment,
+  // so detect the centerline intersection explicitly and merge them into the
+  // same union component to avoid double-painted overlap fills.
+  if (
+    segmentIntersectionPoint(
+      wall.startPoint,
+      wall.endPoint,
+      otherWall.startPoint,
+      otherWall.endPoint
+    )
+  ) {
+    return true;
   }
 
   return false;
