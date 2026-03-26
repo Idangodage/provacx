@@ -26,6 +26,13 @@ interface SyncHvacElementsOptions {
   force?: boolean;
 }
 
+interface ViewportBounds {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
 function toCanvas(point: Point2D): Point2D {
   return { x: point.x * MM_TO_PX, y: point.y * MM_TO_PX };
 }
@@ -65,6 +72,47 @@ export class HvacPlanRenderer {
 
   private hvacElementNeedsRerender(previousElement: HvacElement | undefined, nextElement: HvacElement): boolean {
     return previousElement !== nextElement;
+  }
+
+  private getViewportBounds(paddingPx: number = 96): ViewportBounds | null {
+    const zoom = Math.max(this.canvas.getZoom(), 0.01);
+    const viewportTransform = this.canvas.viewportTransform;
+    if (!viewportTransform) {
+      return null;
+    }
+    const padding = paddingPx / zoom;
+    const left = (-viewportTransform[4] / zoom) - padding;
+    const top = (-viewportTransform[5] / zoom) - padding;
+    return {
+      left,
+      top,
+      right: left + this.canvas.getWidth() / zoom + padding * 2,
+      bottom: top + this.canvas.getHeight() / zoom + padding * 2,
+    };
+  }
+
+  private isObjectVisibleInViewport(object: fabric.FabricObject, bounds: ViewportBounds): boolean {
+    const rect = object.getBoundingRect();
+    return !(
+      rect.left + rect.width < bounds.left ||
+      rect.left > bounds.right ||
+      rect.top + rect.height < bounds.top ||
+      rect.top > bounds.bottom
+    );
+  }
+
+  refreshViewportVisibility(): void {
+    const bounds = this.getViewportBounds();
+    if (!bounds) {
+      return;
+    }
+    this.groups.forEach((group) => {
+      const visible = this.isObjectVisibleInViewport(group, bounds);
+      if (group.visible !== visible) {
+        group.set('visible', visible);
+        group.set('dirty', true);
+      }
+    });
   }
 
   private syncHvacVisualState(): void {
@@ -284,6 +332,7 @@ export class HvacPlanRenderer {
       return;
     }
 
+    this.refreshViewportVisibility();
     this.syncHvacVisualState();
     this.canvas.requestRenderAll();
   }

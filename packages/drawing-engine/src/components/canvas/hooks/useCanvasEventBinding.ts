@@ -249,104 +249,7 @@ export function useCanvasEventBinding(
 ): UseCanvasEventBindingResult {
     const latestOptionsRef = useRef(options);
     latestOptionsRef.current = options;
-
-    const {
-        fabricRef,
-        outerRef,
-        wheelRafId,
-        marqueeSelectionRef,
-        lastMarqueeSelectionRef,
-        applyMarqueeFilterRef,
-        openingPointerInteractionRef,
-        suppressFabricSelectionSyncRef,
-        isWallHandleDraggingRef,
-        isDraggingObjectRef,
-        placementCursorRef,
-        objectRendererRef,
-        roomRendererRef,
-        tool,
-        selectedIds,
-        symbols,
-        walls,
-        objectDefinitionsById,
-        resolvedSnapToGrid,
-        effectiveSnapGridSize,
-        pendingPlacementDefinition,
-        sectionLineDrawingState,
-        wallById,
-        roomById,
-        wallIdSet,
-        perimeterWallIdsForRooms,
-        roomBoundaryDistance,
-        projectPointToSegment,
-        handleMouseDown,
-        handleMouseMove,
-        handleMouseUp,
-        handleWheel,
-        stopMiddlePan,
-        handleMiddleMouseDown,
-        handleMiddleMouseMove,
-        handleMiddleMouseUp,
-        preventMiddleAuxClick,
-        handleSelectDoubleClick,
-        updateSelectionFromTarget,
-        updateSelectionFromTargets,
-        handleSelectMouseDown,
-        handleSelectObjectMoving,
-        finalizeHandleDrag,
-        handleSelectMouseMove,
-        resolveWallIdFromTarget,
-        resolveDimensionIdFromTarget,
-        resolveSectionLineIdFromTarget,
-        resolveRoomIdFromTarget,
-        resolveObjectIdFromTarget,
-        resolveOpeningIdFromTarget,
-        resolveOpeningResizeHandleFromTarget,
-        findOpeningAtPoint,
-        filterMarqueeSelectionTargets,
-        getTargetMeta,
-        handleWallDoubleClick,
-        handleWallToolKeyDown,
-        handleWallToolKeyUp,
-        handleDimensionDoubleClick,
-        handleDimensionKeyDown,
-        handleDimensionSelectMouseDown,
-        offsetTool,
-        trimTool,
-        extendTool,
-        computePlacement,
-        syncOpeningForSymbol,
-        buildHostedOpeningSymbolProperties,
-        resolveOpeningWidthMm,
-        resolveOpeningHeightMm,
-        resolveOpeningSillHeightMm,
-        hasFurnitureCollision,
-        beginOpeningPointerInteraction,
-        finishOpeningPointerInteraction,
-        closeWallContextMenu,
-        closeDimensionContextMenu,
-        closeSectionLineContextMenu,
-        closeObjectContextMenu,
-        setSelectedIds,
-        setHoveredElement,
-        setProcessingStatus,
-        updateSymbol,
-        placePendingObject,
-        onCancelObjectPlacement,
-        setOpeningInteractionActive,
-        setMarqueeSelectionMode,
-        setPersistentRoomControlId,
-        setPlacementRotationDeg,
-        setWallContextMenu,
-        setDimensionContextMenu,
-        setSectionLineContextMenu,
-        setObjectContextMenu,
-        cancelSectionLineDrawing,
-        commitSectionLine,
-        setSectionLineDirection,
-        nudgeSelectedObjects,
-        wallRenderer,
-    } = options;
+    const { fabricRef, outerRef, wheelRafId } = options;
 
     useEffect(() => {
         const canvas = fabricRef.current;
@@ -379,6 +282,14 @@ export function useCanvasEventBinding(
         };
 
         const handleCanvasDoubleClick = (event: MouseEvent) => {
+            const {
+                tool,
+                handleDimensionDoubleClick,
+                handleSelectDoubleClick,
+                resolveRoomIdFromTarget,
+                setSelectedIds,
+                handleWallDoubleClick,
+            } = latestOptionsRef.current;
             const target = canvas.findTarget(event as unknown as fabric.TPointerEvent);
             if (tool === 'select') {
                 const dimensionHandled = handleDimensionDoubleClick(
@@ -404,6 +315,25 @@ export function useCanvasEventBinding(
 
         // Wall tool keyboard handlers
         const handleWallKeyDown = (e: KeyboardEvent) => {
+            const {
+                pendingPlacementDefinition,
+                onCancelObjectPlacement,
+                objectRendererRef,
+                placementCursorRef,
+                placePendingObject,
+                setPlacementRotationDeg,
+                tool,
+                handleWallToolKeyDown,
+                nudgeSelectedObjects,
+                cancelSectionLineDrawing,
+                sectionLineDrawingState,
+                commitSectionLine,
+                setSectionLineDirection,
+                handleDimensionKeyDown,
+                offsetTool,
+                trimTool,
+                extendTool,
+            } = latestOptionsRef.current;
             if (pendingPlacementDefinition) {
                 if (e.key === 'Escape') {
                     onCancelObjectPlacement?.();
@@ -493,12 +423,26 @@ export function useCanvasEventBinding(
             }
         };
         const handleWallKeyUp = (e: KeyboardEvent) => {
+            const { tool, handleWallToolKeyUp } = latestOptionsRef.current;
             if (tool === 'wall') {
                 handleWallToolKeyUp(e);
             }
         };
 
         const handleSelectionCreated = (event: fabric.CanvasEvents['selection:created']) => {
+            const {
+                tool,
+                suppressFabricSelectionSyncRef,
+                openingPointerInteractionRef,
+                setPersistentRoomControlId,
+                setSelectedIds,
+                filterMarqueeSelectionTargets,
+                applyMarqueeFilterRef,
+                resolveObjectIdFromTarget,
+                resolveRoomIdFromTarget,
+                perimeterWallIdsForRooms,
+                updateSelectionFromTargets,
+            } = latestOptionsRef.current;
             if (tool !== 'select') return;
             hideActiveSelectionChrome(canvas);
             const nativeEvent = event.e as MouseEvent | PointerEvent | undefined;
@@ -542,6 +486,19 @@ export function useCanvasEventBinding(
         };
 
         const handleSelectionUpdated = (event: fabric.CanvasEvents['selection:updated']) => {
+            const {
+                tool,
+                suppressFabricSelectionSyncRef,
+                openingPointerInteractionRef,
+                setPersistentRoomControlId,
+                setSelectedIds,
+                filterMarqueeSelectionTargets,
+                applyMarqueeFilterRef,
+                resolveObjectIdFromTarget,
+                resolveRoomIdFromTarget,
+                perimeterWallIdsForRooms,
+                updateSelectionFromTargets,
+            } = latestOptionsRef.current;
             if (tool !== 'select') return;
             hideActiveSelectionChrome(canvas);
             const nativeEvent = event.e as MouseEvent | PointerEvent | undefined;
@@ -585,6 +542,14 @@ export function useCanvasEventBinding(
         };
 
         const handleSelectionCleared = (event: fabric.CanvasEvents['selection:cleared']) => {
+            const {
+                suppressFabricSelectionSyncRef,
+                applyMarqueeFilterRef,
+                openingPointerInteractionRef,
+                setPersistentRoomControlId,
+                setSelectedIds,
+                isWallHandleDraggingRef,
+            } = latestOptionsRef.current;
             const nativeEvent = event?.e as MouseEvent | PointerEvent | undefined;
             if (nativeEvent?.shiftKey || nativeEvent?.ctrlKey || nativeEvent?.metaKey) {
                 return;
@@ -607,6 +572,47 @@ export function useCanvasEventBinding(
         };
 
         const handleCanvasMouseDown = (event: fabric.CanvasEvents['mouse:down']) => {
+            const {
+                closeWallContextMenu,
+                closeDimensionContextMenu,
+                closeSectionLineContextMenu,
+                closeObjectContextMenu,
+                pendingPlacementDefinition,
+                tool,
+                suppressFabricSelectionSyncRef,
+                openingPointerInteractionRef,
+                setOpeningInteractionActive,
+                resolveOpeningResizeHandleFromTarget,
+                setPersistentRoomControlId,
+                marqueeSelectionRef,
+                lastMarqueeSelectionRef,
+                applyMarqueeFilterRef,
+                setMarqueeSelectionMode,
+                setSelectedIds,
+                setHoveredElement,
+                walls,
+                beginOpeningPointerInteraction,
+                findOpeningAtPoint,
+                resolveOpeningIdFromTarget,
+                projectPointToSegment,
+                resolveSectionLineIdFromTarget,
+                resolveObjectIdFromTarget,
+                getTargetMeta,
+                resolveWallIdFromTarget,
+                wallRenderer,
+                roomRendererRef,
+                resolveRoomIdFromTarget,
+                roomById,
+                roomBoundaryDistance,
+                wallById,
+                handleDimensionSelectMouseDown,
+                updateSelectionFromTarget,
+                handleSelectMouseDown,
+                resolveDimensionIdFromTarget,
+                wallIdSet,
+                perimeterWallIdsForRooms,
+                selectedIds,
+            } = latestOptionsRef.current;
             closeWallContextMenu();
             closeDimensionContextMenu();
             closeSectionLineContextMenu();
@@ -906,6 +912,24 @@ export function useCanvasEventBinding(
         };
 
         const handleCanvasContextMenu = (event: MouseEvent) => {
+            const {
+                tool,
+                closeWallContextMenu,
+                closeDimensionContextMenu,
+                closeSectionLineContextMenu,
+                closeObjectContextMenu,
+                resolveSectionLineIdFromTarget,
+                resolveObjectIdFromTarget,
+                wallRenderer,
+                setSelectedIds,
+                outerRef,
+                setWallContextMenu,
+                resolveDimensionIdFromTarget,
+                setDimensionContextMenu,
+                setSectionLineContextMenu,
+                setObjectContextMenu,
+                resolveWallIdFromTarget,
+            } = latestOptionsRef.current;
             if (tool !== 'select') {
                 closeWallContextMenu();
                 closeDimensionContextMenu();
@@ -1010,6 +1034,18 @@ export function useCanvasEventBinding(
         };
 
         const handleObjectMoving = (event: fabric.CanvasEvents['object:moving']) => {
+            const {
+                tool,
+                resolveObjectIdFromTarget,
+                isDraggingObjectRef,
+                symbols,
+                objectDefinitionsById,
+                resolvedSnapToGrid,
+                effectiveSnapGridSize,
+                resolveOpeningWidthMm,
+                computePlacement,
+                handleSelectObjectMoving,
+            } = latestOptionsRef.current;
             if (!event.target || tool !== 'select') return;
 
             const objectId = resolveObjectIdFromTarget(event.target);
@@ -1081,6 +1117,23 @@ export function useCanvasEventBinding(
         };
 
         const handleObjectModified = (event: fabric.CanvasEvents['object:modified']) => {
+            const {
+                isDraggingObjectRef,
+                resolveObjectIdFromTarget,
+                symbols,
+                objectDefinitionsById,
+                resolveOpeningWidthMm,
+                resolveOpeningHeightMm,
+                resolveOpeningSillHeightMm,
+                computePlacement,
+                fabricRef,
+                setProcessingStatus,
+                buildHostedOpeningSymbolProperties,
+                syncOpeningForSymbol,
+                updateSymbol,
+                hasFurnitureCollision,
+                finalizeHandleDrag,
+            } = latestOptionsRef.current;
             // ── Drag-end cleanup: restore canvas interactive behaviour ──
             if (isDraggingObjectRef.current) {
                 isDraggingObjectRef.current = false;
@@ -1212,6 +1265,7 @@ export function useCanvasEventBinding(
         };
 
         const handleObjectRotating = (event: fabric.CanvasEvents['object:rotating']) => {
+            const { tool, resolveObjectIdFromTarget, setProcessingStatus } = latestOptionsRef.current;
             if (!event.target || tool !== 'select') return;
             const objectId = resolveObjectIdFromTarget(event.target);
             if (!objectId) return;
@@ -1247,6 +1301,7 @@ export function useCanvasEventBinding(
         };
 
         const handleSelectDragMouseMove = (event: MouseEvent) => {
+            const { tool, isWallHandleDraggingRef, handleSelectMouseMove } = latestOptionsRef.current;
             if (tool !== 'select') return;
             if (!isWallHandleDraggingRef.current) return;
             if (upperCanvasEl && event.target instanceof Node && upperCanvasEl.contains(event.target)) {
@@ -1261,6 +1316,7 @@ export function useCanvasEventBinding(
         };
 
         const handleCanvasMouseLeave = () => {
+            const { wallRenderer, setHoveredElement } = latestOptionsRef.current;
             wallRenderer?.setHoveredWall(null);
             setHoveredElement(null);
         };
@@ -1320,74 +1376,7 @@ export function useCanvasEventBinding(
                 wheelRafId.current = null;
             }
         };
-    }, [
-        tool,
-        handleSelectDoubleClick,
-        updateSelectionFromTargets,
-        isWallHandleDraggingRef,
-        updateSelectionFromTarget,
-        handleSelectMouseDown,
-        handleSelectObjectMoving,
-        finalizeHandleDrag,
-        handleSelectMouseMove,
-        setSelectedIds,
-        selectedIds,
-        setHoveredElement,
-        closeWallContextMenu,
-        closeDimensionContextMenu,
-        closeSectionLineContextMenu,
-        closeObjectContextMenu,
-        resolveWallIdFromTarget,
-        resolveDimensionIdFromTarget,
-        resolveSectionLineIdFromTarget,
-        resolveRoomIdFromTarget,
-        resolveObjectIdFromTarget,
-        resolveOpeningIdFromTarget,
-        resolveOpeningResizeHandleFromTarget,
-        findOpeningAtPoint,
-        filterMarqueeSelectionTargets,
-        getTargetMeta,
-        handleWallDoubleClick,
-        handleWallToolKeyDown,
-        handleWallToolKeyUp,
-        handleDimensionDoubleClick,
-        handleDimensionKeyDown,
-        handleDimensionSelectMouseDown,
-        offsetTool,
-        trimTool,
-        extendTool,
-        symbols,
-        objectDefinitionsById,
-        hasFurnitureCollision,
-        computePlacement,
-        syncOpeningForSymbol,
-        resolveOpeningWidthMm,
-        resolveOpeningHeightMm,
-        resolveOpeningSillHeightMm,
-        resolvedSnapToGrid,
-        effectiveSnapGridSize,
-        updateSymbol,
-        setProcessingStatus,
-        pendingPlacementDefinition,
-        onCancelObjectPlacement,
-        placePendingObject,
-        perimeterWallIdsForRooms,
-        roomBoundaryDistance,
-        roomById,
-        nudgeSelectedObjects,
-        cancelSectionLineDrawing,
-        commitSectionLine,
-        sectionLineDrawingState.isDrawing,
-        sectionLineDrawingState.direction,
-        setSectionLineDirection,
-        projectPointToSegment,
-        wallById,
-        walls,
-        wallIdSet,
-        wallRenderer,
-        beginOpeningPointerInteraction,
-        finishOpeningPointerInteraction,
-    ]);
+    }, [fabricRef, outerRef, wheelRafId]);
 
     return {};
 }

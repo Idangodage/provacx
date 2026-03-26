@@ -42,6 +42,13 @@ interface SyncRoomsOptions {
   force?: boolean;
 }
 
+interface ViewportBounds {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
 function toCanvasPoint(point: Point2D): Point2D {
   return {
     x: point.x * MM_TO_PX,
@@ -129,6 +136,7 @@ export class RoomRenderer {
   setViewportZoom(zoom: number): void {
     this.viewportZoom = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
     this.applyLabelZoomScaling();
+    this.refreshViewportVisibility();
     this.canvas.requestRenderAll();
   }
 
@@ -201,6 +209,63 @@ export class RoomRenderer {
 
   private roomNeedsRerender(previousRoom: Room | undefined, nextRoom: Room): boolean {
     return previousRoom !== nextRoom;
+  }
+
+  private getViewportBounds(paddingPx: number = 120): ViewportBounds | null {
+    const zoom = Math.max(this.canvas.getZoom(), 0.01);
+    const viewportTransform = this.canvas.viewportTransform;
+    if (!viewportTransform) {
+      return null;
+    }
+    const padding = paddingPx / zoom;
+    const left = (-viewportTransform[4] / zoom) - padding;
+    const top = (-viewportTransform[5] / zoom) - padding;
+    return {
+      left,
+      top,
+      right: left + this.canvas.getWidth() / zoom + padding * 2,
+      bottom: top + this.canvas.getHeight() / zoom + padding * 2,
+    };
+  }
+
+  private isObjectVisibleInViewport(object: fabric.FabricObject, bounds: ViewportBounds): boolean {
+    const rect = object.getBoundingRect();
+    return !(
+      rect.left + rect.width < bounds.left ||
+      rect.left > bounds.right ||
+      rect.top + rect.height < bounds.top ||
+      rect.top > bounds.bottom
+    );
+  }
+
+  refreshViewportVisibility(): void {
+    const bounds = this.getViewportBounds();
+    if (!bounds) {
+      return;
+    }
+
+    this.roomData.forEach((_, roomId) => {
+      const roomGroup = this.roomGroups.get(roomId);
+      if (!roomGroup) {
+        return;
+      }
+      const visible = this.isObjectVisibleInViewport(roomGroup, bounds);
+      const controlGroup = this.roomControlGroups.get(roomId);
+      const labelGroup = this.roomLabelGroups.get(roomId);
+
+      if (roomGroup.visible !== visible) {
+        roomGroup.set('visible', visible);
+        roomGroup.set('dirty', true);
+      }
+      if (controlGroup && controlGroup.visible !== visible) {
+        controlGroup.set('visible', visible);
+        controlGroup.set('dirty', true);
+      }
+      if (labelGroup && labelGroup.visible !== visible) {
+        labelGroup.set('visible', visible);
+        labelGroup.set('dirty', true);
+      }
+    });
   }
 
   private syncRoomVisualState(): void {
@@ -1016,6 +1081,7 @@ export class RoomRenderer {
     }
 
     this.applyLabelZoomScaling();
+    this.refreshViewportVisibility();
     this.syncRoomVisualState();
     this.canvas.requestRenderAll();
   }

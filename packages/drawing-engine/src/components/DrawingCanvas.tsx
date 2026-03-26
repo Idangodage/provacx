@@ -148,7 +148,6 @@ export function DrawingCanvas({
 
     // State
     const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
-    const [mousePosition, setMousePosition] = useState<Point2D>({ x: 0, y: 0 });
     const [isSpacePressed, setIsSpacePressed] = useState(false);
     const [fabricCanvas, setFabricCanvas] = useState<fabric.Canvas | null>(null);
     const [placementRotationDeg, setPlacementRotationDeg] = useState(0);
@@ -178,11 +177,10 @@ export function DrawingCanvas({
     // Store
     const {
         activeTool: tool,
-        zoom,
-        panOffset,
+        zoom: documentZoom,
+        panOffset: documentPanOffset,
         displayUnit,
         selectedElementIds: selectedIds,
-        hoveredElementId,
         dimensions,
         dimensionSettings,
         symbols,
@@ -195,7 +193,6 @@ export function DrawingCanvas({
         setViewTransform,
         setTool,
         setSelectedIds,
-        setHoveredElement,
         setProcessingStatus,
         saveToHistory,
         detectRooms,
@@ -247,7 +244,6 @@ export function DrawingCanvas({
         panOffset: state.panOffset,
         displayUnit: state.displayUnit,
         selectedElementIds: state.selectedElementIds,
-        hoveredElementId: state.hoveredElementId,
         dimensions: state.dimensions,
         dimensionSettings: state.dimensionSettings,
         symbols: state.symbols,
@@ -260,7 +256,6 @@ export function DrawingCanvas({
         setViewTransform: state.setViewTransform,
         setTool: state.setTool,
         setSelectedIds: state.setSelectedIds,
-        setHoveredElement: state.setHoveredElement,
         setProcessingStatus: state.setProcessingStatus,
         saveToHistory: state.saveToHistory,
         detectRooms: state.detectRooms,
@@ -305,6 +300,25 @@ export function DrawingCanvas({
         moveRoom: state.moveRoom,
         hvacElements: state.hvacElements,
         syncAutoDimensions: state.syncAutoDimensions,
+    }), shallow);
+    const {
+        mousePosition,
+        hoveredElementId,
+        zoom,
+        panOffset,
+        setMousePosition: setInteractionMousePosition,
+        setHoveredElement,
+        setViewTransform: setInteractionViewTransform,
+        resetInteractionState,
+    } = useDrawingInteractionStore((state) => ({
+        mousePosition: state.mousePosition,
+        hoveredElementId: state.hoveredElementId,
+        zoom: state.zoom,
+        panOffset: state.panOffset,
+        setMousePosition: state.setMousePosition,
+        setHoveredElement: state.setHoveredElement,
+        setViewTransform: state.setViewTransform,
+        resetInteractionState: state.resetInteractionState,
     }), shallow);
     const wallsRef = useRef<Wall[]>(walls);
     const symbolsRef = useRef<SymbolInstance2D[]>(symbols);
@@ -421,13 +435,12 @@ export function DrawingCanvas({
         mousePositionFrameRef.current = window.requestAnimationFrame(() => {
             mousePositionFrameRef.current = null;
             const nextMousePosition = mousePositionRef.current;
-            setMousePosition(nextMousePosition);
-            useDrawingInteractionStore.getState().setMousePosition({
+            setInteractionMousePosition({
                 x: nextMousePosition.x / MM_TO_PX,
                 y: nextMousePosition.y / MM_TO_PX,
             });
         });
-    }, []);
+    }, [setInteractionMousePosition]);
 
     const setMarqueeSelectionMode = useCallback((mode: 'window' | 'crossing') => {
         const canvas = fabricRef.current as (fabric.Canvas & { selectionFullyContained?: boolean }) | null;
@@ -506,9 +519,9 @@ export function DrawingCanvas({
                 window.cancelAnimationFrame(mousePositionFrameRef.current);
                 mousePositionFrameRef.current = null;
             }
-            useDrawingInteractionStore.getState().resetMousePosition();
+            resetInteractionState();
         };
-    }, []);
+    }, [resetInteractionState]);
 
     useEffect(() => {
         const previousRatio = paperScaleRatioRef.current;
@@ -528,8 +541,13 @@ export function DrawingCanvas({
         };
         paperScaleRatioRef.current = safePaperPerRealRatio;
         panOffsetRef.current = nextPan;
+        setInteractionViewTransform(zoom, nextPan);
         setPanOffset(nextPan);
-    }, [safePaperPerRealRatio, setPanOffset]);
+    }, [safePaperPerRealRatio, setInteractionViewTransform, setPanOffset, zoom]);
+
+    useEffect(() => {
+        setInteractionViewTransform(documentZoom, documentPanOffset);
+    }, [documentZoom, documentPanOffset, setInteractionViewTransform]);
 
     const {
         projectPointToSegment,
@@ -654,6 +672,7 @@ export function DrawingCanvas({
         zoomRef,
         panOffsetRef,
         safePaperPerRealRatio,
+        setInteractionViewTransform,
         setViewTransform,
         wheelPendingZoom,
         wheelPendingPan,
@@ -1209,7 +1228,7 @@ export function DrawingCanvas({
         findOpeningAtPoint, updateOpeningPointerInteraction,
         finishOpeningPointerInteraction, computePlacement,
         buildOpeningPreviewProperties, scheduleDimensionLayerRefresh,
-        setViewTransform, setCanvasState, setPlacementValid,
+        setViewTransform, setInteractionViewTransform, setCanvasState, setPlacementValid,
         setHoveredElement, setMarqueeSelectionMode, addSketch, getSelectionRect,
         getTargetMeta, resolveObjectIdFromTarget, resolveRoomIdFromTarget,
         resolveSectionLineIdFromTarget, startSectionLineDrawing,

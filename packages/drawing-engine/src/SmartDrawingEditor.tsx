@@ -498,7 +498,6 @@ export function SmartDrawingEditor({
     walls,
     rooms,
     activeTool,
-    zoom,
     history,
     historyIndex,
     showGrid,
@@ -518,7 +517,6 @@ export function SmartDrawingEditor({
     walls: state.walls,
     rooms: state.rooms,
     activeTool: state.activeTool,
-    zoom: state.zoom,
     history: state.history,
     historyIndex: state.historyIndex,
     showGrid: state.showGrid,
@@ -559,6 +557,15 @@ export function SmartDrawingEditor({
     setZoom: state.setZoom,
     setPanOffset: state.setPanOffset,
     setEditorViewMode: state.setEditorViewMode,
+  }), shallow);
+  const {
+    zoom,
+    panOffset,
+    setViewTransform: setInteractionViewTransform,
+  } = useDrawingInteractionStore((state) => ({
+    zoom: state.zoom,
+    panOffset: state.panOffset,
+    setViewTransform: state.setViewTransform,
   }), shallow);
   const canUndo = historyIndex > 0;
   const canRedo = historyIndex < history.length - 1;
@@ -940,9 +947,20 @@ export function SmartDrawingEditor({
         zoomLevel={zoom}
         canUndo={canUndo}
         canRedo={canRedo}
-        onZoomIn={() => setZoom(Math.min(zoom * 1.2, 5))}
-        onZoomOut={() => setZoom(Math.max(zoom / 1.2, 0.1))}
-        onResetView={resetView}
+        onZoomIn={() => {
+          const nextZoom = Math.min(zoom * 1.2, 5);
+          setInteractionViewTransform(nextZoom, panOffset);
+          setZoom(nextZoom);
+        }}
+        onZoomOut={() => {
+          const nextZoom = Math.max(zoom / 1.2, 0.1);
+          setInteractionViewTransform(nextZoom, panOffset);
+          setZoom(nextZoom);
+        }}
+        onResetView={() => {
+          setInteractionViewTransform(1, { x: 0, y: 0 });
+          resetView();
+        }}
         onUndo={undo}
         onRedo={redo}
         saveState={saveState}
@@ -963,6 +981,7 @@ export function SmartDrawingEditor({
             height: layout.height,
             orientation: layout.orientation,
           });
+          setInteractionViewTransform(1, { x: 0, y: 0 });
           setZoom(1);
           setPanOffset({ x: 0, y: 0 });
         }}

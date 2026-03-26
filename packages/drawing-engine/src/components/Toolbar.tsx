@@ -32,6 +32,7 @@ import React from 'react';
 import { shallow } from 'zustand/shallow';
 
 import { useSmartDrawingStore } from '../store';
+import { useDrawingInteractionStore } from '../store/interactionStore';
 import type { DrawingTool } from '../types';
 
 // =============================================================================
@@ -194,7 +195,6 @@ export function Toolbar({
 }: ToolbarProps) {
   const {
     activeTool,
-    zoom,
     history,
     historyIndex,
     setTool,
@@ -204,7 +204,6 @@ export function Toolbar({
     resetView,
   } = useSmartDrawingStore((state) => ({
     activeTool: state.activeTool,
-    zoom: state.zoom,
     history: state.history,
     historyIndex: state.historyIndex,
     setTool: state.setTool,
@@ -213,15 +212,28 @@ export function Toolbar({
     redo: state.redo,
     resetView: state.resetView,
   }), shallow);
+  const {
+    zoom,
+    panOffset,
+    setViewTransform: setInteractionViewTransform,
+  } = useDrawingInteractionStore((state) => ({
+    zoom: state.zoom,
+    panOffset: state.panOffset,
+    setViewTransform: state.setViewTransform,
+  }), shallow);
   const canUndo = historyIndex > 0;
   const canRedo = historyIndex < history.length - 1;
 
   const handleZoomIn = () => {
-    setZoom(Math.min(zoom * 1.2, 5));
+    const nextZoom = Math.min(zoom * 1.2, 5);
+    setInteractionViewTransform(nextZoom, panOffset);
+    setZoom(nextZoom);
   };
 
   const handleZoomOut = () => {
-    setZoom(Math.max(zoom / 1.2, 0.1));
+    const nextZoom = Math.max(zoom / 1.2, 0.1);
+    setInteractionViewTransform(nextZoom, panOffset);
+    setZoom(nextZoom);
   };
 
   const isHorizontal = orientation === 'horizontal';
@@ -373,7 +385,9 @@ export function Toolbar({
 // =============================================================================
 
 export function ZoomIndicator({ className = '' }: { className?: string }) {
-  const zoom = useSmartDrawingStore((state) => state.zoom);
+  const zoom = useDrawingInteractionStore((state) => state.zoom);
+  const panOffset = useDrawingInteractionStore((state) => state.panOffset);
+  const setInteractionViewTransform = useDrawingInteractionStore((state) => state.setViewTransform);
   const setZoom = useSmartDrawingStore((state) => state.setZoom);
   const percentage = Math.round(zoom * 100);
 
@@ -387,7 +401,10 @@ export function ZoomIndicator({ className = '' }: { className?: string }) {
       `}
     >
       <button
-        onClick={() => setZoom(1)}
+        onClick={() => {
+          setInteractionViewTransform(1, panOffset);
+          setZoom(1);
+        }}
         className="hover:text-blue-600 transition-colors"
         title="Reset to 100%"
       >

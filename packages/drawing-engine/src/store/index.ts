@@ -106,6 +106,7 @@ import {
   createHistoryEntry,
   createHistorySnapshot,
 } from './helpers';
+import { createRoomModel } from './autoDetectedRooms';
 import {
   detectRoomPolygons,
   inferRoomType,
@@ -114,6 +115,7 @@ import {
   roomTopologyHash,
   roomTypeFillColor,
 } from './roomDetection';
+import { detectRoomsInBackground } from './roomDetectionWorkerClient';
 
 const AUTO_TRIM_TOLERANCE_MM = 120;
 const STRAIGHT_WALL_MERGE_NODE_TOLERANCE_MM = 4;
@@ -124,8 +126,11 @@ const ELEVATION_REGEN_DEBOUNCE_MS = 120;
 
 let roomDetectionTimer: ReturnType<typeof setTimeout> | null = null;
 let roomDetectionFrame: number | null = null;
+let scheduledRoomDetectionCallback: (() => void) | null = null;
 let elevationRegenTimer: ReturnType<typeof setTimeout> | null = null;
 let lastRoomTopologyHash = '';
+let pendingRoomTopologyHash = '';
+let roomDetectionRequestId = 0;
 const INITIAL_ELEVATION_VIEWS = createStandardElevationViews(
   [],
   [],
@@ -153,16 +158,20 @@ function clearScheduledRoomDetection(): void {
     window.cancelAnimationFrame(roomDetectionFrame);
   }
   roomDetectionFrame = null;
+  scheduledRoomDetectionCallback = null;
 }
 
 function scheduleRoomDetection(runDetection: () => void): void {
+  scheduledRoomDetectionCallback = runDetection;
   if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
     if (roomDetectionFrame !== null) {
       return;
     }
     roomDetectionFrame = window.requestAnimationFrame(() => {
       roomDetectionFrame = null;
-      runDetection();
+      const callback = scheduledRoomDetectionCallback;
+      scheduledRoomDetectionCallback = null;
+      callback?.();
     });
     return;
   }
@@ -172,7 +181,9 @@ function scheduleRoomDetection(runDetection: () => void): void {
   }
   roomDetectionTimer = setTimeout(() => {
     roomDetectionTimer = null;
-    runDetection();
+    const callback = scheduledRoomDetectionCallback;
+    scheduledRoomDetectionCallback = null;
+    callback?.();
   }, ROOM_DETECTION_FRAME_FALLBACK_MS);
 }
 
@@ -594,48 +605,6 @@ function bindRoomAttributes(room: Room, defaults?: Partial<Room3D>): Room {
     perimeter: computedPerimeter,
     centroid: computedCentroid,
   };
-}
-
-function createRoomModel(params: {
-  vertices: Point2D[];
-  wallIds: string[];
-  name?: string;
-  roomType?: RoomType;
-  perimeter?: number;
-  centroid?: Point2D;
-  finishes?: string;
-  notes?: string;
-  fillColor?: string;
-  showLabel?: boolean;
-  adjacentRoomIds?: string[];
-  hasWindows?: boolean;
-  validationWarnings?: string[];
-  isExterior?: boolean;
-  properties3D?: Partial<Room3D>;
-}): Room {
-  const area = polygonArea(params.vertices);
-  const areaM2 = area / 1_000_000;
-  const roomType = params.roomType ?? inferRoomType(areaM2);
-  const roomBase: Room = {
-    id: generateId(),
-    name: params.name ?? `${roomType} ${new Date().toISOString().slice(11, 16)}`,
-    roomType,
-    vertices: params.vertices.map((vertex) => ({ ...vertex })),
-    wallIds: [...params.wallIds],
-    area,
-    perimeter: params.perimeter ?? polygonPerimeter(params.vertices),
-    centroid: params.centroid ? { ...params.centroid } : polygonCentroid(params.vertices),
-    finishes: params.finishes ?? '',
-    notes: params.notes ?? '',
-    fillColor: params.fillColor ?? roomTypeFillColor(roomType),
-    showLabel: params.showLabel ?? true,
-    adjacentRoomIds: params.adjacentRoomIds ?? [],
-    hasWindows: params.hasWindows ?? false,
-    validationWarnings: params.validationWarnings ?? [],
-    isExterior: params.isExterior ?? false,
-    properties3D: { ...DEFAULT_ROOM_3D },
-  };
-  return bindRoomAttributes(roomBase, params.properties3D);
 }
 
 function buildRoomValidationWarnings(params: {
@@ -2076,16 +2045,76 @@ export const useDrawingStore = create<DrawingState>()(
       // Wall Actions
       detectRooms: (options) => {
         const runDetection = () => {
-          set((state) => {
-            const topology = roomTopologyHash(state.walls);
-            if (topology === lastRoomTopologyHash) {
-              return state;
+          const detectionState = get();
+          const topology = roomTopologyHash(detectionState.walls);
+          if (topology === lastRoomTopologyHash || topology === pendingRoomTopologyHash) {
+            return;
+          }
+
+          pendingRoomTopologyHash = topology;
+          const requestId = ++roomDetectionRequestId;
+          const wallsSnapshot = detectionState.walls.map((wall) => ({
+            ...wall,
+            startPoint: { ...wall.startPoint },
+            endPoint: { ...wall.endPoint },
+            interiorLine: {
+              start: { ...wall.interiorLine.start },
+              end: { ...wall.interiorLine.end },
+            },
+            exteriorLine: {
+              start: { ...wall.exteriorLine.start },
+              end: { ...wall.exteriorLine.end },
+            },
+            openings: wall.openings.map((opening) => ({ ...opening })),
+            connectedWalls: [...wall.connectedWalls],
+            startBevel: { ...wall.startBevel },
+            endBevel: { ...wall.endBevel },
+          }));
+          const roomsSnapshot = detectionState.rooms.map((room) => ({
+            ...room,
+            vertices: room.vertices.map((vertex) => ({ ...vertex })),
+            wallIds: [...room.wallIds],
+            adjacentRoomIds: [...room.adjacentRoomIds],
+            validationWarnings: [...room.validationWarnings],
+          }));
+
+          void detectRoomsInBackground({
+            topology,
+            walls: wallsSnapshot,
+            rooms: roomsSnapshot,
+          }).then((detectedRooms) => {
+            if (requestId !== roomDetectionRequestId) {
+              return;
             }
-            const detectedRooms = buildAutoDetectedRooms(state.walls, state.rooms);
-            lastRoomTopologyHash = topology;
-            return {
-              rooms: detectedRooms,
-            };
+
+            set((state) => {
+              const currentTopology = roomTopologyHash(state.walls);
+              if (currentTopology !== topology) {
+                return state;
+              }
+              lastRoomTopologyHash = topology;
+              pendingRoomTopologyHash = '';
+              return {
+                rooms: detectedRooms,
+              };
+            });
+          }).catch(() => {
+            if (requestId !== roomDetectionRequestId) {
+              return;
+            }
+
+            set((state) => {
+              const currentTopology = roomTopologyHash(state.walls);
+              if (currentTopology !== topology) {
+                return state;
+              }
+              const detectedRooms = buildAutoDetectedRooms(state.walls, state.rooms);
+              lastRoomTopologyHash = topology;
+              pendingRoomTopologyHash = '';
+              return {
+                rooms: detectedRooms,
+              };
+            });
           });
         };
 

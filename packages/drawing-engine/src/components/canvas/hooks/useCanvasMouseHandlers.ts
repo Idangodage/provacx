@@ -136,6 +136,7 @@ export interface UseCanvasMouseHandlersOptions {
     ) => Record<string, unknown> | undefined;
     scheduleDimensionLayerRefresh: () => void;
     setViewTransform: (zoom: number, pan: Point2D) => void;
+    setInteractionViewTransform: (zoom: number, pan: Point2D) => void;
     setCanvasState: (state: CanvasState) => void;
     setPlacementValid: (valid: boolean) => void;
     setHoveredElement: (id: string | null) => void;
@@ -244,6 +245,7 @@ export function useCanvasMouseHandlers(
         buildOpeningPreviewProperties,
         scheduleDimensionLayerRefresh,
         setViewTransform,
+        setInteractionViewTransform,
         setCanvasState,
         setPlacementValid,
         setHoveredElement,
@@ -265,8 +267,10 @@ export function useCanvasMouseHandlers(
 
     const scheduleViewTransformSync = useCallback(
         (viewportZoomValue: number, panOffsetValue: Point2D) => {
-            wheelPendingZoom.current = viewportZoomValue / safePaperPerRealRatio;
+            const nextZoom = viewportZoomValue / safePaperPerRealRatio;
+            wheelPendingZoom.current = nextZoom;
             wheelPendingPan.current = panOffsetValue;
+            setInteractionViewTransform(nextZoom, panOffsetValue);
             if (wheelRafId.current) return;
             wheelRafId.current = requestAnimationFrame(() => {
                 wheelRafId.current = null;
@@ -281,6 +285,7 @@ export function useCanvasMouseHandlers(
             wheelPendingPan,
             wheelRafId,
             safePaperPerRealRatio,
+            setInteractionViewTransform,
             setViewTransform,
         ]
     );

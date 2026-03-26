@@ -33,6 +33,13 @@ interface SyncDimensionsOptions {
   force?: boolean;
 }
 
+interface ViewportBounds {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
 function toCanvas(value: number): number {
   return value * MM_TO_PX;
 }
@@ -208,6 +215,47 @@ export class DimensionRenderer {
       this.settings = { ...settings };
     }
     return contextChanged;
+  }
+
+  private getViewportBounds(paddingPx: number = 120): ViewportBounds | null {
+    const zoom = Math.max(this.canvas.getZoom(), 0.01);
+    const viewportTransform = this.canvas.viewportTransform;
+    if (!viewportTransform) {
+      return null;
+    }
+    const padding = paddingPx / zoom;
+    const left = (-viewportTransform[4] / zoom) - padding;
+    const top = (-viewportTransform[5] / zoom) - padding;
+    return {
+      left,
+      top,
+      right: left + this.canvas.getWidth() / zoom + padding * 2,
+      bottom: top + this.canvas.getHeight() / zoom + padding * 2,
+    };
+  }
+
+  private isObjectVisibleInViewport(object: fabric.FabricObject, bounds: ViewportBounds): boolean {
+    const rect = object.getBoundingRect();
+    return !(
+      rect.left + rect.width < bounds.left ||
+      rect.left > bounds.right ||
+      rect.top + rect.height < bounds.top ||
+      rect.top > bounds.bottom
+    );
+  }
+
+  refreshViewportVisibility(): void {
+    const bounds = this.getViewportBounds();
+    if (!bounds) {
+      return;
+    }
+    this.dimensionGroups.forEach((group) => {
+      const visible = this.isObjectVisibleInViewport(group, bounds);
+      if (group.visible !== visible) {
+        group.set('visible', visible);
+        group.set('dirty', true);
+      }
+    });
   }
 
   private dimensionNeedsRerender(previousDimension: Dimension2D | undefined, nextDimension: Dimension2D): boolean {
@@ -831,6 +879,7 @@ export class DimensionRenderer {
       return;
     }
 
+    this.refreshViewportVisibility();
     this.syncDimensionVisualState();
     this.canvas.requestRenderAll();
   }
@@ -883,8 +932,6 @@ export class DimensionRenderer {
     endMm: { x: number; y: number },
     label: string
   ): void {
-    this.clearLiveDimension();
-
     const startC = toCanvasPoint(startMm);
     const endC = toCanvasPoint(endMm);
     const dx = endC.x - startC.x;
@@ -913,75 +960,138 @@ export class DimensionRenderer {
     const dimStart = { x: startC.x + normal.x * offsetDist, y: startC.y + normal.y * offsetDist };
     const dimEnd   = { x: endC.x   + normal.x * offsetDist, y: endC.y   + normal.y * offsetDist };
 
-    // Dimension line (solid blue)
-    const dimLine = new fabric.Line([dimStart.x, dimStart.y, dimEnd.x, dimEnd.y], {
-      stroke: '#2563EB',
-      strokeWidth: this.sp(1.5),
-      selectable: false, evented: false,
-    });
+    const dimLineCoords: [number, number, number, number] = [dimStart.x, dimStart.y, dimEnd.x, dimEnd.y];
+    const extACoords: [number, number, number, number] = [
+      startC.x + normal.x * gapDist,
+      startC.y + normal.y * gapDist,
+      dimStart.x + normal.x * beyondDist,
+      dimStart.y + normal.y * beyondDist,
+    ];
+    const extBCoords: [number, number, number, number] = [
+      endC.x + normal.x * gapDist,
+      endC.y + normal.y * gapDist,
+      dimEnd.x + normal.x * beyondDist,
+      dimEnd.y + normal.y * beyondDist,
+    ];
 
-    // Extension lines
-    const extA = new fabric.Line([
-      startC.x + normal.x * gapDist, startC.y + normal.y * gapDist,
-      dimStart.x + normal.x * beyondDist, dimStart.y + normal.y * beyondDist,
-    ], { stroke: '#2563EB', strokeWidth: this.sp(1), selectable: false, evented: false });
-
-    const extB = new fabric.Line([
-      endC.x + normal.x * gapDist, endC.y + normal.y * gapDist,
-      dimEnd.x + normal.x * beyondDist, dimEnd.y + normal.y * beyondDist,
-    ], { stroke: '#2563EB', strokeWidth: this.sp(1), selectable: false, evented: false });
-
-    // Tick marks at dimension line endpoints
-    const makeTick = (pt: { x: number; y: number }): fabric.Line => {
+    const tickCoords = (pt: { x: number; y: number }): [number, number, number, number] => {
       const a = { x: pt.x - dir.x * tickSize * 0.5 + normal.x * tickSize * 0.5, y: pt.y - dir.y * tickSize * 0.5 + normal.y * tickSize * 0.5 };
       const b = { x: pt.x + dir.x * tickSize * 0.5 - normal.x * tickSize * 0.5, y: pt.y + dir.y * tickSize * 0.5 - normal.y * tickSize * 0.5 };
-      return new fabric.Line([a.x, a.y, b.x, b.y], { stroke: '#2563EB', strokeWidth: this.sp(1.5), selectable: false, evented: false });
+      return [a.x, a.y, b.x, b.y];
     };
-    const tickA = makeTick(dimStart);
-    const tickB = makeTick(dimEnd);
+    const tickACoords = tickCoords(dimStart);
+    const tickBCoords = tickCoords(dimEnd);
 
     // Text label at midpoint, pushed slightly further along normal
     const textOffsetDist = offsetDist + this.sp(18);
     const midC = { x: (startC.x + endC.x) / 2 + normal.x * textOffsetDist, y: (startC.y + endC.y) / 2 + normal.y * textOffsetDist };
 
-    const textObj = new fabric.FabricText(label, {
-      left: midC.x, top: midC.y,
-      fill: '#1E40AF',
-      fontSize: this.sp(13),
-      fontFamily: 'Arial',
-      fontWeight: '600',
-      originX: 'center', originY: 'center',
-      selectable: false, evented: false,
-    });
+    let liveObjects = this.liveDimensionObjects as [
+      fabric.Line,
+      fabric.Line,
+      fabric.Line,
+      fabric.Line,
+      fabric.Line,
+      fabric.Rect,
+      fabric.FabricText,
+    ] | [];
 
-    const bg = new fabric.Rect({
-      left: midC.x, top: midC.y,
-      width: (textObj.width ?? 0) + this.sp(10),
-      height: (textObj.height ?? this.sp(13)) + this.sp(6),
-      fill: '#EFF6FF',
-      stroke: '#2563EB',
-      strokeWidth: this.sp(1),
-      rx: this.sp(3), ry: this.sp(3),
-      originX: 'center', originY: 'center',
-      selectable: false, evented: false,
-    });
+    if (liveObjects.length !== 7) {
+      const dimLine = new fabric.Line(dimLineCoords, {
+        stroke: '#2563EB',
+        strokeWidth: this.sp(1.5),
+        selectable: false, evented: false,
+      });
+      const extA = new fabric.Line(extACoords, {
+        stroke: '#2563EB',
+        strokeWidth: this.sp(1),
+        selectable: false,
+        evented: false,
+      });
+      const extB = new fabric.Line(extBCoords, {
+        stroke: '#2563EB',
+        strokeWidth: this.sp(1),
+        selectable: false,
+        evented: false,
+      });
+      const tickA = new fabric.Line(tickACoords, {
+        stroke: '#2563EB',
+        strokeWidth: this.sp(1.5),
+        selectable: false,
+        evented: false,
+      });
+      const tickB = new fabric.Line(tickBCoords, {
+        stroke: '#2563EB',
+        strokeWidth: this.sp(1.5),
+        selectable: false,
+        evented: false,
+      });
+      const textObj = new fabric.FabricText(label, {
+        left: midC.x, top: midC.y,
+        fill: '#1E40AF',
+        fontSize: this.sp(13),
+        fontFamily: 'Arial',
+        fontWeight: '600',
+        originX: 'center', originY: 'center',
+        selectable: false, evented: false,
+      });
+      const bg = new fabric.Rect({
+        left: midC.x, top: midC.y,
+        width: (textObj.width ?? 0) + this.sp(10),
+        height: (textObj.height ?? this.sp(13)) + this.sp(6),
+        fill: '#EFF6FF',
+        stroke: '#2563EB',
+        strokeWidth: this.sp(1),
+        rx: this.sp(3), ry: this.sp(3),
+        originX: 'center', originY: 'center',
+        selectable: false, evented: false,
+      });
+      liveObjects = [extA, extB, dimLine, tickA, tickB, bg, textObj];
+      this.liveDimensionObjects = liveObjects;
+      liveObjects.forEach((obj) => this.canvas.add(obj));
+    } else {
+      const [liveExtA, liveExtB, liveDimLine, liveTickA, liveTickB, liveBg, liveText] = liveObjects;
+      liveExtA.set({ x1: extACoords[0], y1: extACoords[1], x2: extACoords[2], y2: extACoords[3], visible: true });
+      liveExtB.set({ x1: extBCoords[0], y1: extBCoords[1], x2: extBCoords[2], y2: extBCoords[3], visible: true });
+      liveDimLine.set({ x1: dimLineCoords[0], y1: dimLineCoords[1], x2: dimLineCoords[2], y2: dimLineCoords[3], visible: true });
+      liveTickA.set({ x1: tickACoords[0], y1: tickACoords[1], x2: tickACoords[2], y2: tickACoords[3], visible: true });
+      liveTickB.set({ x1: tickBCoords[0], y1: tickBCoords[1], x2: tickBCoords[2], y2: tickBCoords[3], visible: true });
+      liveText.set({
+        left: midC.x,
+        top: midC.y,
+        text: label,
+        fontSize: this.sp(13),
+        visible: true,
+      });
+      liveText.setCoords();
+      liveBg.set({
+        left: midC.x,
+        top: midC.y,
+        width: (liveText.width ?? 0) + this.sp(10),
+        height: (liveText.height ?? this.sp(13)) + this.sp(6),
+        visible: true,
+      });
+      liveBg.setCoords();
+      [liveExtA, liveExtB, liveDimLine, liveTickA, liveTickB].forEach((obj) => obj.setCoords());
+    }
 
-    this.liveDimensionObjects = [extA, extB, dimLine, tickA, tickB, bg, textObj];
-    this.liveDimensionObjects.forEach((obj) => this.canvas.add(obj));
-    this.liveDimensionObjects.forEach((obj) => this.canvas.bringObjectToFront(obj));
+    this.liveDimensionObjects.forEach((obj) => {
+      obj.set('visible', true);
+      this.canvas.bringObjectToFront(obj);
+    });
     this.canvas.requestRenderAll();
   }
 
   clearLiveDimension(): void {
     if (this.liveDimensionObjects.length > 0) {
-      this.liveDimensionObjects.forEach((obj) => this.canvas.remove(obj));
-      this.liveDimensionObjects = [];
+      this.liveDimensionObjects.forEach((obj) => obj.set('visible', false));
       this.canvas.requestRenderAll();
     }
   }
 
   dispose(): void {
     this.clearAllDimensions();
-    this.clearLiveDimension();
+    this.liveDimensionObjects.forEach((obj) => this.canvas.remove(obj));
+    this.liveDimensionObjects = [];
   }
 }

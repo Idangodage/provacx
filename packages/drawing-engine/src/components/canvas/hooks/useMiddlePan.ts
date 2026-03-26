@@ -23,6 +23,7 @@ export interface UseMiddlePanOptions {
     zoomRef: React.MutableRefObject<number>;
     panOffsetRef: React.MutableRefObject<Point2D>;
     safePaperPerRealRatio: number;
+    setInteractionViewTransform: (zoom: number, offset: Point2D) => void;
     setViewTransform: (zoom: number, offset: Point2D) => void;
     wheelPendingZoom: React.MutableRefObject<number>;
     wheelPendingPan: React.MutableRefObject<Point2D>;
@@ -46,6 +47,7 @@ export function useMiddlePan({
     zoomRef,
     panOffsetRef,
     safePaperPerRealRatio,
+    setInteractionViewTransform,
     setViewTransform,
     wheelPendingZoom,
     wheelPendingPan,
@@ -129,6 +131,7 @@ export function useMiddlePan({
             }
             wheelPendingZoom.current = zoomRef.current / safePaperPerRealRatio;
             wheelPendingPan.current = nextPan;
+            setInteractionViewTransform(wheelPendingZoom.current, nextPan);
             if (!wheelRafId.current) {
                 wheelRafId.current = requestAnimationFrame(() => {
                     wheelRafId.current = null;
@@ -144,6 +147,7 @@ export function useMiddlePan({
             zoomRef,
             panOffsetRef,
             safePaperPerRealRatio,
+            setInteractionViewTransform,
             wheelPendingZoom,
             wheelPendingPan,
             wheelRafId,

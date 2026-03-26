@@ -24,6 +24,13 @@ interface SyncSectionLinesOptions {
   force?: boolean;
 }
 
+interface ViewportBounds {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
 function toCanvasPoint(point: Point2D): Point2D {
   return {
     x: point.x * MM_TO_PX,
@@ -42,6 +49,29 @@ function normalize(v: Point2D): Point2D {
 
 function perpendicular(v: Point2D): Point2D {
   return { x: -v.y, y: v.x };
+}
+
+function arrowPoints(point: Point2D, direction: Point2D): Point2D[] {
+  const unit = normalize(direction);
+  const normal = perpendicular(unit);
+  const tip = point;
+  const size = 16;
+  const width = 10;
+  const base = {
+    x: tip.x - unit.x * size,
+    y: tip.y - unit.y * size,
+  };
+  return [
+    tip,
+    {
+      x: base.x + normal.x * width * 0.5,
+      y: base.y + normal.y * width * 0.5,
+    },
+    {
+      x: base.x - normal.x * width * 0.5,
+      y: base.y - normal.y * width * 0.5,
+    },
+  ];
 }
 
 export class SectionLineRenderer {
@@ -85,24 +115,7 @@ export class SectionLineRenderer {
   }
 
   private createArrow(point: Point2D, direction: Point2D, color: string): fabric.Polygon {
-    const unit = normalize(direction);
-    const normal = perpendicular(unit);
-    const tip = point;
-    const size = 16;
-    const width = 10;
-    const base = {
-      x: tip.x - unit.x * size,
-      y: tip.y - unit.y * size,
-    };
-    const left = {
-      x: base.x + normal.x * width * 0.5,
-      y: base.y + normal.y * width * 0.5,
-    };
-    const right = {
-      x: base.x - normal.x * width * 0.5,
-      y: base.y - normal.y * width * 0.5,
-    };
-    return new fabric.Polygon([tip, left, right], {
+    return new fabric.Polygon(arrowPoints(point, direction), {
       fill: color,
       stroke: color,
       strokeWidth: 1,
@@ -122,6 +135,47 @@ export class SectionLineRenderer {
     if (this.hoveredSectionLineId === sectionLineId) {
       this.hoveredSectionLineId = null;
     }
+  }
+
+  private getViewportBounds(paddingPx: number = 96): ViewportBounds | null {
+    const zoom = Math.max(this.canvas.getZoom(), 0.01);
+    const viewportTransform = this.canvas.viewportTransform;
+    if (!viewportTransform) {
+      return null;
+    }
+    const padding = paddingPx / zoom;
+    const left = (-viewportTransform[4] / zoom) - padding;
+    const top = (-viewportTransform[5] / zoom) - padding;
+    return {
+      left,
+      top,
+      right: left + this.canvas.getWidth() / zoom + padding * 2,
+      bottom: top + this.canvas.getHeight() / zoom + padding * 2,
+    };
+  }
+
+  private isObjectVisibleInViewport(object: fabric.FabricObject, bounds: ViewportBounds): boolean {
+    const rect = object.getBoundingRect();
+    return !(
+      rect.left + rect.width < bounds.left ||
+      rect.left > bounds.right ||
+      rect.top + rect.height < bounds.top ||
+      rect.top > bounds.bottom
+    );
+  }
+
+  refreshViewportVisibility(): void {
+    const bounds = this.getViewportBounds();
+    if (!bounds) {
+      return;
+    }
+    this.groups.forEach((group) => {
+      const visible = this.isObjectVisibleInViewport(group, bounds);
+      if (group.visible !== visible) {
+        group.set('visible', visible);
+        group.set('dirty', true);
+      }
+    });
   }
 
   private sectionLineNeedsRerender(previousSectionLine: SectionLine | undefined, nextSectionLine: SectionLine): boolean {
@@ -320,6 +374,7 @@ export class SectionLineRenderer {
       return;
     }
 
+    this.refreshViewportVisibility();
     this.syncSectionLineVisualState();
     this.canvas.requestRenderAll();
   }
@@ -337,8 +392,6 @@ export class SectionLineRenderer {
   }
 
   renderPreview(startPoint: Point2D, currentPoint: Point2D, direction: 1 | -1, label: string): void {
-    this.clearPreview();
-
     const start = toCanvasPoint(startPoint);
     const end = toCanvasPoint(currentPoint);
     const color = DEFAULT_SECTION_LINE_COLOR;
@@ -352,45 +405,81 @@ export class SectionLineRenderer {
       y: (start.y + end.y) / 2,
     };
 
-    const previewLine = new fabric.Line([start.x, start.y, end.x, end.y], {
-      stroke: color,
-      strokeWidth: 2,
-      strokeDashArray: [8, 6],
-      selectable: false,
-      evented: false,
-      opacity: 0.9,
-    });
-    const previewArrow = this.createArrow({
+    const arrowTip = {
       x: midpoint.x + normal.x * 24,
       y: midpoint.y + normal.y * 24,
-    }, normal, color);
-    const previewLabel = new fabric.Text(label, {
-      left: midpoint.x + normal.x * 36,
-      top: midpoint.y + normal.y * 36,
-      fontSize: 11,
-      fill: color,
-      fontFamily: 'Arial',
-      fontWeight: 'bold',
-      originX: 'center',
-      originY: 'center',
-      selectable: false,
-      evented: false,
-    });
+    };
+    const labelPoint = {
+      x: midpoint.x + normal.x * 36,
+      y: midpoint.y + normal.y * 36,
+    };
 
-    this.previewObjects = [previewLine, previewArrow, previewLabel];
-    this.previewObjects.forEach((object) => this.canvas.add(object));
+    let previewLine = this.previewObjects[0] as fabric.Line | undefined;
+    let previewArrow = this.previewObjects[1] as fabric.Polygon | undefined;
+    let previewLabel = this.previewObjects[2] as fabric.Text | undefined;
+
+    if (!previewLine || !previewArrow || !previewLabel) {
+      previewLine = new fabric.Line([start.x, start.y, end.x, end.y], {
+        stroke: color,
+        strokeWidth: 2,
+        strokeDashArray: [8, 6],
+        selectable: false,
+        evented: false,
+        opacity: 0.9,
+      });
+      previewArrow = this.createArrow(arrowTip, normal, color);
+      previewLabel = new fabric.Text(label, {
+        left: labelPoint.x,
+        top: labelPoint.y,
+        fontSize: 11,
+        fill: color,
+        fontFamily: 'Arial',
+        fontWeight: 'bold',
+        originX: 'center',
+        originY: 'center',
+        selectable: false,
+        evented: false,
+      });
+      this.previewObjects = [previewLine, previewArrow, previewLabel];
+      this.previewObjects.forEach((object) => this.canvas.add(object));
+    }
+
+    previewLine.set({
+      x1: start.x,
+      y1: start.y,
+      x2: end.x,
+      y2: end.y,
+      visible: true,
+    });
+    previewArrow.set({
+      points: arrowPoints(arrowTip, normal),
+      visible: true,
+    });
+    previewLabel.set({
+      left: labelPoint.x,
+      top: labelPoint.y,
+      text: label,
+      visible: true,
+    });
+    previewLine.setCoords();
+    previewArrow.setCoords();
+    previewLabel.setCoords();
+    this.previewObjects.forEach((object) => {
+      object.set('visible', true);
+      this.canvas.bringObjectToFront(object);
+    });
     this.canvas.requestRenderAll();
   }
 
   clearPreview(): void {
     if (this.previewObjects.length === 0) return;
-    this.previewObjects.forEach((object) => this.canvas.remove(object));
-    this.previewObjects = [];
+    this.previewObjects.forEach((object) => object.set('visible', false));
     this.canvas.requestRenderAll();
   }
 
   dispose(): void {
-    this.clearPreview();
+    this.previewObjects.forEach((object) => this.canvas.remove(object));
+    this.previewObjects = [];
     this.groups.forEach((group) => this.canvas.remove(group));
     this.groups.clear();
     this.sectionLineData.clear();

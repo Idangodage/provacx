@@ -305,6 +305,10 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
         ];
         canvas.setViewportTransform(viewportTransform);
         hideActiveSelectionChrome(canvas);
+        roomRendererRef.current?.refreshViewportVisibility();
+        dimensionRendererRef.current?.refreshViewportVisibility();
+        sectionLineRendererRef.current?.refreshViewportVisibility();
+        hvacRendererRef.current?.refreshViewportVisibility();
         canvas.requestRenderAll();
         zoomRef.current = viewportZoom;
         panOffsetRef.current = panOffset;
@@ -327,8 +331,24 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
                 dimRenderer.setViewportZoom(currentZoom);
                 dimRenderer.updateZoomVisuals();
             }
+            roomRendererRef.current?.refreshViewportVisibility();
+            dimensionRendererRef.current?.refreshViewportVisibility();
+            sectionLineRendererRef.current?.refreshViewportVisibility();
+            hvacRendererRef.current?.refreshViewportVisibility();
         }, 150);
-    }, [viewportZoom, panOffset, wallRenderer, fabricRef, roomRendererRef, dimensionRendererRef, wheelRafId, zoomRef, panOffsetRef]);
+    }, [
+        viewportZoom,
+        panOffset,
+        wallRenderer,
+        fabricRef,
+        roomRendererRef,
+        dimensionRendererRef,
+        sectionLineRendererRef,
+        hvacRendererRef,
+        wheelRafId,
+        zoomRef,
+        panOffsetRef,
+    ]);
 
     useEffect(() => {
         if (tool === 'select') {
@@ -841,9 +861,34 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
         const endEdge = hostOpening.position + hostOpening.width / 2;
         const handleSizePx = OPENING_RESIZE_HANDLE_SIZE_PX / Math.max(currentZoom, 0.01);
         const strokeW = 2 / Math.max(currentZoom, 0.01);
+        const setHandleGeometry = (
+            handle: fabric.Object & {
+                openingResizeSide?: 'start' | 'end';
+            },
+            side: 'start' | 'end',
+            edgeAlongWallMm: number,
+        ) => {
+            const pointMm = {
+                x: hostWall.startPoint.x + direction.x * edgeAlongWallMm,
+                y: hostWall.startPoint.y + direction.y * edgeAlongWallMm,
+            };
+            const angle = side === 'start' ? angleDeg + 270 : angleDeg + 90;
+            handle.set({
+                left: pointMm.x * MM_TO_PX,
+                top: pointMm.y * MM_TO_PX,
+                width: handleSizePx,
+                height: handleSizePx,
+                angle,
+                strokeWidth: strokeW,
+                visible: true,
+            });
+            handle.openingResizeSide = side;
+            handle.setCoords();
+            canvas.bringObjectToFront(handle);
+        };
 
-        // Fast path: if only zoom changed and handles already exist for the
-        // same opening, just update their size/stroke in place.
+        // Fast path: if the same opening is still selected, keep the existing
+        // triangles and update their geometry in place instead of recreating them.
         const ctx = resizeHandleContextRef.current;
         if (
             ctx &&
@@ -851,10 +896,11 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
             ctx.wallId === hostWall.id &&
             openingResizeHandlesRef.current.length === 2
         ) {
-            for (const handle of openingResizeHandlesRef.current) {
-                handle.set({ width: handleSizePx, height: handleSizePx, strokeWidth: strokeW });
-                handle.setCoords();
-            }
+            const [startHandle, endHandle] = openingResizeHandlesRef.current as Array<
+                fabric.Object & { openingResizeSide?: 'start' | 'end' }
+            >;
+            setHandleGeometry(startHandle, 'start', startEdge);
+            setHandleGeometry(endHandle, 'end', endEdge);
             resizeHandleContextRef.current = { openingId: selectedId, wallId: hostWall.id, zoom: currentZoom };
             canvas.requestRenderAll();
             return;
@@ -864,17 +910,12 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
         clearOpeningResizeHandles();
 
         const createHandle = (side: 'start' | 'end', edgeAlongWallMm: number) => {
-            const pointMm = {
-                x: hostWall.startPoint.x + direction.x * edgeAlongWallMm,
-                y: hostWall.startPoint.y + direction.y * edgeAlongWallMm,
-            };
-            const angle = side === 'start' ? angleDeg + 270 : angleDeg + 90;
             const handle = new fabric.Triangle({
-                left: pointMm.x * MM_TO_PX,
-                top: pointMm.y * MM_TO_PX,
+                left: 0,
+                top: 0,
                 width: handleSizePx,
                 height: handleSizePx,
-                angle,
+                angle: 0,
                 fill: OPENING_RESIZE_HANDLE_COLOR,
                 stroke: '#ffffff',
                 strokeWidth: strokeW,
@@ -903,7 +944,7 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
             typedHandle.openingResizeSide = side;
             typedHandle.isOpeningResizeHandle = true;
             canvas.add(handle);
-            canvas.bringObjectToFront(handle);
+            setHandleGeometry(typedHandle, side, edgeAlongWallMm);
             openingResizeHandlesRef.current.push(handle);
         };
 
