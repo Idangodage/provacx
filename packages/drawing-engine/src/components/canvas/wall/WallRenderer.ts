@@ -38,7 +38,6 @@ import type { Point2D, Room, Wall, WallColorMode, WallMaterial, JoinData, Symbol
 import { WALL_MATERIAL_COLORS } from '../../../types/wall';
 import { endDragPerfTimer, startDragPerfTimer } from '../perf/dragPerf';
 import { MM_TO_PX } from '../scale';
-import { SpatialHash, type SpatialHashItem } from '../spatial-hash';
 
 import { renderWallOpenings } from './OpeningRenderer';
 import {
@@ -238,14 +237,6 @@ export class WallRenderer {
 
   // [NEW] Track dirty walls for incremental updates
   private dirtyWallIds: Set<string> = new Set();
-
-  // [PERF] Spatial hash for O(1) hit testing instead of O(n) linear scan
-  private wallSpatialHash: SpatialHash<string> = new SpatialHash<string>(50);
-  private spatialHashDirty: boolean = true;
-
-  // [PERF] Cache last hit-test result to avoid redundant work on same position
-  private lastHitTestPoint: Point2D | null = null;
-  private lastHitTestResult: string | null = null;
   private dragOptimizedMode: boolean = false;
 
   constructor(canvas: fabric.Canvas, pageHeight: number = 3000) {
@@ -430,30 +421,6 @@ export class WallRenderer {
              wallLeft - margin > viewRight ||
              wallBottom + margin < viewTop ||
              wallTop - margin > viewBottom);
-  }
-
-  // ─── [PERF] Spatial Hash for Hit Testing ────────────────────────────────
-
-  /**
-   * Rebuild spatial hash from current wallInteractionPolygons.
-   * Cell size = 50mm which gives good bucket distribution for typical walls.
-   */
-  private rebuildSpatialHash(): void {
-    if (!this.spatialHashDirty) return;
-    const items: SpatialHashItem<string>[] = [];
-    this.wallInteractionPolygons.forEach((polygon, wallId) => {
-      if (polygon.length < 3) return;
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      for (const p of polygon) {
-        if (p.x < minX) minX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y > maxY) maxY = p.y;
-      }
-      items.push({ id: wallId, value: wallId, minX, minY, maxX, maxY });
-    });
-    this.wallSpatialHash.rebuild(items);
-    this.spatialHashDirty = false;
   }
 
   // ─── Public Setters ─────────────────────────────────────────────────────
@@ -903,7 +870,6 @@ export class WallRenderer {
       wall.id,
       interactionVertices.map((vertex) => ({ ...vertex }))
     );
-    this.spatialHashDirty = true;
     const canvasVertices = interactionVertices.map((v) => this.toCanvasPoint(v));
 
     const dragEdgeStrokeWidth = this.toSceneSize(VISUAL_CONFIG.wallStrokeWidth);
@@ -1983,7 +1949,6 @@ export class WallRenderer {
     }
     this.removeControlPoints(wallId);
     this.wallInteractionPolygons.delete(wallId);
-    this.spatialHashDirty = true;
     this.wallData.delete(wallId);
     this.selectedWallIds.delete(wallId);
     if (this.hoveredWallId === wallId) this.hoveredWallId = null;
@@ -2023,15 +1988,6 @@ export class WallRenderer {
       const componentWallsByWallId = this.rebuildMergedComponents(walls);
 
       for (const wall of walls) {
-        // [PERF] Viewport culling: skip full rendering for walls outside viewport
-        if (!this.isWallInViewport(wall)) {
-          // Still register interaction polygon for hit-testing
-          let interactionVertices = computeWallPolygon(wall, joinsMap.get(wall.id) || []);
-          interactionVertices = validateWallPolygon(interactionVertices, wall);
-          this.wallInteractionPolygons.set(wall.id, interactionVertices.map((v) => ({ ...v })));
-          this.spatialHashDirty = true;
-          continue;
-        }
         const joins = joinsMap.get(wall.id) || []; // [PATCH APPLIED]
         this.renderWall(wall, joins, componentWallsByWallId.get(wall.id));
       }
@@ -2092,25 +2048,14 @@ export class WallRenderer {
         this.removeWall(wallId);
       }
 
-      // [PERF] Skip expensive union geometry rebuild during drag when many walls
-      // are dirty — turf.js boolean ops are O(n²) and kill interactive performance.
-      // Only rebuild merged components if few walls changed (typical single-wall drag).
-      const skipMergedRebuild = this.dragOptimizedMode || dirtyWallIds.size > 10;
-      const componentWallsByWallId = skipMergedRebuild
-        ? new Map<string, Wall[]>()
-        : this.rebuildMergedComponents(walls);
-      if (skipMergedRebuild && this.componentObjects.length > 0) {
-        this.clearMergedComponents();
-      }
+      const componentWallsByWallId = this.rebuildMergedComponents(walls);
       const rerenderWallIds = new Set<string>();
 
       dirtyWallIds.forEach((wallId) => {
-        if (!skipMergedRebuild) {
-          const componentWalls = componentWallsByWallId.get(wallId);
-          if (componentWalls && componentWalls.length > 0) {
-            componentWalls.forEach((componentWall) => rerenderWallIds.add(componentWall.id));
-            return;
-          }
+        const componentWalls = componentWallsByWallId.get(wallId);
+        if (componentWalls && componentWalls.length > 0) {
+          componentWalls.forEach((componentWall) => rerenderWallIds.add(componentWall.id));
+          return;
         }
         if (nextWallsById.has(wallId)) {
           rerenderWallIds.add(wallId);
@@ -2129,22 +2074,6 @@ export class WallRenderer {
       rerenderWallIds.forEach((wallId) => {
         const wall = nextWallsById.get(wallId);
         if (!wall) return;
-        // [PERF] Skip full re-render for off-screen walls during interactive drag
-        if (!this.isWallInViewport(wall)) {
-          // Update interaction polygon only
-          const joins = joinsMap.get(wallId) || [];
-          let interactionVertices = computeWallPolygon(wall, joins);
-          interactionVertices = validateWallPolygon(interactionVertices, wall);
-          this.wallInteractionPolygons.set(wallId, interactionVertices.map((v) => ({ ...v })));
-          this.spatialHashDirty = true;
-          // Remove existing canvas object if it was previously rendered
-          const existing = this.wallObjects.get(wallId);
-          if (existing) {
-            this.canvas.remove(existing);
-            this.wallObjects.delete(wallId);
-          }
-          return;
-        }
         const joins = joinsMap.get(wallId) || [];
         this.renderWall(wall, joins, componentWallsByWallId.get(wallId));
       });
@@ -2286,28 +2215,12 @@ export class WallRenderer {
   }
 
   getWallIdAtPoint(point: Point2D): string | null {
-    // [PERF] Short-circuit if querying same point as last time (common during rapid mouse moves)
-    if (this.lastHitTestPoint && !this.spatialHashDirty &&
-        Math.abs(point.x - this.lastHitTestPoint.x) < 0.5 &&
-        Math.abs(point.y - this.lastHitTestPoint.y) < 0.5) {
-      return this.lastHitTestResult;
-    }
-
-    // [PERF] Use spatial hash for O(1) candidate lookup instead of O(n) full scan
-    this.rebuildSpatialHash();
-
-    // Query a radius around the point — covers the thickest possible wall
-    const maxThickness = 30; // reasonable max wall thickness in mm
-    const candidates = this.wallSpatialHash.queryRadius(point, maxThickness);
-
     let bestWallId: string | null = null;
     let bestDistance = Number.POSITIVE_INFINITY;
 
-    for (const candidate of candidates) {
-      const wallId = candidate.value;
-      const polygon = this.wallInteractionPolygons.get(wallId);
-      if (!polygon || polygon.length < 3 || !this.pointInPolygon(point, polygon)) {
-        continue;
+    this.wallInteractionPolygons.forEach((polygon, wallId) => {
+      if (polygon.length < 3 || !this.pointInPolygon(point, polygon)) {
+        return;
       }
 
       const wall = this.wallData.get(wallId);
@@ -2317,17 +2230,15 @@ export class WallRenderer {
       if (wall) {
         const maxSelectableDistance = Math.max(6, wall.thickness * 0.65);
         if (distance > maxSelectableDistance) {
-          continue;
+          return;
         }
       }
       if (distance < bestDistance) {
         bestDistance = distance;
         bestWallId = wallId;
       }
-    }
+    });
 
-    this.lastHitTestPoint = { x: point.x, y: point.y };
-    this.lastHitTestResult = bestWallId;
     return bestWallId;
   }
 
@@ -2342,7 +2253,6 @@ export class WallRenderer {
     this.wallObjects.forEach((obj) => this.canvas.remove(obj));
     this.wallObjects.clear();
     this.wallInteractionPolygons.clear();
-    this.spatialHashDirty = true;
     this.wallData.clear();
     this.rooms = [];
     this.selectedWallIds.clear();

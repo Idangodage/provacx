@@ -965,10 +965,8 @@ export function computeWallUnionRenderDataCached(
         }
       }
 
-      // [PERF] Always prefer partial recompute — turf.js full recompute is O(n²)
-      // and kills performance with 100+ walls. Only fall through to full recompute
-      // if every single component is dirty (e.g. wall set changed).
-      if (dirtyComponentIds.size < cached.renderData.components.length) {
+      // If fewer than half of components are dirty, do a partial recompute
+      if (dirtyComponentIds.size < cached.renderData.components.length / 2) {
         // Recompute joins for the full set (needed for correct geometry)
         let joinsMap: Map<string, JoinData[]>;
         let shadowedWallIds: Set<string>;
