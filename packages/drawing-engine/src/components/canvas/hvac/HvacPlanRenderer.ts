@@ -22,6 +22,10 @@ type HvacGroup = fabric.Group & {
   hvacElementId?: string;
 };
 
+interface SyncHvacElementsOptions {
+  force?: boolean;
+}
+
 function toCanvas(point: Point2D): Point2D {
   return { x: point.x * MM_TO_PX, y: point.y * MM_TO_PX };
 }
@@ -29,6 +33,7 @@ function toCanvas(point: Point2D): Point2D {
 export class HvacPlanRenderer {
   private canvas: fabric.Canvas;
   private groups = new Map<string, HvacGroup>();
+  private hvacData = new Map<string, HvacElement>();
   private selectedIds = new Set<string>();
   private hoveredId: string | null = null;
 
@@ -47,13 +52,42 @@ export class HvacPlanRenderer {
 
   private removeElement(id: string): void {
     const group = this.groups.get(id);
-    if (!group) return;
-    this.canvas.remove(group);
-    this.groups.delete(id);
+    if (group) {
+      this.canvas.remove(group);
+      this.groups.delete(id);
+    }
+    this.hvacData.delete(id);
+    this.selectedIds.delete(id);
+    if (this.hoveredId === id) {
+      this.hoveredId = null;
+    }
+  }
+
+  private hvacElementNeedsRerender(previousElement: HvacElement | undefined, nextElement: HvacElement): boolean {
+    return previousElement !== nextElement;
+  }
+
+  private syncHvacVisualState(): void {
+    this.groups.forEach((group, id) => {
+      const selectionHalo = group
+        .getObjects()
+        .find((obj) => (obj as NamedObject).name === 'hvac-selection');
+      const hoverHalo = group
+        .getObjects()
+        .find((obj) => (obj as NamedObject).name === 'hvac-hover');
+      if (selectionHalo) {
+        selectionHalo.set('visible', this.selectedIds.has(id));
+      }
+      if (hoverHalo) {
+        hoverHalo.set('visible', this.hoveredId === id && !this.selectedIds.has(id));
+      }
+      group.set('dirty', true);
+    });
   }
 
   renderElement(element: HvacElement): void {
     this.removeElement(element.id);
+    this.hvacData.set(element.id, element);
 
     const pos = toCanvas(element.position);
     const w = element.width * MM_TO_PX;
@@ -188,6 +222,21 @@ export class HvacPlanRenderer {
     this.annotate(selectionHalo, element.id, 'hvac-selection');
     objects.push(selectionHalo);
 
+    const hoverHalo = new fabric.Rect({
+      left: pos.x - 2,
+      top: pos.y - 2,
+      width: w + 4,
+      height: d + 4,
+      fill: 'transparent',
+      stroke: '#059669',
+      strokeWidth: 1.5,
+      selectable: false,
+      evented: false,
+      visible: this.hoveredId === element.id && !this.selectedIds.has(element.id),
+    });
+    this.annotate(hoverHalo, element.id, 'hvac-hover');
+    objects.push(hoverHalo);
+
     const group = new fabric.Group(objects, {
       selectable: true,
       evented: true,
@@ -206,32 +255,54 @@ export class HvacPlanRenderer {
   }
 
   renderAll(elements: HvacElement[]): void {
-    this.groups.forEach((group) => this.canvas.remove(group));
-    this.groups.clear();
-    elements.forEach((el) => this.renderElement(el));
+    this.syncElements(elements, { force: true });
+  }
+
+  syncElements(elements: HvacElement[], options: SyncHvacElementsOptions = {}): void {
+    const { force = false } = options;
+    const nextElementIds = new Set(elements.map((element) => element.id));
+    let changed = force;
+
+    this.hvacData.forEach((_, id) => {
+      if (!nextElementIds.has(id)) {
+        this.removeElement(id);
+        changed = true;
+      }
+    });
+
+    elements.forEach((element) => {
+      const previousElement = this.hvacData.get(element.id);
+      const hasGroup = this.groups.has(element.id);
+      if (!force && hasGroup && !this.hvacElementNeedsRerender(previousElement, element)) {
+        return;
+      }
+      this.renderElement(element);
+      changed = true;
+    });
+
+    if (!changed) {
+      return;
+    }
+
+    this.syncHvacVisualState();
     this.canvas.requestRenderAll();
   }
 
   setSelectedElements(ids: string[]): void {
     this.selectedIds = new Set(ids);
-    this.groups.forEach((group, id) => {
-      const halo = group
-        .getObjects()
-        .find((obj) => (obj as NamedObject).name === 'hvac-selection');
-      if (halo) {
-        halo.set('visible', this.selectedIds.has(id));
-      }
-      group.set('dirty', true);
-    });
+    this.syncHvacVisualState();
     this.canvas.requestRenderAll();
   }
 
   setHoveredElement(id: string | null): void {
     this.hoveredId = id;
+    this.syncHvacVisualState();
+    this.canvas.requestRenderAll();
   }
 
   dispose(): void {
     this.groups.forEach((group) => this.canvas.remove(group));
     this.groups.clear();
+    this.hvacData.clear();
   }
 }

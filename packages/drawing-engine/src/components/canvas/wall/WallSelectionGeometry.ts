@@ -24,7 +24,7 @@
  * ──────────────────────────────────────────────────────
  */
 
-import * as turf from '@turf/turf';
+import { featureCollection, multiPolygon, polygon, union } from '@turf/turf';
 
 import type { JoinData, Point2D, Room, Wall } from '../../../types';
 import { GeometryEngine } from '../../../utils/geometry-engine';
@@ -153,9 +153,9 @@ interface RoomInnerRingCandidate {
   priority: number;
 }
 
-type PolygonFeature = ReturnType<typeof turf.polygon>;
+type PolygonFeature = ReturnType<typeof polygon>;
 type PolygonGeometry = PolygonFeature['geometry'];
-type MultiPolygonGeometry = ReturnType<typeof turf.multiPolygon>['geometry'];
+type MultiPolygonGeometry = ReturnType<typeof multiPolygon>['geometry'];
 
 /**
  * [NEW] Compute signed area of a polygon ring.
@@ -1633,7 +1633,7 @@ function makePolygonFeatureFromRing(vertices: Point2D[]): PolygonFeature | null 
   const ring = normalizeRing(vertices);
   if (ring.length < 3) return null;
   try {
-    return turf.polygon([closeRing(ring)]);
+    return polygon([closeRing(ring)]);
   } catch {
     return null;
   }
@@ -1658,7 +1658,7 @@ function unionFeaturesPolygons(features: PolygonFeature[]): Point2D[][][] {
   }
 
   try {
-    const merged = turf.union(turf.featureCollection(features));
+    const merged = union(featureCollection(features));
     if (merged && (merged.geometry.type === 'Polygon' || merged.geometry.type === 'MultiPolygon')) {
       return extractPolygonsFromGeometry(merged.geometry);
     }

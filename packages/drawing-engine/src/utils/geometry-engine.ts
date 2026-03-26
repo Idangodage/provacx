@@ -7,7 +7,19 @@
  * CAD behavior deterministic and geodesic-free.
  */
 
-import * as turf from '@turf/turf';
+import {
+  booleanPointInPolygon,
+  centroid as turfCentroid,
+  featureCollection as turfFeatureCollection,
+  kinks as turfKinks,
+  lineIntersect,
+  lineOverlap,
+  lineString as turfLineString,
+  nearestPoint,
+  nearestPointOnLine,
+  point as turfPoint,
+  polygon as turfPolygon,
+} from '@turf/turf';
 
 import type { Point2D, Room, Wall } from '../types';
 
@@ -101,11 +113,11 @@ export class GeometryEngine {
   static nearestPoint(target: Point2D, candidates: Point2D[]): Point2D {
     if (candidates.length === 0) return { ...target };
     try {
-      const targetPt = turf.point([target.x, target.y]);
-      const points = turf.featureCollection(
-        candidates.map((candidate) => turf.point([candidate.x, candidate.y]))
+      const targetPt = turfPoint([target.x, target.y]);
+      const points = turfFeatureCollection(
+        candidates.map((candidate) => turfPoint([candidate.x, candidate.y]))
       );
-      const nearest = turf.nearestPoint(targetPt, points);
+      const nearest = nearestPoint(targetPt, points);
       return {
         x: nearest.geometry.coordinates[0],
         y: nearest.geometry.coordinates[1],
@@ -124,8 +136,8 @@ export class GeometryEngine {
     }
   }
 
-  static wallToLineString(wall: WallLike): ReturnType<typeof turf.lineString> {
-    return turf.lineString([
+  static wallToLineString(wall: WallLike): ReturnType<typeof turfLineString> {
+    return turfLineString([
       [wall.startPoint.x, wall.startPoint.y],
       [wall.endPoint.x, wall.endPoint.y],
     ]);
@@ -134,7 +146,7 @@ export class GeometryEngine {
   static findIntersections(wall1: WallLike, wall2: WallLike): Point2D[] {
     const line1 = this.wallToLineString(wall1);
     const line2 = this.wallToLineString(wall2);
-    const intersections = turf.lineIntersect(line1, line2);
+    const intersections = lineIntersect(line1, line2);
     return dedupePoints(
       intersections.features.map((feature) => ({
         x: feature.geometry.coordinates[0],
@@ -145,9 +157,9 @@ export class GeometryEngine {
 
   static snapToWall(point: Point2D, wall: WallLike): Point2D {
     const line = this.wallToLineString(wall);
-    const target = turf.point([point.x, point.y]);
+    const target = turfPoint([point.x, point.y]);
     try {
-      const snapped = turf.nearestPointOnLine(line, target);
+      const snapped = nearestPointOnLine(line, target);
       return {
         x: snapped.geometry.coordinates[0],
         y: snapped.geometry.coordinates[1],
@@ -166,7 +178,7 @@ export class GeometryEngine {
     const line1 = this.wallToLineString(wall1);
     const line2 = this.wallToLineString(wall2);
     try {
-      const overlap = turf.lineOverlap(line1, line2, { tolerance: 0.00001 });
+      const overlap = lineOverlap(line1, line2, { tolerance: 0.00001 });
       return overlap.features.length > 0;
     } catch {
       return segmentsIntersect(
@@ -178,17 +190,17 @@ export class GeometryEngine {
     }
   }
 
-  static roomToPolygon(room: RoomLike): ReturnType<typeof turf.polygon> {
+  static roomToPolygon(room: RoomLike): ReturnType<typeof turfPolygon> {
     const ring = closeRing(room.vertices);
     if (ring.length < 4) {
-      return turf.polygon([[
+      return turfPolygon([[
         [0, 0],
         [1, 0],
         [1, 1],
         [0, 0],
       ]]);
     }
-    return turf.polygon([ring]);
+    return turfPolygon([ring]);
   }
 
   static calculateSignedArea(vertices: Point2D[]): number {
@@ -213,10 +225,10 @@ export class GeometryEngine {
     const loop = normalizeLoop(room.vertices);
     if (loop.length === 0) return { x: 0, y: 0 };
     try {
-      const centroid = turf.centroid(this.roomToPolygon({ vertices: loop }));
+      const roomCentroid = turfCentroid(this.roomToPolygon({ vertices: loop }));
       return {
-        x: centroid.geometry.coordinates[0],
-        y: centroid.geometry.coordinates[1],
+        x: roomCentroid.geometry.coordinates[0],
+        y: roomCentroid.geometry.coordinates[1],
       };
     } catch {
       return calculateCentroid(loop);
@@ -227,7 +239,7 @@ export class GeometryEngine {
     const loop = normalizeLoop(room.vertices);
     if (loop.length < 3) return false;
     try {
-      return turf.booleanPointInPolygon(turf.point([point.x, point.y]), this.roomToPolygon({ vertices: loop }));
+      return booleanPointInPolygon(turfPoint([point.x, point.y]), this.roomToPolygon({ vertices: loop }));
     } catch {
       return isPointInPolygon(point, loop);
     }
@@ -237,8 +249,8 @@ export class GeometryEngine {
     const loop = normalizeLoop(vertices);
     if (loop.length < 4) return false;
     try {
-      const kinks = turf.kinks(this.roomToPolygon({ vertices: loop }));
-      return kinks.features.length > 0;
+      const polygonKinks = turfKinks(this.roomToPolygon({ vertices: loop }));
+      return polygonKinks.features.length > 0;
     } catch {
       for (let i = 0; i < loop.length; i += 1) {
         const a1 = loop[i];

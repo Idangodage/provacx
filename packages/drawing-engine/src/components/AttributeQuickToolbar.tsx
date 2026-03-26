@@ -5,6 +5,7 @@
 'use client';
 
 import React, { useMemo } from 'react';
+import { shallow } from 'zustand/shallow';
 
 import {
   DEFAULT_ARCHITECTURAL_MATERIALS,
@@ -60,7 +61,17 @@ export function AttributeQuickToolbar({
     setWallPreviewMaterial,
     updateWall,
     updateWall3DAttributes,
-  } = useSmartDrawingStore();
+  } = useSmartDrawingStore((state) => ({
+    activeTool: state.activeTool,
+    selectedElementIds: state.selectedElementIds,
+    walls: state.walls,
+    wallSettings: state.wallSettings,
+    setWallSettings: state.setWallSettings,
+    setWallPreviewThickness: state.setWallPreviewThickness,
+    setWallPreviewMaterial: state.setWallPreviewMaterial,
+    updateWall: state.updateWall,
+    updateWall3DAttributes: state.updateWall3DAttributes,
+  }), shallow);
 
   const selectedWall = useMemo(() => {
     if (selectedElementIds.length !== 1) return null;

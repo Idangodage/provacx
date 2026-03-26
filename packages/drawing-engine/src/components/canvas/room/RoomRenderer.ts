@@ -38,6 +38,10 @@ const LABEL_SELECTED_MARGIN_Y = 16;
 const LABEL_SELECTED_INSET = 6;
 const LABEL_FIT_STEPS = 18;
 
+interface SyncRoomsOptions {
+  force?: boolean;
+}
+
 function toCanvasPoint(point: Point2D): Point2D {
   return {
     x: point.x * MM_TO_PX,
@@ -114,12 +118,12 @@ export class RoomRenderer {
 
   setShowTemperatureIcons(show: boolean): void {
     this.showTemperatureIcons = show;
-    this.renderAllRooms(Array.from(this.roomData.values()));
+    this.syncRooms(Array.from(this.roomData.values()), { force: true });
   }
 
   setShowVentilationBadges(show: boolean): void {
     this.showVentilationBadges = show;
-    this.renderAllRooms(Array.from(this.roomData.values()));
+    this.syncRooms(Array.from(this.roomData.values()), { force: true });
   }
 
   setViewportZoom(zoom: number): void {
@@ -191,10 +195,60 @@ export class RoomRenderer {
 
   setWallContext(walls: Wall[]): void {
     this.wallData = new Map(walls.map((wall) => [wall.id, wall]));
+    this.syncRoomVisualState();
+    this.canvas.requestRenderAll();
+  }
+
+  private roomNeedsRerender(previousRoom: Room | undefined, nextRoom: Room): boolean {
+    return previousRoom !== nextRoom;
+  }
+
+  private syncRoomVisualState(): void {
+    this.roomGroups.forEach((group, roomId) => {
+      const selected = this.selectedRoomIds.has(roomId);
+      const selection = group
+        .getObjects()
+        .find((object) => (object as NamedObject).name === 'selectionOutline');
+      if (selection) {
+        selection.set('visible', selected);
+      }
+
+      const hover = group
+        .getObjects()
+        .find((object) => (object as NamedObject).name === 'hoverOutline');
+      if (hover) {
+        hover.set('visible', !selected && this.hoveredRoomId === roomId);
+      }
+
+      group.set('dirty', true);
+    });
+
     this.roomControlGroups.forEach((group, roomId) => {
       this.updateRoomControlGroupVisibility(group, roomId);
     });
-    this.canvas.requestRenderAll();
+
+    this.roomLabelGroups.forEach((group) => {
+      this.applyZoomScaleToLabelGroup(group);
+      group.set('dirty', true);
+    });
+
+    if (this.activeDragRoomId) {
+      const labelGroup = this.roomLabelGroups.get(this.activeDragRoomId);
+      if (labelGroup) {
+        this.canvas.bringObjectToFront(labelGroup);
+      }
+    }
+
+    if (this.persistentControlRoomId) {
+      const controlGroup = this.roomControlGroups.get(this.persistentControlRoomId);
+      if (controlGroup) {
+        this.canvas.bringObjectToFront(controlGroup);
+      }
+      const labelGroup = this.roomLabelGroups.get(this.persistentControlRoomId);
+      if (labelGroup) {
+        this.canvas.bringObjectToFront(labelGroup);
+      }
+    }
   }
 
   private doesLabelRectFitRoom(
@@ -929,105 +983,64 @@ export class RoomRenderer {
   }
 
   renderAllRooms(rooms: Room[]): void {
-    this.roomGroups.forEach((group) => {
-      this.canvas.remove(group);
-    });
-    this.roomControlGroups.forEach((group) => {
-      this.canvas.remove(group);
-    });
-    this.roomLabelGroups.forEach((group) => {
-      this.canvas.remove(group);
-    });
-    this.roomGroups.clear();
-    this.roomControlGroups.clear();
-    this.roomLabelGroups.clear();
-    this.roomData.clear();
+    this.syncRooms(rooms, { force: true });
+  }
 
-    rooms.forEach((room) => this.renderRoom(room));
+  syncRooms(rooms: Room[], options: SyncRoomsOptions = {}): void {
+    const { force = false } = options;
+    const nextRoomIds = new Set(rooms.map((room) => room.id));
+    let changed = force;
+
+    this.roomData.forEach((_, roomId) => {
+      if (!nextRoomIds.has(roomId)) {
+        this.removeRoom(roomId);
+        changed = true;
+      }
+    });
+
+    rooms.forEach((room) => {
+      const previousRoom = this.roomData.get(room.id);
+      const hasRequiredGroups =
+        this.roomGroups.has(room.id) &&
+        this.roomControlGroups.has(room.id) &&
+        (!room.showLabel || this.roomLabelGroups.has(room.id));
+      if (!force && hasRequiredGroups && !this.roomNeedsRerender(previousRoom, room)) {
+        return;
+      }
+      this.renderRoom(room);
+      changed = true;
+    });
+
+    if (!changed) {
+      return;
+    }
+
     this.applyLabelZoomScaling();
-    this.setSelectedRooms([...this.selectedRoomIds]);
+    this.syncRoomVisualState();
     this.canvas.requestRenderAll();
   }
 
   setSelectedRooms(roomIds: string[]): void {
     this.selectedRoomIds = new Set(roomIds);
-    this.roomGroups.forEach((group, roomId) => {
-      const selected = this.selectedRoomIds.has(roomId);
-      const selection = group
-        .getObjects()
-        .find((object) => (object as NamedObject).name === 'selectionOutline');
-      if (selection) {
-        selection.set('visible', selected);
-      }
-
-      const hover = group
-        .getObjects()
-        .find((object) => (object as NamedObject).name === 'hoverOutline');
-      if (hover) {
-        hover.set(
-          'visible',
-          !selected && this.hoveredRoomId === roomId
-        );
-      }
-
-      group.set('dirty', true);
-    });
-    this.roomControlGroups.forEach((group, roomId) => {
-      this.updateRoomControlGroupVisibility(group, roomId);
-    });
-    this.roomLabelGroups.forEach((group) => {
-      this.applyZoomScaleToLabelGroup(group);
-      group.set('dirty', true);
-    });
+    this.syncRoomVisualState();
     this.canvas.requestRenderAll();
   }
 
   setActiveDragRoom(roomId: string | null): void {
     this.activeDragRoomId = roomId;
-    this.roomControlGroups.forEach((group, currentRoomId) => {
-      this.updateRoomControlGroupVisibility(group, currentRoomId);
-    });
-    if (roomId) {
-      const labelGroup = this.roomLabelGroups.get(roomId);
-      if (labelGroup) {
-        this.canvas.bringObjectToFront(labelGroup);
-      }
-    }
+    this.syncRoomVisualState();
     this.canvas.requestRenderAll();
   }
 
   setPersistentControlRoom(roomId: string | null): void {
     this.persistentControlRoomId = roomId;
-    this.roomControlGroups.forEach((group, currentRoomId) => {
-      this.updateRoomControlGroupVisibility(group, currentRoomId);
-    });
-    if (roomId) {
-      const controlGroup = this.roomControlGroups.get(roomId);
-      if (controlGroup) {
-        this.canvas.bringObjectToFront(controlGroup);
-      }
-      const labelGroup = this.roomLabelGroups.get(roomId);
-      if (labelGroup) {
-        this.canvas.bringObjectToFront(labelGroup);
-      }
-    }
+    this.syncRoomVisualState();
     this.canvas.requestRenderAll();
   }
 
   setHoveredRoom(roomId: string | null): void {
     this.hoveredRoomId = roomId;
-    this.roomGroups.forEach((group, currentId) => {
-      const hover = group
-        .getObjects()
-        .find((object) => (object as NamedObject).name === 'hoverOutline');
-      if (hover) {
-        hover.set(
-          'visible',
-          currentId === roomId && !this.selectedRoomIds.has(currentId)
-        );
-      }
-      group.set('dirty', true);
-    });
+    this.syncRoomVisualState();
     this.canvas.requestRenderAll();
   }
 
@@ -1070,6 +1083,12 @@ export class RoomRenderer {
     }
     this.roomData.delete(roomId);
     this.selectedRoomIds.delete(roomId);
+    if (this.activeDragRoomId === roomId) {
+      this.activeDragRoomId = null;
+    }
+    if (this.persistentControlRoomId === roomId) {
+      this.persistentControlRoomId = null;
+    }
     if (this.hoveredRoomId === roomId) {
       this.hoveredRoomId = null;
     }

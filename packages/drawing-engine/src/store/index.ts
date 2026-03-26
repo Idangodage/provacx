@@ -132,6 +132,14 @@ const INITIAL_ELEVATION_VIEWS = createStandardElevationViews(
   DEFAULT_ELEVATION_SETTINGS
 );
 
+function pointsEqual(left: Point2D, right: Point2D): boolean {
+  return left.x === right.x && left.y === right.y;
+}
+
+function stringArraysEqual(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
 function clearScheduledRoomDetection(): void {
   if (roomDetectionTimer) {
     clearTimeout(roomDetectionTimer);
@@ -1853,10 +1861,14 @@ export const useDrawingStore = create<DrawingState>()(
 
       setImportProgress: (progress) => set({ importProgress: progress }),
 
-      setProcessingStatus: (status, isProcessing) => set({
-        processingStatus: status,
-        isProcessing
-      }),
+      setProcessingStatus: (status, isProcessing) => set((state) => (
+        state.processingStatus === status && state.isProcessing === isProcessing
+          ? state
+          : {
+            processingStatus: status,
+            isProcessing,
+          }
+      )),
 
       clearImportedDrawing: () => set({
         importedDrawing: null,
@@ -3266,7 +3278,11 @@ export const useDrawingStore = create<DrawingState>()(
         ],
       })),
 
-      setHoveredElement: (id) => set({ hoveredElementId: id }),
+      setHoveredElement: (id) => set((state) => (
+        state.hoveredElementId === id
+          ? state
+          : { hoveredElementId: id }
+      )),
 
       deleteSelectedElements: () => {
         const {
@@ -3357,7 +3373,11 @@ export const useDrawingStore = create<DrawingState>()(
       },
 
       // Alias methods for backward compatibility
-      setSelectedIds: (ids) => set({ selectedElementIds: ids, selectedIds: ids }),
+      setSelectedIds: (ids) => set((state) => (
+        stringArraysEqual(state.selectedElementIds, ids)
+          ? state
+          : { selectedElementIds: ids, selectedIds: ids }
+      )),
       deleteSelected: () => get().deleteSelectedElements(),
       setTool: (tool) => set({ activeTool: tool, tool }),
       loadData: (data) => {
@@ -3375,12 +3395,24 @@ export const useDrawingStore = create<DrawingState>()(
       setActiveTool: (tool) => set({ activeTool: tool, tool }),
 
       // View Actions
-      setZoom: (zoom) => set({ zoom: Math.max(0.1, Math.min(10, zoom)) }),
-      setPanOffset: (offset) => set({ panOffset: offset }),
+      setZoom: (zoom) => set((state) => {
+        const nextZoom = Math.max(0.1, Math.min(10, zoom));
+        return state.zoom === nextZoom ? state : { zoom: nextZoom };
+      }),
+      setPanOffset: (offset) => set((state) => (
+        pointsEqual(state.panOffset, offset)
+          ? state
+          : { panOffset: offset }
+      )),
       setViewTransform: (zoom, offset) =>
-        set({
-          zoom: Math.max(0.1, Math.min(10, zoom)),
-          panOffset: offset,
+        set((state) => {
+          const nextZoom = Math.max(0.1, Math.min(10, zoom));
+          return state.zoom === nextZoom && pointsEqual(state.panOffset, offset)
+            ? state
+            : {
+              zoom: nextZoom,
+              panOffset: offset,
+            };
         }),
       setDisplayUnit: (unit) => set({ displayUnit: unit }),
       setGridSize: (size) => set({ gridSize: size }),

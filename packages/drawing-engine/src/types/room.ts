@@ -1,5 +1,5 @@
 /**
- * Smart room detection types for Konva-based room pipelines.
+ * Smart room detection types for legacy room pipelines.
  */
 
 export interface WallSegment {

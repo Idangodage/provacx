@@ -35,9 +35,7 @@
     "@provacx/shared": "workspace:*",
     "@turf/turf": "^7.3.4",
     "fabric": "^6.0.0",
-    "konva": "^10.2.0",
     "lucide-react": "^0.378.0",
-    "react-konva": "^18.2.14",
     "three": "^0.183.1",
     "zustand": "^4.5.2"
   },

@@ -20,6 +20,10 @@ type SectionGroup = fabric.Group & {
   sectionLineId?: string;
 };
 
+interface SyncSectionLinesOptions {
+  force?: boolean;
+}
+
 function toCanvasPoint(point: Point2D): Point2D {
   return {
     x: point.x * MM_TO_PX,
@@ -64,8 +68,11 @@ export class SectionLineRenderer {
   }
 
   setShowReferenceIndicators(show: boolean): void {
+    if (this.showReferenceIndicators === show) {
+      return;
+    }
     this.showReferenceIndicators = show;
-    this.renderAll(Array.from(this.sectionLineData.values()));
+    this.syncSectionLines(Array.from(this.sectionLineData.values()), { force: true });
   }
 
   private annotate(target: fabric.FabricObject, sectionLineId: string, name?: string): void {
@@ -106,9 +113,37 @@ export class SectionLineRenderer {
 
   private removeSectionLine(sectionLineId: string): void {
     const group = this.groups.get(sectionLineId);
-    if (!group) return;
-    this.canvas.remove(group);
-    this.groups.delete(sectionLineId);
+    if (group) {
+      this.canvas.remove(group);
+      this.groups.delete(sectionLineId);
+    }
+    this.sectionLineData.delete(sectionLineId);
+    this.selectedSectionLineIds.delete(sectionLineId);
+    if (this.hoveredSectionLineId === sectionLineId) {
+      this.hoveredSectionLineId = null;
+    }
+  }
+
+  private sectionLineNeedsRerender(previousSectionLine: SectionLine | undefined, nextSectionLine: SectionLine): boolean {
+    return previousSectionLine !== nextSectionLine;
+  }
+
+  private syncSectionLineVisualState(): void {
+    this.groups.forEach((group, sectionLineId) => {
+      const selection = group
+        .getObjects()
+        .find((object) => (object as NamedObject).name === 'section-line-selection');
+      const hover = group
+        .getObjects()
+        .find((object) => (object as NamedObject).name === 'section-line-hover');
+      if (selection) {
+        selection.set('visible', this.selectedSectionLineIds.has(sectionLineId));
+      }
+      if (hover) {
+        hover.set('visible', this.hoveredSectionLineId === sectionLineId && !this.selectedSectionLineIds.has(sectionLineId));
+      }
+      group.set('dirty', true);
+    });
   }
 
   renderSectionLine(sectionLine: SectionLine): void {
@@ -256,44 +291,48 @@ export class SectionLineRenderer {
   }
 
   renderAll(sectionLines: SectionLine[]): void {
-    this.groups.forEach((group) => this.canvas.remove(group));
-    this.groups.clear();
-    this.sectionLineData.clear();
+    this.syncSectionLines(sectionLines, { force: true });
+  }
 
-    sectionLines.forEach((sectionLine) => this.renderSectionLine(sectionLine));
+  syncSectionLines(sectionLines: SectionLine[], options: SyncSectionLinesOptions = {}): void {
+    const { force = false } = options;
+    const nextSectionLineIds = new Set(sectionLines.map((sectionLine) => sectionLine.id));
+    let changed = force;
+
+    this.sectionLineData.forEach((_, sectionLineId) => {
+      if (!nextSectionLineIds.has(sectionLineId)) {
+        this.removeSectionLine(sectionLineId);
+        changed = true;
+      }
+    });
+
+    sectionLines.forEach((sectionLine) => {
+      const previousSectionLine = this.sectionLineData.get(sectionLine.id);
+      const hasGroup = this.groups.has(sectionLine.id);
+      if (!force && hasGroup && !this.sectionLineNeedsRerender(previousSectionLine, sectionLine)) {
+        return;
+      }
+      this.renderSectionLine(sectionLine);
+      changed = true;
+    });
+
+    if (!changed) {
+      return;
+    }
+
+    this.syncSectionLineVisualState();
     this.canvas.requestRenderAll();
   }
 
   setSelectedSectionLines(ids: string[]): void {
     this.selectedSectionLineIds = new Set(ids);
-    this.groups.forEach((group, sectionLineId) => {
-      const selection = group
-        .getObjects()
-        .find((object) => (object as NamedObject).name === 'section-line-selection');
-      const hover = group
-        .getObjects()
-        .find((object) => (object as NamedObject).name === 'section-line-hover');
-      if (selection) {
-        selection.set('visible', this.selectedSectionLineIds.has(sectionLineId));
-      }
-      if (hover) {
-        hover.set('visible', this.hoveredSectionLineId === sectionLineId && !this.selectedSectionLineIds.has(sectionLineId));
-      }
-      group.set('dirty', true);
-    });
+    this.syncSectionLineVisualState();
     this.canvas.requestRenderAll();
   }
 
   setHoveredSectionLine(id: string | null): void {
     this.hoveredSectionLineId = id;
-    this.groups.forEach((group, sectionLineId) => {
-      const hover = group
-        .getObjects()
-        .find((object) => (object as NamedObject).name === 'section-line-hover');
-      if (!hover) return;
-      hover.set('visible', sectionLineId === id && !this.selectedSectionLineIds.has(sectionLineId));
-      group.set('dirty', true);
-    });
+    this.syncSectionLineVisualState();
     this.canvas.requestRenderAll();
   }
 

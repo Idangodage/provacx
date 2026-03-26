@@ -32,7 +32,6 @@ import {
   renderFurnitureEnd,
   renderFurnitureIso,
 } from './canvas/object/FurnitureSymbolRenderer';
-import { Furniture3DRenderer } from './canvas/object/three3d';
 
 export interface ObjectLibraryPanelProps {
   className?: string;
@@ -275,14 +274,30 @@ function Furniture3DPreview({
   const [src, setSrc] = useState<string | null>(null);
 
   useEffect(() => {
-    try {
-      const renderer = Furniture3DRenderer.getInstance();
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      const dataURL = renderer.renderToDataURL(renderType, Math.round(width * dpr), Math.round(height * dpr));
-      setSrc(dataURL);
-    } catch {
-      setSrc(null);
-    }
+    let cancelled = false;
+
+    const loadPreview = async () => {
+      try {
+        const { Furniture3DRenderer } = await import('./canvas/object/three3d');
+        if (cancelled) return;
+        const renderer = Furniture3DRenderer.getInstance();
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const dataURL = renderer.renderToDataURL(renderType, Math.round(width * dpr), Math.round(height * dpr));
+        if (!cancelled) {
+          setSrc(dataURL);
+        }
+      } catch {
+        if (!cancelled) {
+          setSrc(null);
+        }
+      }
+    };
+
+    void loadPreview();
+
+    return () => {
+      cancelled = true;
+    };
   }, [renderType, width, height]);
 
   if (!src) {

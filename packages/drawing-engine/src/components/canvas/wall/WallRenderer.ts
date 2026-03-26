@@ -1997,6 +1997,47 @@ export class WallRenderer {
     }
   }
 
+  rerenderWallsByIds(wallIds: Iterable<string>): void {
+    const targetWallIds = new Set<string>();
+    for (const wallId of wallIds) {
+      if (this.wallData.has(wallId)) {
+        targetWallIds.add(wallId);
+      }
+    }
+
+    if (targetWallIds.size === 0) {
+      return;
+    }
+
+    const previousRenderOnAdd = (this.canvas as any).renderOnAddRemove;
+    (this.canvas as any).renderOnAddRemove = false;
+
+    try {
+      const allWalls = Array.from(this.wallData.values());
+      const componentWallsByWallId = this.rebuildMergedComponents(allWalls);
+      const joinsMap = refreshPartialWallGeometry(new Set<string>(), targetWallIds, allWalls);
+
+      targetWallIds.forEach((wallId) => {
+        const wall = this.wallData.get(wallId);
+        if (!wall) {
+          return;
+        }
+        const joins = joinsMap.get(wallId) || [];
+        this.renderWall(wall, joins, componentWallsByWallId.get(wallId));
+      });
+
+      const selectedWallIds = Array.from(this.selectedWallIds).filter((wallId) => this.wallData.has(wallId));
+      if (selectedWallIds.length > 0 || this.selectionComponentObjects.length > 0 || this.controlPointObjects.size > 0) {
+        this.setSelectedWalls(selectedWallIds);
+      } else {
+        this.syncHoverPreview();
+        this.canvas.requestRenderAll();
+      }
+    } finally {
+      (this.canvas as any).renderOnAddRemove = previousRenderOnAdd ?? true;
+    }
+  }
+
   /**
    * Incremental wall updates for handle dragging while preserving full visuals.
    * Rebuilds merged component fills/outlines each frame, but only re-renders

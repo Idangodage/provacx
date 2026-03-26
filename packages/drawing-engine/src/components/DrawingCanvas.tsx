@@ -9,9 +9,11 @@
 
 import * as fabric from 'fabric';
 import { useEffect, useRef, useCallback, useMemo, useState } from 'react';
+import { shallow } from 'zustand/shallow';
 
 import type { ArchitecturalObjectDefinition } from '../data';
 import { useSmartDrawingStore } from '../store';
+import { useDrawingInteractionStore } from '../store/interactionStore';
 import type { DisplayUnit, Point2D, SymbolInstance2D, Wall } from '../types';
 import { generateId } from '../utils/geometry';
 
@@ -64,6 +66,7 @@ import {
     SectionLineRenderer,
     HvacPlanRenderer,
 } from './canvas';
+import { installCanvasRenderScheduler, restoreCanvasRenderScheduler } from './canvas/renderScheduler';
 
 // =============================================================================
 // Component
@@ -238,7 +241,71 @@ export function DrawingCanvas({
         moveRoom,
         hvacElements,
         syncAutoDimensions,
-    } = useSmartDrawingStore();
+    } = useSmartDrawingStore((state) => ({
+        activeTool: state.activeTool,
+        zoom: state.zoom,
+        panOffset: state.panOffset,
+        displayUnit: state.displayUnit,
+        selectedElementIds: state.selectedElementIds,
+        hoveredElementId: state.hoveredElementId,
+        dimensions: state.dimensions,
+        dimensionSettings: state.dimensionSettings,
+        symbols: state.symbols,
+        pageConfig: state.pageConfig,
+        gridSize: state.gridSize,
+        showGrid: state.showGrid,
+        showRulers: state.showRulers,
+        snapToGrid: state.snapToGrid,
+        setPanOffset: state.setPanOffset,
+        setViewTransform: state.setViewTransform,
+        setTool: state.setTool,
+        setSelectedIds: state.setSelectedIds,
+        setHoveredElement: state.setHoveredElement,
+        setProcessingStatus: state.setProcessingStatus,
+        saveToHistory: state.saveToHistory,
+        detectRooms: state.detectRooms,
+        addSketch: state.addSketch,
+        addDimension: state.addDimension,
+        updateDimension: state.updateDimension,
+        deleteDimension: state.deleteDimension,
+        addSymbol: state.addSymbol,
+        updateSymbol: state.updateSymbol,
+        deleteSymbol: state.deleteSymbol,
+        addWall: state.addWall,
+        deleteSelected: state.deleteSelected,
+        updateWall: state.updateWall,
+        updateWalls: state.updateWalls,
+        updateWallBevel: state.updateWallBevel,
+        resetWallBevel: state.resetWallBevel,
+        getCornerBevelDots: state.getCornerBevelDots,
+        deleteWall: state.deleteWall,
+        getWall: state.getWall,
+        walls: state.walls,
+        rooms: state.rooms,
+        wallDrawingState: state.wallDrawingState,
+        wallSettings: state.wallSettings,
+        sectionLines: state.sectionLines,
+        sectionLineDrawingState: state.sectionLineDrawingState,
+        startWallDrawing: state.startWallDrawing,
+        updateWallPreview: state.updateWallPreview,
+        commitWall: state.commitWall,
+        cancelWallDrawing: state.cancelWallDrawing,
+        startSectionLineDrawing: state.startSectionLineDrawing,
+        updateSectionLinePreview: state.updateSectionLinePreview,
+        commitSectionLine: state.commitSectionLine,
+        cancelSectionLineDrawing: state.cancelSectionLineDrawing,
+        setSectionLineDirection: state.setSectionLineDirection,
+        flipSectionLineDirection: state.flipSectionLineDirection,
+        updateSectionLine: state.updateSectionLine,
+        deleteSectionLine: state.deleteSectionLine,
+        generateElevationForSection: state.generateElevationForSection,
+        regenerateElevations: state.regenerateElevations,
+        connectWalls: state.connectWalls,
+        createRoomWalls: state.createRoomWalls,
+        moveRoom: state.moveRoom,
+        hvacElements: state.hvacElements,
+        syncAutoDimensions: state.syncAutoDimensions,
+    }), shallow);
     const wallsRef = useRef<Wall[]>(walls);
     const symbolsRef = useRef<SymbolInstance2D[]>(symbols);
     wallsRef.current = walls;
@@ -353,7 +420,12 @@ export function DrawingCanvas({
         if (mousePositionFrameRef.current !== null) return;
         mousePositionFrameRef.current = window.requestAnimationFrame(() => {
             mousePositionFrameRef.current = null;
-            setMousePosition(mousePositionRef.current);
+            const nextMousePosition = mousePositionRef.current;
+            setMousePosition(nextMousePosition);
+            useDrawingInteractionStore.getState().setMousePosition({
+                x: nextMousePosition.x / MM_TO_PX,
+                y: nextMousePosition.y / MM_TO_PX,
+            });
         });
     }, []);
 
@@ -434,6 +506,7 @@ export function DrawingCanvas({
                 window.cancelAnimationFrame(mousePositionFrameRef.current);
                 mousePositionFrameRef.current = null;
             }
+            useDrawingInteractionStore.getState().resetMousePosition();
         };
     }, []);
 
@@ -944,6 +1017,7 @@ export function DrawingCanvas({
             preserveObjectStacking: true,
             enableRetinaScaling: true,
         });
+        installCanvasRenderScheduler(canvas);
 
         fabricRef.current = canvas;
         roomRendererRef.current = new RoomRenderer(canvas);
@@ -1020,6 +1094,7 @@ export function DrawingCanvas({
             hvacRendererRef.current?.dispose();
             hvacRendererRef.current = null;
             resizeObserver.disconnect();
+            restoreCanvasRenderScheduler(canvas);
             canvas.dispose();
             fabricRef.current = null;
             setFabricCanvas(null);

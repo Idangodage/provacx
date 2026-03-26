@@ -440,7 +440,6 @@ export function useCanvasMouseHandlers(
             if (isDrawingTool(tool)) {
                 const nextState: CanvasState = { ...canvasStateRef.current, isDrawing: true, drawingPoints: [point] };
                 canvasStateRef.current = nextState;
-                setCanvasState(nextState);
             }
         },
         [
@@ -511,7 +510,6 @@ export function useCanvasMouseHandlers(
                 scheduleViewTransformSync(zoomRef.current, nextPan);
                 const nextState: CanvasState = { ...currentState, lastPanPoint: { x: viewportPoint.x, y: viewportPoint.y } };
                 canvasStateRef.current = nextState;
-                setCanvasState(nextState);
                 return;
             }
 
@@ -757,7 +755,6 @@ export function useCanvasMouseHandlers(
             const nextPoints = [...currentState.drawingPoints, point];
             const nextState: CanvasState = { ...currentState, drawingPoints: nextPoints };
             canvasStateRef.current = nextState;
-            setCanvasState(nextState);
             renderDrawingPreview(canvas, nextPoints, tool);
         },
         [

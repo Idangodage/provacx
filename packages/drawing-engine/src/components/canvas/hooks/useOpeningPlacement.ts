@@ -7,12 +7,13 @@
  * final place-pending-object action.
  */
 
-import { useCallback } from 'react';
+import { useCallback, useMemo } from 'react';
 
 import type { ArchitecturalObjectDefinition } from '../../../data';
 import type { Point2D, Room, SymbolInstance2D, Wall, WallSettings } from '../../../types';
 import { resolveHostedDoorSwingProperties } from '../../../utils/doorSwing';
 import { MIN_OPENING_EDGE_MARGIN_MM } from '../../DrawingCanvas.types';
+import { SpatialHash } from '../spatial-hash';
 import type { PointProjection, WallPlacementSnap } from './useGeometryHelpers';
 
 // ---------------------------------------------------------------------------
@@ -114,6 +115,13 @@ export interface UseOpeningPlacementResult {
     placePendingObject: (point: Point2D) => boolean;
 }
 
+const FURNITURE_COLLISION_INDEX_CELL_MM = 1600;
+
+interface CollisionIndexedSymbol {
+    instance: SymbolInstance2D;
+    definition: ArchitecturalObjectDefinition;
+}
+
 // ---------------------------------------------------------------------------
 // Hook
 // ---------------------------------------------------------------------------
@@ -136,6 +144,42 @@ export function useOpeningPlacement(options: UseOpeningPlacementOptions): UseOpe
         onObjectPlaced,
         setPlacementValid,
     } = options;
+
+    const furnitureCollisionIndex = useMemo(() => {
+        const index = new SpatialHash<CollisionIndexedSymbol>(FURNITURE_COLLISION_INDEX_CELL_MM);
+        index.rebuild(
+            symbols.flatMap((instance) => {
+                const definition = objectDefinitionsById.get(instance.symbolId);
+                if (!definition) {
+                    return [];
+                }
+                if (definition.category !== 'furniture' && definition.category !== 'fixtures') {
+                    return [];
+                }
+                const halfWidth = definition.widthMm / 2;
+                const halfDepth = definition.depthMm / 2;
+                return [{
+                    id: instance.id,
+                    value: { instance, definition },
+                    minX: instance.position.x - halfWidth,
+                    maxX: instance.position.x + halfWidth,
+                    minY: instance.position.y - halfDepth,
+                    maxY: instance.position.y + halfDepth,
+                }];
+            })
+        );
+        return index;
+    }, [symbols, objectDefinitionsById]);
+
+    const openingHostWallById = useMemo(() => {
+        const next = new Map<string, Wall>();
+        walls.forEach((wall) => {
+            wall.openings.forEach((opening) => {
+                next.set(opening.id, wall);
+            });
+        });
+        return next;
+    }, [walls]);
 
     // -----------------------------------------------------------------------
     // resolveOpeningWidthMm
@@ -265,13 +309,10 @@ export function useOpeningPlacement(options: UseOpeningPlacementOptions): UseOpe
                 return false;
             }
             const targetBounds = collisionBounds(targetPoint, definition.widthMm, definition.depthMm);
-            for (const instance of symbols) {
+            const candidates = furnitureCollisionIndex.queryBounds(targetBounds);
+            for (const candidate of candidates) {
+                const { instance, definition: instanceDefinition } = candidate.value;
                 if (collisionOptions?.ignoreSymbolId && instance.id === collisionOptions.ignoreSymbolId) {
-                    continue;
-                }
-                const instanceDefinition = objectDefinitionsById.get(instance.symbolId);
-                if (!instanceDefinition) continue;
-                if (instanceDefinition.category !== 'furniture' && instanceDefinition.category !== 'fixtures') {
                     continue;
                 }
                 const existingBounds = collisionBounds(
@@ -285,7 +326,7 @@ export function useOpeningPlacement(options: UseOpeningPlacementOptions): UseOpe
             }
             return false;
         },
-        [symbols, objectDefinitionsById, collisionBounds, objectsOverlap]
+        [collisionBounds, furnitureCollisionIndex, objectsOverlap]
     );
 
     // -----------------------------------------------------------------------
@@ -418,6 +459,12 @@ export function useOpeningPlacement(options: UseOpeningPlacementOptions): UseOpe
                         : definition.sillHeightMm ?? 900)
                     : 0;
             const targetWallId = snappedWall.wall.id;
+            const wallsToUpdate = new Map<string, Wall>();
+            const previousHostWall = openingHostWallById.get(symbolId);
+            if (previousHostWall) {
+                wallsToUpdate.set(previousHostWall.id, previousHostWall);
+            }
+            wallsToUpdate.set(snappedWall.wall.id, snappedWall.wall);
             const nextOpening = {
                 id: symbolId,
                 type: (definition.category === 'doors' ? 'door' : 'window') as 'door' | 'window',
@@ -427,7 +474,7 @@ export function useOpeningPlacement(options: UseOpeningPlacementOptions): UseOpe
                 sillHeight,
             };
 
-            for (const wall of walls) {
+            for (const wall of wallsToUpdate.values()) {
                 const hasSymbolOpening = wall.openings.some((opening) => opening.id === symbolId);
                 const isTargetWall = wall.id === targetWallId;
                 if (!hasSymbolOpening && !isTargetWall) continue;
@@ -460,7 +507,7 @@ export function useOpeningPlacement(options: UseOpeningPlacementOptions): UseOpe
                 );
             }
         },
-        [walls, updateWall]
+        [openingHostWallById, updateWall]
     );
 
     // -----------------------------------------------------------------------

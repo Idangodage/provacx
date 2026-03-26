@@ -10,7 +10,7 @@
  */
 
 import * as fabric from 'fabric';
-import { useEffect, type Dispatch, type MutableRefObject, type RefObject, type SetStateAction } from 'react';
+import { useEffect, useRef, type Dispatch, type MutableRefObject, type RefObject, type SetStateAction } from 'react';
 
 import type { ArchitecturalObjectDefinition } from '../../../data';
 import { useSmartDrawingStore } from '../../../store';
@@ -247,6 +247,9 @@ export interface UseCanvasEventBindingResult {
 export function useCanvasEventBinding(
     options: UseCanvasEventBindingOptions,
 ): UseCanvasEventBindingResult {
+    const latestOptionsRef = useRef(options);
+    latestOptionsRef.current = options;
+
     const {
         fabricRef,
         outerRef,
@@ -350,6 +353,30 @@ export function useCanvasEventBinding(
         if (!canvas) return;
 
         const upperCanvasEl = canvas.upperCanvasEl;
+        const handleMouseDownProxy = (event: fabric.TPointerEventInfo<fabric.TPointerEvent>) => {
+            latestOptionsRef.current.handleMouseDown(event);
+        };
+        const handleMouseMoveProxy = (event: fabric.TPointerEventInfo<fabric.TPointerEvent>) => {
+            latestOptionsRef.current.handleMouseMove(event);
+        };
+        const handleMouseUpProxy = () => {
+            latestOptionsRef.current.handleMouseUp();
+        };
+        const handleWheelProxy = (event: fabric.TPointerEventInfo<WheelEvent>) => {
+            latestOptionsRef.current.handleWheel(event);
+        };
+        const handleMiddleMouseDownProxy = (event: MouseEvent) => {
+            latestOptionsRef.current.handleMiddleMouseDown(event);
+        };
+        const handleMiddleMouseMoveProxy = (event: MouseEvent) => {
+            latestOptionsRef.current.handleMiddleMouseMove(event);
+        };
+        const handleMiddleMouseUpProxy = (event: MouseEvent) => {
+            latestOptionsRef.current.handleMiddleMouseUp(event);
+        };
+        const preventMiddleAuxClickProxy = (event: MouseEvent) => {
+            latestOptionsRef.current.preventMiddleAuxClick(event);
+        };
 
         const handleCanvasDoubleClick = (event: MouseEvent) => {
             const target = canvas.findTarget(event as unknown as fabric.TPointerEvent);
@@ -1214,9 +1241,9 @@ export function useCanvasEventBinding(
         };
 
         const handleWindowBlur = () => {
-            stopMiddlePan();
-            finalizeHandleDrag();
-            finishOpeningPointerInteraction();
+            latestOptionsRef.current.stopMiddlePan();
+            latestOptionsRef.current.finalizeHandleDrag();
+            latestOptionsRef.current.finishOpeningPointerInteraction();
         };
 
         const handleSelectDragMouseMove = (event: MouseEvent) => {
@@ -1238,10 +1265,10 @@ export function useCanvasEventBinding(
             setHoveredElement(null);
         };
 
-        canvas.on('mouse:down', handleMouseDown);
-        canvas.on('mouse:move', handleMouseMove);
-        canvas.on('mouse:up', handleMouseUp);
-        canvas.on('mouse:wheel', handleWheel);
+        canvas.on('mouse:down', handleMouseDownProxy);
+        canvas.on('mouse:move', handleMouseMoveProxy);
+        canvas.on('mouse:up', handleMouseUpProxy);
+        canvas.on('mouse:wheel', handleWheelProxy);
         canvas.on('selection:created', handleSelectionCreated);
         canvas.on('selection:updated', handleSelectionUpdated);
         canvas.on('selection:cleared', handleSelectionCleared);
@@ -1249,25 +1276,25 @@ export function useCanvasEventBinding(
         canvas.on('object:moving', handleObjectMoving);
         canvas.on('object:rotating', handleObjectRotating);
         canvas.on('object:modified', handleObjectModified);
-        window.addEventListener('mouseup', handleMouseUp);
+        window.addEventListener('mouseup', handleMouseUpProxy);
 
-        upperCanvasEl?.addEventListener('mousedown', handleMiddleMouseDown);
-        upperCanvasEl?.addEventListener('auxclick', preventMiddleAuxClick);
+        upperCanvasEl?.addEventListener('mousedown', handleMiddleMouseDownProxy);
+        upperCanvasEl?.addEventListener('auxclick', preventMiddleAuxClickProxy);
         upperCanvasEl?.addEventListener('dblclick', handleCanvasDoubleClick);
         upperCanvasEl?.addEventListener('mouseleave', handleCanvasMouseLeave);
         upperCanvasEl?.addEventListener('contextmenu', handleCanvasContextMenu);
         window.addEventListener('mousemove', handleSelectDragMouseMove);
-        window.addEventListener('mousemove', handleMiddleMouseMove, { passive: false });
-        window.addEventListener('mouseup', handleMiddleMouseUp);
+        window.addEventListener('mousemove', handleMiddleMouseMoveProxy, { passive: false });
+        window.addEventListener('mouseup', handleMiddleMouseUpProxy);
         window.addEventListener('blur', handleWindowBlur);
         window.addEventListener('keydown', handleWallKeyDown);
         window.addEventListener('keyup', handleWallKeyUp);
 
         return () => {
-            canvas.off('mouse:down', handleMouseDown);
-            canvas.off('mouse:move', handleMouseMove);
-            canvas.off('mouse:up', handleMouseUp);
-            canvas.off('mouse:wheel', handleWheel);
+            canvas.off('mouse:down', handleMouseDownProxy);
+            canvas.off('mouse:move', handleMouseMoveProxy);
+            canvas.off('mouse:up', handleMouseUpProxy);
+            canvas.off('mouse:wheel', handleWheelProxy);
             canvas.off('selection:created', handleSelectionCreated);
             canvas.off('selection:updated', handleSelectionUpdated);
             canvas.off('selection:cleared', handleSelectionCleared);
@@ -1275,15 +1302,15 @@ export function useCanvasEventBinding(
             canvas.off('object:moving', handleObjectMoving);
             canvas.off('object:rotating', handleObjectRotating);
             canvas.off('object:modified', handleObjectModified);
-            window.removeEventListener('mouseup', handleMouseUp);
-            upperCanvasEl?.removeEventListener('mousedown', handleMiddleMouseDown);
-            upperCanvasEl?.removeEventListener('auxclick', preventMiddleAuxClick);
+            window.removeEventListener('mouseup', handleMouseUpProxy);
+            upperCanvasEl?.removeEventListener('mousedown', handleMiddleMouseDownProxy);
+            upperCanvasEl?.removeEventListener('auxclick', preventMiddleAuxClickProxy);
             upperCanvasEl?.removeEventListener('dblclick', handleCanvasDoubleClick);
             upperCanvasEl?.removeEventListener('mouseleave', handleCanvasMouseLeave);
             upperCanvasEl?.removeEventListener('contextmenu', handleCanvasContextMenu);
             window.removeEventListener('mousemove', handleSelectDragMouseMove);
-            window.removeEventListener('mousemove', handleMiddleMouseMove);
-            window.removeEventListener('mouseup', handleMiddleMouseUp);
+            window.removeEventListener('mousemove', handleMiddleMouseMoveProxy);
+            window.removeEventListener('mouseup', handleMiddleMouseUpProxy);
             window.removeEventListener('blur', handleWindowBlur);
             window.removeEventListener('keydown', handleWallKeyDown);
             window.removeEventListener('keyup', handleWallKeyUp);
@@ -1294,16 +1321,7 @@ export function useCanvasEventBinding(
             }
         };
     }, [
-        handleMouseDown,
-        handleMouseMove,
-        handleMouseUp,
-        handleWheel,
         tool,
-        stopMiddlePan,
-        handleMiddleMouseDown,
-        handleMiddleMouseMove,
-        handleMiddleMouseUp,
-        preventMiddleAuxClick,
         handleSelectDoubleClick,
         updateSelectionFromTargets,
         isWallHandleDraggingRef,

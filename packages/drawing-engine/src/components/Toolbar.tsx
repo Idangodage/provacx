@@ -29,6 +29,7 @@ import {
   MoveHorizontal,
 } from 'lucide-react';
 import React from 'react';
+import { shallow } from 'zustand/shallow';
 
 import { useSmartDrawingStore } from '../store';
 import type { DrawingTool } from '../types';
@@ -201,7 +202,17 @@ export function Toolbar({
     undo,
     redo,
     resetView,
-  } = useSmartDrawingStore();
+  } = useSmartDrawingStore((state) => ({
+    activeTool: state.activeTool,
+    zoom: state.zoom,
+    history: state.history,
+    historyIndex: state.historyIndex,
+    setTool: state.setTool,
+    setZoom: state.setZoom,
+    undo: state.undo,
+    redo: state.redo,
+    resetView: state.resetView,
+  }), shallow);
   const canUndo = historyIndex > 0;
   const canRedo = historyIndex < history.length - 1;
 
@@ -362,7 +373,8 @@ export function Toolbar({
 // =============================================================================
 
 export function ZoomIndicator({ className = '' }: { className?: string }) {
-  const { zoom, setZoom } = useSmartDrawingStore();
+  const zoom = useSmartDrawingStore((state) => state.zoom);
+  const setZoom = useSmartDrawingStore((state) => state.setZoom);
   const percentage = Math.round(zoom * 100);
 
   return (

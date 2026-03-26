@@ -4,7 +4,7 @@ cd # Smart Canvas Board Architecture Analysis
 
 ### Rendering engine usage
 - Primary engine is `Fabric.js` (`DrawingCanvas`, `WallRenderer`, `RoomRenderer`, `DimensionRenderer`, `ObjectRenderer`, `SectionLineRenderer`).
-- `Konva` and `react-konva` are installed but not used in the current rendering path.
+- A legacy Konva room-layer path existed previously, but the active editor runtime is now Fabric-only.
 - Rendering follows a layered service pattern on top of one Fabric canvas:
   - grid + rulers + page overlay (`Grid`, `Rulers`, `PageLayout`)
   - geometry renderers (walls, rooms, dimensions, objects, section lines)
@@ -36,7 +36,7 @@ cd # Smart Canvas Board Architecture Analysis
 ## 3. Weaknesses and technical debt
 - Store file is oversized and mixes domain logic, geometry, command handling, and persistence.
 - Geometry logic was duplicated across modules, increasing regression risk.
-- Rendering stack dependency list includes non-active engines (`Konva`) without active integration.
+- The package still has some legacy room-pipeline types and docs from the earlier Konva path, though the runtime no longer depends on it.
 - Snapshot-based history can become memory-heavy for large drawings.
 - No visible automated test setup for geometry/edit operations in this package yet.
 

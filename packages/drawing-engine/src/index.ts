@@ -20,8 +20,6 @@ export {
   DrawingGrid,
   DrawingRulers,
   DrawingPageLayout,
-  RoomLayer,
-  RoomTag,
   IsometricViewCanvas,
   ZoomIndicator,
   CoordinatesDisplay,
@@ -34,8 +32,6 @@ export {
   type DrawingGridProps,
   type DrawingRulersProps,
   type DrawingPageLayoutProps,
-  type RoomLayerProps,
-  type RoomTagProps,
   type IsometricViewCanvasProps,
 } from './components';
 

@@ -6,10 +6,11 @@
  * and opening hit-testing.
  */
 
-import { useCallback } from 'react';
+import { useCallback, useMemo } from 'react';
 
 import type { Point2D, Room, Wall } from '../../../types';
 import { OPENING_HIT_PADDING_MM } from '../../DrawingCanvas.types';
+import { SpatialHash } from '../spatial-hash';
 import { MM_TO_PX } from '../scale';
 
 export interface UseGeometryHelpersOptions {
@@ -45,8 +46,88 @@ export interface UseGeometryHelpersResult {
     findOpeningAtPoint: (point: Point2D) => { openingId: string; wallId: string } | null;
 }
 
+const WALL_SNAP_INDEX_CELL_MM = 2000;
+const OPENING_HIT_INDEX_CELL_MM = 1200;
+
+interface IndexedOpeningHit {
+    wall: Wall;
+    opening: Wall['openings'][number];
+}
+
+function wallInteractionBounds(wall: Wall): { minX: number; minY: number; maxX: number; maxY: number } {
+    const padding = Math.max(40, wall.thickness / 2);
+    return {
+        minX: Math.min(wall.startPoint.x, wall.endPoint.x) - padding,
+        minY: Math.min(wall.startPoint.y, wall.endPoint.y) - padding,
+        maxX: Math.max(wall.startPoint.x, wall.endPoint.x) + padding,
+        maxY: Math.max(wall.startPoint.y, wall.endPoint.y) + padding,
+    };
+}
+
+function openingInteractionBounds(
+    wall: Wall,
+    opening: Wall['openings'][number],
+): { minX: number; minY: number; maxX: number; maxY: number } | null {
+    const dx = wall.endPoint.x - wall.startPoint.x;
+    const dy = wall.endPoint.y - wall.startPoint.y;
+    const wallLength = Math.hypot(dx, dy);
+    if (!Number.isFinite(wallLength) || wallLength <= 0.001) {
+        return null;
+    }
+
+    const direction = { x: dx / wallLength, y: dy / wallLength };
+    const halfWidth = opening.width / 2;
+    const startEdge = {
+        x: wall.startPoint.x + direction.x * (opening.position - halfWidth),
+        y: wall.startPoint.y + direction.y * (opening.position - halfWidth),
+    };
+    const endEdge = {
+        x: wall.startPoint.x + direction.x * (opening.position + halfWidth),
+        y: wall.startPoint.y + direction.y * (opening.position + halfWidth),
+    };
+    const padding = Math.max(wall.thickness / 2 + OPENING_HIT_PADDING_MM, halfWidth + OPENING_HIT_PADDING_MM);
+
+    return {
+        minX: Math.min(startEdge.x, endEdge.x) - padding,
+        minY: Math.min(startEdge.y, endEdge.y) - padding,
+        maxX: Math.max(startEdge.x, endEdge.x) + padding,
+        maxY: Math.max(startEdge.y, endEdge.y) + padding,
+    };
+}
+
 export function useGeometryHelpers(options: UseGeometryHelpersOptions): UseGeometryHelpersResult {
     const { walls, roomById, wallById, wallIdSet, viewportZoom } = options;
+
+    const wallPlacementIndex = useMemo(() => {
+        const index = new SpatialHash<Wall>(WALL_SNAP_INDEX_CELL_MM);
+        index.rebuild(
+            walls.map((wall) => ({
+                id: wall.id,
+                value: wall,
+                ...wallInteractionBounds(wall),
+            }))
+        );
+        return index;
+    }, [walls]);
+
+    const openingHitIndex = useMemo(() => {
+        const index = new SpatialHash<IndexedOpeningHit>(OPENING_HIT_INDEX_CELL_MM);
+        const items = walls.flatMap((wall) =>
+            wall.openings.flatMap((opening) => {
+                const bounds = openingInteractionBounds(wall, opening);
+                if (!bounds) {
+                    return [];
+                }
+                return [{
+                    id: opening.id,
+                    value: { wall, opening },
+                    ...bounds,
+                }];
+            })
+        );
+        index.rebuild(items);
+        return index;
+    }, [walls]);
 
     const projectPointToSegment = useCallback((point: Point2D, start: Point2D, end: Point2D): PointProjection => {
         const dx = end.x - start.x;
@@ -123,8 +204,10 @@ export function useGeometryHelpers(options: UseGeometryHelpersOptions): UseGeome
     const findWallPlacementSnap = useCallback((point: Point2D): WallPlacementSnap | null => {
         const maxSnapDistanceMm = Math.max(100, 72 / Math.max(viewportZoom, 0.01) / MM_TO_PX);
         let best: WallPlacementSnap | null = null;
+        const candidates = wallPlacementIndex.queryRadius(point, maxSnapDistanceMm);
 
-        for (const wall of walls) {
+        for (const candidate of candidates) {
+            const wall = candidate.value;
             const projection = projectPointToSegment(point, wall.startPoint, wall.endPoint);
             if (projection.distance > maxSnapDistanceMm) continue;
             const angleDeg = (Math.atan2(
@@ -153,12 +236,17 @@ export function useGeometryHelpers(options: UseGeometryHelpersOptions): UseGeome
             }
         }
         return best;
-    }, [walls, projectPointToSegment, viewportZoom]);
+    }, [projectPointToSegment, viewportZoom, wallPlacementIndex]);
 
     const findOpeningAtPoint = useCallback((point: Point2D): { openingId: string; wallId: string } | null => {
         let best: { openingId: string; wallId: string; score: number } | null = null;
-        for (const wall of walls) {
-            if (wall.openings.length === 0) continue;
+        const maxHitDistanceMm = Math.max(
+            OPENING_HIT_PADDING_MM + 120,
+            72 / Math.max(viewportZoom, 0.01) / MM_TO_PX
+        );
+
+        for (const candidate of openingHitIndex.queryRadius(point, maxHitDistanceMm)) {
+            const { wall, opening } = candidate.value;
             const wallLength = Math.hypot(
                 wall.endPoint.x - wall.startPoint.x,
                 wall.endPoint.y - wall.startPoint.y
@@ -167,26 +255,24 @@ export function useGeometryHelpers(options: UseGeometryHelpersOptions): UseGeome
 
             const projection = projectPointToSegment(point, wall.startPoint, wall.endPoint);
             const alongWall = projection.t * wallLength;
-            for (const opening of wall.openings) {
-                const maxPerpendicularDistance = Math.max(
-                    wall.thickness / 2 + OPENING_HIT_PADDING_MM,
-                    opening.width + OPENING_HIT_PADDING_MM
-                );
-                if (projection.distance > maxPerpendicularDistance) continue;
-                const halfWidth = opening.width / 2;
-                const minAlong = opening.position - halfWidth - OPENING_HIT_PADDING_MM;
-                const maxAlong = opening.position + halfWidth + OPENING_HIT_PADDING_MM;
-                if (alongWall < minAlong || alongWall > maxAlong) continue;
+            const maxPerpendicularDistance = Math.max(
+                wall.thickness / 2 + OPENING_HIT_PADDING_MM,
+                opening.width + OPENING_HIT_PADDING_MM
+            );
+            if (projection.distance > maxPerpendicularDistance) continue;
+            const halfWidth = opening.width / 2;
+            const minAlong = opening.position - halfWidth - OPENING_HIT_PADDING_MM;
+            const maxAlong = opening.position + halfWidth + OPENING_HIT_PADDING_MM;
+            if (alongWall < minAlong || alongWall > maxAlong) continue;
 
-                const edgeDistance = Math.abs(alongWall - opening.position) / Math.max(1, halfWidth);
-                const score = projection.distance + edgeDistance * 30;
-                if (!best || score < best.score) {
-                    best = {
-                        openingId: opening.id,
-                        wallId: wall.id,
-                        score,
-                    };
-                }
+            const edgeDistance = Math.abs(alongWall - opening.position) / Math.max(1, halfWidth);
+            const score = projection.distance + edgeDistance * 30;
+            if (!best || score < best.score) {
+                best = {
+                    openingId: opening.id,
+                    wallId: wall.id,
+                    score,
+                };
             }
         }
 
@@ -195,7 +281,7 @@ export function useGeometryHelpers(options: UseGeometryHelpersOptions): UseGeome
             openingId: best.openingId,
             wallId: best.wallId,
         };
-    }, [walls, projectPointToSegment]);
+    }, [openingHitIndex, projectPointToSegment, viewportZoom]);
 
     return {
         projectPointToSegment,

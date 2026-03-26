@@ -4,7 +4,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
-import * as turf from '@turf/turf';
+import {
+  difference as turfDifference,
+  featureCollection as turfFeatureCollection,
+  multiPolygon as turfMultiPolygon,
+  polygon as turfPolygon,
+} from '@turf/turf';
 
 import type { ArchitecturalObjectDefinition } from '../../../data';
 import type { HvacElement, Point2D, Room, SymbolInstance2D, Wall } from '../../../types';
@@ -480,9 +485,9 @@ function subtractOpeningHoles(
   const turfOuter = ringToCoords(outerRing);
   const turfHoles = existingHoles.map(ringToCoords);
 
-  let current: ReturnType<typeof turf.polygon> | ReturnType<typeof turf.multiPolygon>;
+  let current: ReturnType<typeof turfPolygon> | ReturnType<typeof turfMultiPolygon>;
   try {
-    current = turf.polygon([turfOuter, ...turfHoles]);
+    current = turfPolygon([turfOuter, ...turfHoles]);
   } catch {
     return [polygon];
   }
@@ -492,8 +497,8 @@ function subtractOpeningHoles(
       continue;
     }
     try {
-      const holePoly = turf.polygon([ringToCoords(hole)]);
-      const diff = turf.difference(turf.featureCollection([current, holePoly]));
+      const holePoly = turfPolygon([ringToCoords(hole)]);
+      const diff = turfDifference(turfFeatureCollection([current, holePoly]));
       if (!diff) {
         return [];
       }

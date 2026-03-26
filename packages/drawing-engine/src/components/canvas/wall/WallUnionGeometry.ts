@@ -1,4 +1,4 @@
-import * as turf from '@turf/turf';
+import { featureCollection, multiPolygon, polygon, union } from '@turf/turf';
 
 import type { JoinData, Point2D, Wall } from '../../../types';
 
@@ -13,9 +13,9 @@ const SEGMENT_INTERIOR_TOLERANCE = 0.001;
 
 type Endpoint = 'start' | 'end';
 type RingCoordinate = number[];
-type PolygonFeature = ReturnType<typeof turf.polygon>;
+type PolygonFeature = ReturnType<typeof polygon>;
 type PolygonGeometry = PolygonFeature['geometry'];
-type MultiPolygonGeometry = ReturnType<typeof turf.multiPolygon>['geometry'];
+type MultiPolygonGeometry = ReturnType<typeof multiPolygon>['geometry'];
 
 interface EndpointFace {
   anchor: Point2D;
@@ -340,7 +340,7 @@ function makePolygonFeature(vertices: Point2D[]): PolygonFeature | null {
   }
 
   try {
-    return turf.polygon([closedRing]);
+    return polygon([closedRing]);
   } catch {
     return null;
   }
@@ -792,7 +792,7 @@ function featureUnionPolygons(features: PolygonFeature[]): Point2D[][][] {
   }
 
   try {
-    const merged = turf.union(turf.featureCollection(features));
+    const merged = union(featureCollection(features));
     if (merged && (merged.geometry.type === 'Polygon' || merged.geometry.type === 'MultiPolygon')) {
       return extractPolygons(merged.geometry);
     }

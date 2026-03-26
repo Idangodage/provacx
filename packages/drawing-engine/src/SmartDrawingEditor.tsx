@@ -32,7 +32,8 @@ import {
   ArrowRightFromLine,
   Box,
 } from 'lucide-react';
-import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
+import React, { Suspense, useState, useCallback, useEffect, useRef, useMemo } from 'react';
+import { shallow } from 'zustand/shallow';
 
 import {
   DrawingCanvas,
@@ -43,17 +44,21 @@ import {
   SymbolPalette,
   ZoomIndicator,
   CoordinatesDisplay,
-  IsometricViewCanvas,
 } from './components';
 import { ElevationViewCanvas } from './components/canvas/elevation';
-import { MM_TO_PX } from './components/canvas';
 import {
   DEFAULT_ARCHITECTURAL_OBJECT_LIBRARY,
   type ArchitecturalObjectDefinition,
 } from './data';
 import type { SymbolDefinition } from './data/symbol-library';
 import { useSmartDrawingStore } from './store';
-import type { Point2D, DrawingTool, PageLayout } from './types';
+import { useDrawingInteractionStore } from './store/interactionStore';
+import type { DrawingTool, PageLayout } from './types';
+
+const LazyIsometricViewCanvas = React.lazy(async () => {
+  const mod = await import('./components/canvas/isometric');
+  return { default: mod.IsometricViewCanvas };
+});
 
 
 // =============================================================================
@@ -396,20 +401,19 @@ function EditorRibbon({
 // =============================================================================
 
 function EditorFooter({
-  mousePosition,
   elementCount,
   areaSummary,
-  statusMessage,
 }: {
-  mousePosition: Point2D;
   elementCount: number;
   areaSummary: {
     totalFloorArea: number;
     usableArea: number;
     circulationArea: number;
   };
-  statusMessage: string;
 }) {
+  const mousePosition = useDrawingInteractionStore((state) => state.mousePosition);
+  const statusMessage = useSmartDrawingStore((state) => state.processingStatus);
+
   return (
     <div className="flex h-7 items-center justify-between border-t border-amber-200/70 bg-[#fffaf0] px-3 text-[11px] text-slate-600">
       <div className="flex items-center gap-3">
@@ -463,7 +467,6 @@ export function SmartDrawingEditor({
   const [showRightPanel, setShowRightPanel] = useState(true);
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
-  const [mousePosition, setMousePosition] = useState<Point2D>({ x: 0, y: 0 });
   const [fabricCanvas, setFabricCanvas] = useState<fabric.Canvas | null>(null);
   const [scaleDrawing, setScaleDrawing] = useState(1);
   const [scaleReal, setScaleReal] = useState(50);
@@ -487,8 +490,6 @@ export function SmartDrawingEditor({
   const [recentObjectUsage, setRecentObjectUsage] = useState<Record<string, number>>({});
   const compactThreshold = Math.max(minLeftWidth + 28, Math.min(168, maxLeftWidth - 32));
   const isLeftCompact = leftPanelWidth <= compactThreshold;
-
-  const store = useSmartDrawingStore();
   const {
     sketches,
     annotations,
@@ -496,35 +497,69 @@ export function SmartDrawingEditor({
     symbols,
     walls,
     rooms,
-    loadData,
-    exportData,
-    setTool,
     activeTool,
     zoom,
     history,
     historyIndex,
-    undo,
-    redo,
-    resetView,
     showGrid,
     showRulers,
     snapToGrid,
+    pageConfig,
+    displayUnit,
+    editorViewMode,
+    elevationViews,
+    elevationSettings,
+    hvacElements,
+  } = useSmartDrawingStore((state) => ({
+    sketches: state.sketches,
+    annotations: state.annotations,
+    dimensions: state.dimensions,
+    symbols: state.symbols,
+    walls: state.walls,
+    rooms: state.rooms,
+    activeTool: state.activeTool,
+    zoom: state.zoom,
+    history: state.history,
+    historyIndex: state.historyIndex,
+    showGrid: state.showGrid,
+    showRulers: state.showRulers,
+    snapToGrid: state.snapToGrid,
+    pageConfig: state.pageConfig,
+    displayUnit: state.displayUnit,
+    editorViewMode: state.editorViewMode,
+    elevationViews: state.elevationViews,
+    elevationSettings: state.elevationSettings,
+    hvacElements: state.hvacElements,
+  }), shallow);
+  const {
+    loadData,
+    exportData,
+    setTool,
+    undo,
+    redo,
+    resetView,
     setShowGrid,
     setShowRulers,
     setSnapToGrid,
     setPageConfig,
-    pageConfig,
     setZoom,
     setPanOffset,
-    displayUnit,
-    processingStatus,
-    editorViewMode,
     setEditorViewMode,
-    elevationViews,
-    elevationSettings,
-    sectionLines,
-    hvacElements,
-  } = store;
+  } = useSmartDrawingStore((state) => ({
+    loadData: state.loadData,
+    exportData: state.exportData,
+    setTool: state.setTool,
+    undo: state.undo,
+    redo: state.redo,
+    resetView: state.resetView,
+    setShowGrid: state.setShowGrid,
+    setShowRulers: state.setShowRulers,
+    setSnapToGrid: state.setSnapToGrid,
+    setPageConfig: state.setPageConfig,
+    setZoom: state.setZoom,
+    setPanOffset: state.setPanOffset,
+    setEditorViewMode: state.setEditorViewMode,
+  }), shallow);
   const canUndo = historyIndex > 0;
   const canRedo = historyIndex < history.length - 1;
 
@@ -565,10 +600,17 @@ export function SmartDrawingEditor({
 
   // Notify parent of data changes
   useEffect(() => {
-    if (onDataChange) {
-      const data = exportData();
-      onDataChange(data);
+    if (!onDataChange) return;
+    if (typeof window === 'undefined') {
+      onDataChange(exportData());
+      return;
     }
+
+    const timeoutId = window.setTimeout(() => {
+      onDataChange(exportData());
+    }, 300);
+
+    return () => window.clearTimeout(timeoutId);
   }, [sketches, dimensions, symbols, walls, rooms, exportData, onDataChange]);
 
   useEffect(() => {
@@ -756,12 +798,6 @@ export function SmartDrawingEditor({
   // Handle canvas ready
   const handleCanvasReady = useCallback((canvas: fabric.Canvas) => {
     setFabricCanvas(canvas);
-
-    // Track mouse position
-    canvas.on('mouse:move', (e) => {
-      const pointer = canvas.getScenePoint(e.e);
-      setMousePosition({ x: pointer.x / MM_TO_PX, y: pointer.y / MM_TO_PX });
-    });
   }, []);
 
   // Handle symbol selection from palette
@@ -1297,15 +1333,23 @@ export function SmartDrawingEditor({
           )}
 
           {editorViewMode === 'isometric' && (
-            <IsometricViewCanvas
-              className="flex-1"
-              walls={walls}
-              rooms={rooms}
-              symbols={symbols}
-              hvacElements={hvacElements}
-              objectDefinitions={architecturalObjects}
-              viewLabel="ISOMETRIC VIEW"
-            />
+            <Suspense
+              fallback={
+                <div className="flex flex-1 items-center justify-center bg-white text-sm text-slate-500">
+                  Loading isometric view...
+                </div>
+              }
+            >
+              <LazyIsometricViewCanvas
+                className="flex-1"
+                walls={walls}
+                rooms={rooms}
+                symbols={symbols}
+                hvacElements={hvacElements}
+                objectDefinitions={architecturalObjects}
+                viewLabel="ISOMETRIC VIEW"
+              />
+            </Suspense>
           )}
         </div>
 
@@ -1330,10 +1374,8 @@ export function SmartDrawingEditor({
       </div>
 
       <EditorFooter
-        mousePosition={mousePosition}
         elementCount={elementCount}
         areaSummary={areaSummary}
-        statusMessage={processingStatus}
       />
     </div>
   );

@@ -6,6 +6,7 @@
 
 import { ChevronDown, ChevronUp, X } from 'lucide-react';
 import React, { useMemo, useState } from 'react';
+import { shallow } from 'zustand/shallow';
 
 import {
   DEFAULT_HVAC_DESIGN_CONDITIONS,
@@ -186,7 +187,10 @@ function UnitSelector({
   propertyUnit: PropertyUnit;
   onPropertyUnitChange: (unit: PropertyUnit) => void;
 }) {
-  const { displayUnit, setDisplayUnit } = useSmartDrawingStore();
+  const { displayUnit, setDisplayUnit } = useSmartDrawingStore((state) => ({
+    displayUnit: state.displayUnit,
+    setDisplayUnit: state.setDisplayUnit,
+  }), shallow);
   return (
     <div className="rounded-lg border border-amber-200/70 bg-white/80 p-3 space-y-2">
       <PropertyRow label="Display Unit">
@@ -225,7 +229,15 @@ function WallSection({ propertyUnit }: { propertyUnit: PropertyUnit }) {
     setWallSettings,
     updateWall,
     updateWall3DAttributes,
-  } = useSmartDrawingStore();
+  } = useSmartDrawingStore((state) => ({
+    selectedElementIds: state.selectedElementIds,
+    walls: state.walls,
+    materialLibrary: state.materialLibrary,
+    wallSettings: state.wallSettings,
+    setWallSettings: state.setWallSettings,
+    updateWall: state.updateWall,
+    updateWall3DAttributes: state.updateWall3DAttributes,
+  }), shallow);
   const [tab, setTab] = useState<'general' | 'thermal' | 'openings'>('general');
   const [dragLayerIndex, setDragLayerIndex] = useState<number | null>(null);
   const [dragMaterialId, setDragMaterialId] = useState<string | null>(null);
@@ -614,7 +626,14 @@ function ObjectSection({ propertyUnit }: { propertyUnit: PropertyUnit }) {
     updateSymbol,
     updateWall,
     setProcessingStatus,
-  } = useSmartDrawingStore();
+  } = useSmartDrawingStore((state) => ({
+    selectedElementIds: state.selectedElementIds,
+    symbols: state.symbols,
+    walls: state.walls,
+    updateSymbol: state.updateSymbol,
+    updateWall: state.updateWall,
+    setProcessingStatus: state.setProcessingStatus,
+  }), shallow);
 
   const selectedObject = useMemo(() => {
     const selectedFromCanvas = symbols.find((symbol) => selectedElementIds.includes(symbol.id));
@@ -1051,7 +1070,15 @@ function RoomSection({ propertyUnit }: { propertyUnit: PropertyUnit }) {
     updateRoom,
     updateRoom3DAttributes,
     applyRoomTemplateToSelectedRooms,
-  } = useSmartDrawingStore();
+  } = useSmartDrawingStore((state) => ({
+    rooms: state.rooms,
+    selectedElementIds: state.selectedElementIds,
+    setSelectedIds: state.setSelectedIds,
+    materialLibrary: state.materialLibrary,
+    updateRoom: state.updateRoom,
+    updateRoom3DAttributes: state.updateRoom3DAttributes,
+    applyRoomTemplateToSelectedRooms: state.applyRoomTemplateToSelectedRooms,
+  }), shallow);
   const [selectedRoomId, setSelectedRoomId] = useState<string>('');
   const [tab, setTab] = useState<'general' | 'thermal' | 'ventilation' | 'calculated'>('general');
   const roomTypeOptions: RoomType[] = [
@@ -1443,7 +1470,10 @@ function RoomSection({ propertyUnit }: { propertyUnit: PropertyUnit }) {
 }
 
 function HvacDesignSection() {
-  const { hvacDesignConditions, setHvacDesignConditions } = useSmartDrawingStore();
+  const { hvacDesignConditions, setHvacDesignConditions } = useSmartDrawingStore((state) => ({
+    hvacDesignConditions: state.hvacDesignConditions,
+    setHvacDesignConditions: state.setHvacDesignConditions,
+  }), shallow);
 
   const parseAndApply = (value: string, setter: (next: number) => void) => {
     const parsed = Number.parseFloat(value);
@@ -1602,7 +1632,12 @@ function WallToolSection() {
     setWallSettings,
     setWallPreviewMaterial,
     setWallPreviewThickness,
-  } = useSmartDrawingStore();
+  } = useSmartDrawingStore((state) => ({
+    wallSettings: state.wallSettings,
+    setWallSettings: state.setWallSettings,
+    setWallPreviewMaterial: state.setWallPreviewMaterial,
+    setWallPreviewThickness: state.setWallPreviewThickness,
+  }), shallow);
 
   const gridPreset =
     wallSettings.gridSize === 50
@@ -1750,7 +1785,15 @@ function DimensionSection() {
     updateDimension,
     autoDimensionExteriorWalls,
     addAreaDimensions,
-  } = useSmartDrawingStore();
+  } = useSmartDrawingStore((state) => ({
+    dimensions: state.dimensions,
+    selectedElementIds: state.selectedElementIds,
+    dimensionSettings: state.dimensionSettings,
+    setDimensionSettings: state.setDimensionSettings,
+    updateDimension: state.updateDimension,
+    autoDimensionExteriorWalls: state.autoDimensionExteriorWalls,
+    addAreaDimensions: state.addAreaDimensions,
+  }), shallow);
 
   const selectedDimension = useMemo(
     () => dimensions.find((dimension) => selectedElementIds.includes(dimension.id)) ?? null,
@@ -1905,7 +1948,10 @@ function DimensionSection() {
 }
 
 function RoomListSection() {
-  const { rooms, setSelectedIds } = useSmartDrawingStore();
+  const { rooms, setSelectedIds } = useSmartDrawingStore((state) => ({
+    rooms: state.rooms,
+    setSelectedIds: state.setSelectedIds,
+  }), shallow);
   const [typeFilter, setTypeFilter] = useState<'all' | RoomType>('all');
   const [sortBy, setSortBy] = useState<'name' | 'area' | 'type'>('name');
 
@@ -2019,7 +2065,22 @@ function ElevationSection() {
     flipSectionLineDirection,
     updateSectionLine,
     deleteSectionLine,
-  } = useSmartDrawingStore();
+  } = useSmartDrawingStore((state) => ({
+    setTool: state.setTool,
+    setWallSettings: state.setWallSettings,
+    wallSettings: state.wallSettings,
+    sectionLines: state.sectionLines,
+    elevationViews: state.elevationViews,
+    activeElevationViewId: state.activeElevationViewId,
+    elevationSettings: state.elevationSettings,
+    setActiveElevationView: state.setActiveElevationView,
+    setElevationSettings: state.setElevationSettings,
+    regenerateElevations: state.regenerateElevations,
+    generateElevationForSection: state.generateElevationForSection,
+    flipSectionLineDirection: state.flipSectionLineDirection,
+    updateSectionLine: state.updateSectionLine,
+    deleteSectionLine: state.deleteSectionLine,
+  }), shallow);
 
   const activeView = elevationViews.find((view) => view.id === activeElevationViewId) ?? elevationViews[0] ?? null;
   const linkedSectionLine = activeView?.sectionLineId
@@ -2271,7 +2332,12 @@ function wallBounds(wall: Wall): { minX: number; minY: number; maxX: number; max
 }
 
 function SelectionAlignSection() {
-  const { selectedElementIds, walls, updateWall, saveToHistory } = useSmartDrawingStore();
+  const { selectedElementIds, walls, updateWall, saveToHistory } = useSmartDrawingStore((state) => ({
+    selectedElementIds: state.selectedElementIds,
+    walls: state.walls,
+    updateWall: state.updateWall,
+    saveToHistory: state.saveToHistory,
+  }), shallow);
   const selectedWalls = walls.filter((wall) => selectedElementIds.includes(wall.id));
 
   const translateWall = (wall: Wall, dx: number, dy: number) => {
@@ -2395,7 +2461,15 @@ export function PropertiesPanel({ className = '', onClose }: PropertiesPanelProp
     symbols,
     dimensions,
     activeTool,
-  } = useSmartDrawingStore();
+  } = useSmartDrawingStore((state) => ({
+    selectedElementIds: state.selectedElementIds,
+    clearSelection: state.clearSelection,
+    walls: state.walls,
+    rooms: state.rooms,
+    symbols: state.symbols,
+    dimensions: state.dimensions,
+    activeTool: state.activeTool,
+  }), shallow);
   const [propertyUnit, setPropertyUnit] = useState<PropertyUnit>('mm');
   const selectedLookup = useMemo(() => new Set(selectedElementIds), [selectedElementIds]);
   const hasSelectedWall = useMemo(

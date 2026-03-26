@@ -32,10 +32,6 @@ export default function DrawingEditorWrapper({
     // TODO: Implement save to database via tRPC
   };
 
-  const handleDataChange = (_data: unknown) => {
-    // Auto-save could be implemented here with debouncing
-  };
-
   return (
     <div className="fixed inset-0 z-[60] flex h-screen w-screen flex-col bg-[#f6f1e7]">
       {/* Navigation Header */}
@@ -89,7 +85,6 @@ export default function DrawingEditorWrapper({
         <SmartDrawingEditor
           projectId={projectId}
           initialData={initialData}
-          onDataChange={handleDataChange}
           onSave={handleSave}
           className="h-full"
         />

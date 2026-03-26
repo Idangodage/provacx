@@ -269,6 +269,10 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
     // can call it without a declaration-order dependency.
     const refreshDimensionLayerRef = useRef<(() => void) | null>(null);
     const lastDragAutoDimensionSyncAtRef = useRef(0);
+    const previousWallSyncSignatureRef = useRef<{ walls: Wall[] | null; symbols: string | null }>({
+        walls: null,
+        symbols: null,
+    });
 
     // ── Sync view transform ──────────────────────────────────────────────
     // HOT PATH — runs on every zoom tick and every pan frame.
@@ -397,8 +401,8 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
             return;
         }
         renderer.setViewportZoom(zoomRef.current);
-        renderer.setContext(walls, rooms, dimensionSettings);
-        renderer.renderAllDimensions(dimensions);
+        const contextChanged = renderer.setContext(walls, rooms, dimensionSettings);
+        renderer.syncDimensions(dimensions, { force: contextChanged });
         const dimensionIdSet = new Set(dimensions.map((dimension) => dimension.id));
         const selectedDimensionIds = selectedIds.filter((id) => dimensionIdSet.has(id));
         const hoveredDimensionId =
@@ -492,9 +496,9 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
             return;
         }
         roomRendererRef.current?.setWallContext(walls);
-        roomRendererRef.current?.renderAllRooms(rooms);
-        refreshDimensionLayer();
-    }, [rooms, walls, fabricCanvas, refreshDimensionLayer, isHandleDragging, roomRendererRef]);
+        roomRendererRef.current?.syncRooms(rooms);
+        scheduleDimensionLayerRefresh();
+    }, [rooms, walls, fabricCanvas, scheduleDimensionLayerRefresh, isHandleDragging, roomRendererRef]);
 
     useEffect(() => {
         return () => {
@@ -526,8 +530,8 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
 
     useEffect(() => {
         if (isHandleDragging) return;
-        refreshDimensionLayer();
-    }, [refreshDimensionLayer, fabricCanvas, isHandleDragging]);
+        scheduleDimensionLayerRefresh();
+    }, [scheduleDimensionLayerRefresh, fabricCanvas, isHandleDragging]);
 
     useEffect(() => {
         const roomIdSet = new Set(rooms.map((room) => room.id));
@@ -601,6 +605,13 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
             return definition?.category === 'doors' || definition?.category === 'windows';
         });
         wallRenderer.setOpeningSymbolInstances(openingSymbols);
+        const previousWallSync = previousWallSyncSignatureRef.current;
+        const wallsChanged = previousWallSync.walls !== walls;
+        const openingSymbolsChanged = previousWallSync.symbols !== doorWindowSymbolsSignature;
+        previousWallSyncSignatureRef.current = {
+            walls,
+            symbols: doorWindowSymbolsSignature,
+        };
         if (isHandleDragging) {
             wallRenderer.renderWallsInteractive(wallsRef.current);
             if (fabricRef.current) {
@@ -608,16 +619,23 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
             }
             return;
         }
-        // Keep wall visuals identical while dragging and idle.
-        wallRenderer.renderAllWalls(wallsRef.current);
+        if (wallsChanged || !openingSymbolsChanged) {
+            // Keep wall visuals identical while dragging and idle when geometry changed.
+            wallRenderer.renderAllWalls(wallsRef.current);
+        } else {
+            const wallsWithHostedOpenings = wallsRef.current
+                .filter((wall) => wall.openings.length > 0)
+                .map((wall) => wall.id);
+            wallRenderer.rerenderWallsByIds(wallsWithHostedOpenings);
+        }
         // Rebuild dimensions after wall re-renders, then restore edit-handle priority.
-        refreshDimensionLayer();
+        scheduleDimensionLayerRefresh();
     }, [
         wallRenderer,
         walls,
         doorWindowSymbolsSignature,
         objectDefinitionsById,
-        refreshDimensionLayer,
+        scheduleDimensionLayerRefresh,
         restackInteractiveOverlays,
         isHandleDragging,
         symbolsRef,
@@ -916,14 +934,28 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
     useEffect(() => {
         if (!sectionLineRendererRef.current) return;
         sectionLineRendererRef.current.setShowReferenceIndicators(wallSettings.showSectionReferenceLines);
-        sectionLineRendererRef.current.renderAll(sectionLines);
+        sectionLineRendererRef.current.syncSectionLines(sectionLines);
     }, [sectionLines, wallSettings.showSectionReferenceLines, fabricCanvas, sectionLineRendererRef]);
 
     // Render HVAC elements on plan canvas
     useEffect(() => {
         if (!hvacRendererRef.current) return;
-        hvacRendererRef.current.renderAll(hvacElements);
+        hvacRendererRef.current.syncElements(hvacElements);
     }, [hvacElements, fabricCanvas, hvacRendererRef]);
+
+    useEffect(() => {
+        const hvacIds = new Set(hvacElements.map((element) => element.id));
+        const selectedHvacIds = selectedIds.filter((id) => hvacIds.has(id));
+        hvacRendererRef.current?.setSelectedElements(selectedHvacIds);
+    }, [hvacElements, selectedIds, hvacRendererRef]);
+
+    useEffect(() => {
+        const hvacIds = new Set(hvacElements.map((element) => element.id));
+        const hoveredHvacId = hoveredElementId && hvacIds.has(hoveredElementId)
+            ? hoveredElementId
+            : null;
+        hvacRendererRef.current?.setHoveredElement(hoveredHvacId);
+    }, [hvacElements, hoveredElementId, hvacRendererRef]);
 
     useEffect(() => {
         const sectionIds = new Set(sectionLines.map((line) => line.id));

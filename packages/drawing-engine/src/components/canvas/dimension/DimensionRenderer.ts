@@ -29,6 +29,10 @@ type NamedObject = fabric.Object & {
 
 type DimensionGroup = fabric.Group & { id?: string; name?: string; dimensionId?: string };
 
+interface SyncDimensionsOptions {
+  force?: boolean;
+}
+
 function toCanvas(value: number): number {
   return value * MM_TO_PX;
 }
@@ -52,6 +56,24 @@ function normalize(v: { x: number; y: number }): { x: number; y: number } {
 
 function perpendicular(v: { x: number; y: number }): { x: number; y: number } {
   return { x: -v.y, y: v.x };
+}
+
+function dimensionSettingsEqual(left: DimensionSettings, right: DimensionSettings): boolean {
+  return (
+    left.style === right.style &&
+    left.unitSystem === right.unitSystem &&
+    left.displayFormat === right.displayFormat &&
+    left.precision === right.precision &&
+    left.defaultOffset === right.defaultOffset &&
+    left.extensionGap === right.extensionGap &&
+    left.extensionBeyond === right.extensionBeyond &&
+    left.textHeightPaperMm === right.textHeightPaperMm &&
+    left.terminator === right.terminator &&
+    left.placementType === right.placementType &&
+    left.showAreaPerimeter === right.showAreaPerimeter &&
+    left.autoAvoidOverlap === right.autoAvoidOverlap &&
+    left.showLayer === right.showLayer
+  );
 }
 
 export class DimensionRenderer {
@@ -177,10 +199,38 @@ export class DimensionRenderer {
     this.canvas.requestRenderAll();
   }
 
-  setContext(walls: Wall[], rooms: Room[], settings: DimensionSettings): void {
+  setContext(walls: Wall[], rooms: Room[], settings: DimensionSettings): boolean {
+    const settingsChanged = !dimensionSettingsEqual(this.settings, settings);
+    const contextChanged = this.walls !== walls || this.rooms !== rooms || settingsChanged;
     this.walls = walls;
     this.rooms = rooms;
-    this.settings = { ...settings };
+    if (settingsChanged) {
+      this.settings = { ...settings };
+    }
+    return contextChanged;
+  }
+
+  private dimensionNeedsRerender(previousDimension: Dimension2D | undefined, nextDimension: Dimension2D): boolean {
+    return previousDimension !== nextDimension;
+  }
+
+  private syncDimensionVisualState(): void {
+    this.dimensionGroups.forEach((group, dimensionId) => {
+      const selected = this.selectedDimensionIds.has(dimensionId);
+      group.getObjects().forEach((obj) => {
+        const typed = obj as NamedObject;
+        if (typed.name === 'selectionHalo') {
+          obj.set('visible', selected);
+        } else if (typed.name === 'hoverHalo') {
+          obj.set('visible', !selected && this.hoveredDimensionId === dimensionId);
+        } else if (typed.isDimensionControlDecoration) {
+          obj.set('visible', selected);
+        } else if (typed.isDimensionControl) {
+          obj.set('visible', selected);
+        }
+      });
+      group.set('dirty', true);
+    });
   }
 
   private annotate(
@@ -752,50 +802,48 @@ export class DimensionRenderer {
   }
 
   renderAllDimensions(dimensions: Dimension2D[]): void {
-    this.dimensionGroups.forEach((group) => this.canvas.remove(group));
-    this.dimensionGroups.clear();
-    this.dimensionData.clear();
+    this.syncDimensions(dimensions, { force: true });
+  }
 
-    dimensions.forEach((dimension) => this.renderDimension(dimension));
-    this.setSelectedDimensions([...this.selectedDimensionIds]);
+  syncDimensions(dimensions: Dimension2D[], options: SyncDimensionsOptions = {}): void {
+    const { force = false } = options;
+    const nextDimensionIds = new Set(dimensions.map((dimension) => dimension.id));
+    let changed = force;
+
+    this.dimensionData.forEach((_, dimensionId) => {
+      if (!nextDimensionIds.has(dimensionId)) {
+        this.removeDimension(dimensionId);
+        changed = true;
+      }
+    });
+
+    dimensions.forEach((dimension) => {
+      const previousDimension = this.dimensionData.get(dimension.id);
+      const hasGroup = this.dimensionGroups.has(dimension.id);
+      if (!force && hasGroup && !this.dimensionNeedsRerender(previousDimension, dimension)) {
+        return;
+      }
+      this.renderDimension(dimension);
+      changed = true;
+    });
+
+    if (!changed) {
+      return;
+    }
+
+    this.syncDimensionVisualState();
     this.canvas.requestRenderAll();
   }
 
   setSelectedDimensions(dimensionIds: string[]): void {
     this.selectedDimensionIds = new Set(dimensionIds);
-    this.dimensionGroups.forEach((group, dimensionId) => {
-      const selected = this.selectedDimensionIds.has(dimensionId);
-      group.getObjects().forEach((obj) => {
-        const typed = obj as NamedObject;
-        if (typed.name === 'selectionHalo') {
-          obj.set('visible', selected);
-        } else if (typed.name === 'hoverHalo') {
-          obj.set('visible', !selected && this.hoveredDimensionId === dimensionId);
-        } else if (typed.isDimensionControlDecoration) {
-          obj.set('visible', selected);
-        } else if (typed.isDimensionControl) {
-          obj.set('visible', selected);
-        }
-      });
-      group.set('dirty', true);
-    });
+    this.syncDimensionVisualState();
     this.canvas.requestRenderAll();
   }
 
   setHoveredDimension(dimensionId: string | null): void {
     this.hoveredDimensionId = dimensionId;
-    this.dimensionGroups.forEach((group, currentId) => {
-      group.getObjects().forEach((obj) => {
-        const typed = obj as NamedObject;
-        if (typed.name === 'hoverHalo') {
-          obj.set(
-            'visible',
-            currentId === dimensionId && !this.selectedDimensionIds.has(currentId)
-          );
-        }
-      });
-      group.set('dirty', true);
-    });
+    this.syncDimensionVisualState();
     this.canvas.requestRenderAll();
   }
 

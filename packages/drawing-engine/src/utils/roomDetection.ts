@@ -1,4 +1,19 @@
-import * as turf from '@turf/turf';
+import {
+  booleanContains,
+  booleanPointInPolygon,
+  booleanPointOnLine,
+  centroid as turfCentroid,
+  featureCollection as turfFeatureCollection,
+  kinks as turfKinks,
+  lineIntersect,
+  lineSplit,
+  lineString as turfLineString,
+  point as turfPoint,
+  pointOnFeature as turfPointOnFeature,
+  polygon as turfPolygon,
+  polygonize,
+  polygonToLine,
+} from '@turf/turf';
 
 import type {
   DetectedRoom,
@@ -191,7 +206,7 @@ function toPolygonFeature(points: Point[], holes: Point[][] = []): any | null {
     .map((hole) => ensureClosedRing(hole))
     .filter((ring) => ring.length >= 4);
   try {
-    return turf.polygon([outer, ...holeRings]);
+    return turfPolygon([outer, ...holeRings]);
   } catch {
     return null;
   }
@@ -200,7 +215,7 @@ function toPolygonFeature(points: Point[], holes: Point[][] = []): any | null {
 function pointInsidePolygon(point: Point, polygon: Point[], holes: Point[][] = []): boolean {
   const polygonFeature = toPolygonFeature(polygon, holes);
   if (!polygonFeature) return false;
-  return turf.booleanPointInPolygon(turf.point([point.x, point.y]), polygonFeature, {
+  return booleanPointInPolygon(turfPoint([point.x, point.y]), polygonFeature, {
     ignoreBoundary: false,
   });
 }
@@ -210,7 +225,7 @@ function polygonContainsPolygon(outer: Point[], inner: Point[]): boolean {
   const innerFeature = toPolygonFeature(inner);
   if (!outerFeature || !innerFeature) return false;
   try {
-    return turf.booleanContains(outerFeature, innerFeature);
+    return booleanContains(outerFeature, innerFeature);
   } catch {
     return false;
   }
@@ -242,7 +257,7 @@ function geometryToRings(geometry: any): Array<{ outer: Point[]; holes: Point[][
 }
 
 function toLineFeature(wall: Pick<WallSegment, 'startPoint' | 'endPoint'>): any {
-  return turf.lineString([
+  return turfLineString([
     [wall.startPoint.x, wall.startPoint.y],
     [wall.endPoint.x, wall.endPoint.y],
   ]);
@@ -388,17 +403,17 @@ function normalizeWallEndpoints(wall: WallSegment, walls: WallSegment[], config:
 function pointOnPolygonBoundary(point: Point, polygon: Point[], tolerance = DIVIDER_TOLERANCE): boolean {
   const feature = toPolygonFeature(polygon);
   if (!feature) return false;
-  const boundary = turf.polygonToLine(feature);
-  const pointFeature = turf.point([point.x, point.y]);
+  const boundary = polygonToLine(feature);
+  const pointFeature = turfPoint([point.x, point.y]);
 
   if (boundary.type === 'FeatureCollection') {
     return boundary.features.some((line) =>
-      turf.booleanPointOnLine(pointFeature, line as any, {
+      booleanPointOnLine(pointFeature, line as any, {
         epsilon: tolerance,
       })
     );
   }
-  return turf.booleanPointOnLine(pointFeature, boundary as any, {
+  return booleanPointOnLine(pointFeature, boundary as any, {
     epsilon: tolerance,
   });
 }
@@ -720,8 +735,8 @@ function dfsCycles(
 
         const polygonFeature = toPolygonFeature(points);
         if (!polygonFeature) continue;
-        const kinks = turf.kinks(polygonFeature);
-        if (kinks.features.length > 0) continue;
+        const polygonKinks = turfKinks(polygonFeature);
+        if (polygonKinks.features.length > 0) continue;
 
         seen.add(signature);
         const normalizedWallIds = Array.from(
@@ -783,7 +798,7 @@ function polygonizeCandidates(
 
   let polygonized: any;
   try {
-    polygonized = turf.polygonize(turf.featureCollection(lineFeatures as any) as any) as any;
+    polygonized = polygonize(turfFeatureCollection(lineFeatures as any) as any) as any;
   } catch {
     return [];
   }
@@ -820,10 +835,10 @@ function wallTouchesPolygon(
   const polygonFeature = toPolygonFeature(polygon, holes);
   if (!polygonFeature) return false;
 
-  const boundary = turf.polygonToLine(polygonFeature);
+  const boundary = polygonToLine(polygonFeature);
   const intersects = boundary.type === 'FeatureCollection'
-    ? boundary.features.some((line: any) => turf.lineIntersect(wallLine, line as any).features.length > 0)
-    : turf.lineIntersect(wallLine, boundary as any).features.length > 0;
+    ? boundary.features.some((line: any) => lineIntersect(wallLine, line as any).features.length > 0)
+    : lineIntersect(wallLine, boundary as any).features.length > 0;
 
   if (intersects) return true;
   const mid = midpoint(wall.startPoint, wall.endPoint);
@@ -853,15 +868,15 @@ function polygonCentroidInside(polygon: Point[], holes: Point[] = []): Point {
   if (!feature) {
     return polygon[0] ?? { x: 0, y: 0 };
   }
-  const centroid = turf.centroid(feature);
+  const centroidFeature = turfCentroid(feature);
   const centroidPoint = {
-    x: centroid.geometry.coordinates[0],
-    y: centroid.geometry.coordinates[1],
+    x: centroidFeature.geometry.coordinates[0],
+    y: centroidFeature.geometry.coordinates[1],
   };
   if (pointInsidePolygon(centroidPoint, polygon, holes.length > 0 ? [holes] : [])) {
     return centroidPoint;
   }
-  const pointOn = turf.pointOnFeature(feature);
+  const pointOn = turfPointOnFeature(feature);
   return {
     x: pointOn.geometry.coordinates[0],
     y: pointOn.geometry.coordinates[1],
@@ -1091,7 +1106,7 @@ function splitRoomWithDivider(
   if (!wallIsDividerForRoom(divider, room, DIVIDER_TOLERANCE)) return [];
 
   const dividerFeature = toLineFeature(divider);
-  const boundary = turf.polygonToLine(parentFeature);
+  const boundary = polygonToLine(parentFeature);
   const boundaryLines = boundary.type === 'FeatureCollection'
     ? boundary.features
     : [boundary];
@@ -1099,7 +1114,7 @@ function splitRoomWithDivider(
   const splitBoundarySegments: any[] = [];
   boundaryLines.forEach((line) => {
     try {
-      const split = turf.lineSplit(line as any, dividerFeature);
+      const split = lineSplit(line as any, dividerFeature);
       splitBoundarySegments.push(...split.features);
     } catch {
       splitBoundarySegments.push(line as any);
@@ -1111,7 +1126,7 @@ function splitRoomWithDivider(
     const nextSegments: any[] = [];
     dividerSegments.forEach((segment) => {
       try {
-        const split = turf.lineSplit(segment, line as any);
+        const split = lineSplit(segment, line as any);
         if (split.features.length > 0) {
           nextSegments.push(...(split.features as any[]));
         } else {
@@ -1126,8 +1141,8 @@ function splitRoomWithDivider(
 
   let polygonized: any;
   try {
-    polygonized = turf.polygonize(
-      turf.featureCollection([
+    polygonized = polygonize(
+      turfFeatureCollection([
         ...splitBoundarySegments,
         ...dividerSegments,
       ] as any) as any
