@@ -690,8 +690,7 @@ function areCenterlinesCoincident(a: Wall, b: Wall, tol: number): boolean {
 
   if (sameDir || reverseDir) return true;
 
-  // Permit small endpoint jitter for true duplicates, but keep partially
-  // overlapping walls distinct so segment attachments keep working.
+  // Also check collinear overlapping segments
   const dirA = subtract(a.endPoint, a.startPoint);
   const dirB = subtract(b.endPoint, b.startPoint);
   const lenA = Math.hypot(dirA.x, dirA.y);
@@ -705,6 +704,9 @@ function areCenterlinesCoincident(a: Wall, b: Wall, tol: number): boolean {
   const perpDist = Math.abs(dot(subtract(b.startPoint, a.startPoint), perpA));
   if (perpDist > tol) return false;
 
+  // Require substantial overlap: BOTH endpoints of the shorter wall must
+  // project onto the longer wall's segment.  Prevents collinear walls
+  // sharing only a single endpoint from being treated as coincident.
   const projB0 = projectToSegment(b.startPoint, a.startPoint, a.endPoint);
   const projB1 = projectToSegment(b.endPoint, a.startPoint, a.endPoint);
   const bFullyOnA = projB0.distance <= tol && projB1.distance <= tol;
@@ -713,7 +715,7 @@ function areCenterlinesCoincident(a: Wall, b: Wall, tol: number): boolean {
   const projA1 = projectToSegment(a.endPoint, b.startPoint, b.endPoint);
   const aFullyOnB = projA0.distance <= tol && projA1.distance <= tol;
 
-  return bFullyOnA && aFullyOnB;
+  return bFullyOnA || aFullyOnB;
 }
 
 function computeJoinMapForWalls(

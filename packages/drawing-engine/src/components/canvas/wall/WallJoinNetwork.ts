@@ -698,9 +698,8 @@ function findCoincidentShadowedWalls(walls: Wall[]): Set<string> {
 }
 
 /**
- * Check whether two walls occupy the same physical centerline span.
- * Only true duplicates should be shadowed. A shorter wall that merely lies
- * on part of a longer wall still needs its own joins and outline rendering.
+ * Check whether two walls occupy the same centerline segment (within tolerance).
+ * Handles both same-direction and reverse-direction overlaps.
  */
 function areCenterlinesCoincident(a: Wall, b: Wall): boolean {
   const tolerance = NODE_TOLERANCE_MM;
@@ -714,8 +713,9 @@ function areCenterlinesCoincident(a: Wall, b: Wall): boolean {
 
   if (sameDir || reverseDir) return true;
 
-  // Allow a small amount of endpoint jitter for walls that represent the
-  // same span, but do not collapse partially overlapping collinear walls.
+  // Also check for overlapping collinear segments.  Two walls are
+  // collinear-coincident if they lie on the same line AND substantially
+  // overlap (not merely share a single endpoint).
   const dirA = { x: a.endPoint.x - a.startPoint.x, y: a.endPoint.y - a.startPoint.y };
   const dirB = { x: b.endPoint.x - b.startPoint.x, y: b.endPoint.y - b.startPoint.y };
   const lenA = Math.hypot(dirA.x, dirA.y);
@@ -733,6 +733,11 @@ function areCenterlinesCoincident(a: Wall, b: Wall): boolean {
   );
   if (perpDist > tolerance) return false;
 
+  // Require substantial overlap: BOTH endpoints of the shorter wall must
+  // project onto the longer wall's segment (within tolerance).  This
+  // prevents collinear walls that merely share a single endpoint (like
+  // Room 1's right wall and Room 2's right wall) from being treated as
+  // coincident.
   const projB0 = projectPointToSegment(b.startPoint, a.startPoint, a.endPoint);
   const projB1 = projectPointToSegment(b.endPoint, a.startPoint, a.endPoint);
   const bFullyOnA = projB0.distance <= tolerance && projB1.distance <= tolerance;
@@ -741,7 +746,8 @@ function areCenterlinesCoincident(a: Wall, b: Wall): boolean {
   const projA1 = projectPointToSegment(a.endPoint, b.startPoint, b.endPoint);
   const aFullyOnB = projA0.distance <= tolerance && projA1.distance <= tolerance;
 
-  return bFullyOnA && aFullyOnB;
+  // At least one wall must be fully contained within the other
+  return bFullyOnA || aFullyOnB;
 }
 
 export function computeWallJoinMap(walls: Wall[]): Map<string, JoinData[]> {
