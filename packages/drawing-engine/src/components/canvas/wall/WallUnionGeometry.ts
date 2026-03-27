@@ -2,7 +2,7 @@ import { featureCollection, multiPolygon, polygon, union } from '@turf/turf';
 
 import type { JoinData, Point2D, Wall } from '../../../types';
 
-import { computeWallBodyPolygon, computeWallPolygon } from './WallGeometry';
+import { computeWallBodyPolygon } from './WallGeometry';
 import { computeWallJoinMap, computeWallJoinMapWithShadows } from './WallJoinNetwork';
 
 const COMPONENT_TOLERANCE_MM = 2;
@@ -10,6 +10,8 @@ const COORDINATE_TOLERANCE_MM = 0.001;
 const MIN_PATCH_AREA_MM2 = 0.1;
 const MIN_UNION_ENDPOINT_ANGLE_DEG = 1;
 const SEGMENT_INTERIOR_TOLERANCE = 0.001;
+const SPIKE_JOIN_ANGLE_THRESHOLD_DEG = 30;
+const WALL_UNIFORMITY_TOLERANCE_MM = 0.5;
 
 type Endpoint = 'start' | 'end';
 type RingCoordinate = number[];
@@ -389,8 +391,24 @@ function makePolygonFeature(vertices: Point2D[]): PolygonFeature | null {
 }
 
 function wallPolygonFeature(wall: Wall, joins?: JoinData[]): PolygonFeature | null {
+  const startRef = buildEndpointRef(wall, 'start');
+  const endRef = buildEndpointRef(wall, 'end');
+  const startVertices = resolveRenderableCapVertices(
+    startRef,
+    joins?.find((join) => join.endpoint === 'start')
+  );
+  const endVertices = resolveRenderableCapVertices(
+    endRef,
+    joins?.find((join) => join.endpoint === 'end')
+  );
+
   return (
-    makePolygonFeature(computeWallPolygon(wall, joins)) ??
+    makePolygonFeature([
+      startVertices.interiorVertex,
+      endVertices.interiorVertex,
+      endVertices.exteriorVertex,
+      startVertices.exteriorVertex,
+    ]) ??
     makePolygonFeature(computeWallBodyPolygon(wall))
   );
 }
@@ -674,25 +692,65 @@ function endpointJoinForRef(
   );
 }
 
+function endpointHasManualBevel(wall: Wall, endpoint: Endpoint): boolean {
+  const bevel = endpoint === 'start' ? wall.startBevel : wall.endBevel;
+  return Math.abs(bevel?.innerOffset ?? 0) > 0.001 || Math.abs(bevel?.outerOffset ?? 0) > 0.001;
+}
+
+function violatesWallThicknessUniformity(
+  endpointRef: WallEndpointRef,
+  join: JoinData,
+  raw: { interiorVertex: Point2D; exteriorVertex: Point2D },
+  resolved: { interiorVertex: Point2D; exteriorVertex: Point2D }
+): boolean {
+  if (endpointHasManualBevel(endpointRef.wall, endpointRef.endpoint)) {
+    return false;
+  }
+  if (!Number.isFinite(join.angle) || join.angle >= SPIKE_JOIN_ANGLE_THRESHOLD_DEG) {
+    return false;
+  }
+
+  const spanTolerance = Math.max(
+    WALL_UNIFORMITY_TOLERANCE_MM,
+    endpointRef.wall.thickness * 0.02
+  );
+  const resolvedSpan = pointDistance(resolved.interiorVertex, resolved.exteriorVertex);
+  const interiorAdvance = dot(
+    subtract(resolved.interiorVertex, raw.interiorVertex),
+    endpointRef.direction
+  );
+  const exteriorAdvance = dot(
+    subtract(resolved.exteriorVertex, raw.exteriorVertex),
+    endpointRef.direction
+  );
+
+  return (
+    Math.abs(resolvedSpan - endpointRef.wall.thickness) > spanTolerance ||
+    Math.abs(interiorAdvance - exteriorAdvance) > spanTolerance
+  );
+}
+
+function resolveRenderableCapVertices(
+  endpointRef: WallEndpointRef,
+  join?: JoinData
+): { interiorVertex: Point2D; exteriorVertex: Point2D } {
+  const raw = endpointRawCapVertices(endpointRef);
+  if (!join) {
+    return raw;
+  }
+
+  const resolved = resolveJoinEdgeVertices(endpointRef.wall, join);
+  return violatesWallThicknessUniformity(endpointRef, join, raw, resolved) ? raw : resolved;
+}
+
 function endpointResolvedCapVertices(
   endpointRef: WallEndpointRef,
   joinsMap: Map<string, JoinData[]>
 ): { leftVertex: Point2D; rightVertex: Point2D } {
-  const join = endpointJoinForRef(endpointRef, joinsMap);
-  if (!join) {
-    const raw = endpointRawCapVertices(endpointRef);
-    return endpointRef.endpoint === 'start'
-      ? {
-          leftVertex: raw.interiorVertex,
-          rightVertex: raw.exteriorVertex,
-        }
-      : {
-          leftVertex: raw.exteriorVertex,
-          rightVertex: raw.interiorVertex,
-        };
-  }
-
-  const resolved = resolveJoinEdgeVertices(endpointRef.wall, join);
+  const resolved = resolveRenderableCapVertices(
+    endpointRef,
+    endpointJoinForRef(endpointRef, joinsMap)
+  );
   return endpointRef.endpoint === 'start'
     ? {
         leftVertex: resolved.interiorVertex,
@@ -742,7 +800,7 @@ function buildEndpointJoinPatchFeature(wall: Wall, join: JoinData): PolygonFeatu
 
   const endpointRef = buildEndpointRef(wall, join.endpoint);
   const rawCap = endpointRawCapVertices(endpointRef);
-  const joined = resolveJoinEdgeVertices(wall, join);
+  const joined = resolveRenderableCapVertices(endpointRef, join);
   return patchPolygonFeature([
     rawCap.interiorVertex,
     joined.interiorVertex,
