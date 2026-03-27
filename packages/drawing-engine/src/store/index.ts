@@ -691,16 +691,16 @@ function findWallsTouchingPoint(
   return touching;
 }
 
-function polygonArea(vertices: Point2D[]): number {
-  return GeometryEngine.calculateRoomAreaMm2({ vertices });
+function polygonArea(vertices: Point2D[], holes: Point2D[][] = []): number {
+  return GeometryEngine.calculateRoomAreaMm2({ vertices, holes });
 }
 
-function polygonPerimeter(vertices: Point2D[]): number {
-  return GeometryEngine.calculateRoomPerimeterMm({ vertices });
+function polygonPerimeter(vertices: Point2D[], holes: Point2D[][] = []): number {
+  return GeometryEngine.calculateRoomPerimeterMm({ vertices, holes });
 }
 
-function polygonCentroid(vertices: Point2D[]): Point2D {
-  return GeometryEngine.findRoomCentroid({ vertices });
+function polygonCentroid(vertices: Point2D[], holes: Point2D[][] = []): Point2D {
+  return GeometryEngine.findRoomCentroid({ vertices, holes });
 }
 
 function bindWallAttributes(wall: Wall, defaults?: Partial<Wall3D>): Wall {
@@ -712,9 +712,9 @@ function bindWallAttributes(wall: Wall, defaults?: Partial<Wall3D>): Wall {
 }
 
 function bindRoomAttributes(room: Room, defaults?: Partial<Room3D>): Room {
-  const computedArea = polygonArea(room.vertices);
-  const computedPerimeter = polygonPerimeter(room.vertices);
-  const computedCentroid = polygonCentroid(room.vertices);
+  const computedArea = polygonArea(room.vertices, room.holes ?? []);
+  const computedPerimeter = polygonPerimeter(room.vertices, room.holes ?? []);
+  const computedCentroid = polygonCentroid(room.vertices, room.holes ?? []);
   const bound = bindRoomGeometryTo3D(
     {
       ...room,
@@ -1264,6 +1264,7 @@ export const useDrawingStore = create<DrawingState>()(
           ...room,
           centroid: { ...room.centroid },
           vertices: room.vertices.map((vertex) => ({ ...vertex })),
+          holes: room.holes?.map((hole) => hole.map((vertex) => ({ ...vertex }))),
           wallIds: [...room.wallIds],
           adjacentRoomIds: [...room.adjacentRoomIds],
           validationWarnings: [...room.validationWarnings],
@@ -1464,6 +1465,7 @@ export const useDrawingStore = create<DrawingState>()(
           const roomsSnapshot = detectionState.rooms.map((room) => ({
             ...room,
             vertices: room.vertices.map((vertex) => ({ ...vertex })),
+            holes: room.holes?.map((hole) => hole.map((vertex) => ({ ...vertex }))),
             wallIds: [...room.wallIds],
             adjacentRoomIds: [...room.adjacentRoomIds],
             validationWarnings: [...room.validationWarnings],
@@ -2632,6 +2634,7 @@ export const useDrawingStore = create<DrawingState>()(
 
       connectWalls: (wallId, otherWallId) => {
         if (wallId === otherWallId) return;
+        let didChange = false;
         set((state) => {
           const wallIndex = state.walls.findIndex((wall) => wall.id === wallId);
           const otherWallIndex = state.walls.findIndex((wall) => wall.id === otherWallId);
@@ -2649,6 +2652,7 @@ export const useDrawingStore = create<DrawingState>()(
           }
 
           const nextWalls = [...state.walls];
+          didChange = true;
 
           if (!wallHasOther) {
             nextWalls[wallIndex] = {
@@ -2667,20 +2671,36 @@ export const useDrawingStore = create<DrawingState>()(
 
           return { walls: nextWalls };
         });
+        if (didChange) {
+          get().detectRooms({ debounce: true });
+        }
       },
 
       disconnectWall: (wallId, otherWallId) => {
-        set((state) => ({
-          walls: state.walls.map((wall) => {
-            if (wall.id === wallId || wall.id === otherWallId) {
-              return {
-                ...wall,
-                connectedWalls: wall.connectedWalls.filter((id) => id !== wallId && id !== otherWallId),
-              };
+        let didChange = false;
+        set((state) => {
+          const nextWalls = state.walls.map((wall) => {
+            if (wall.id !== wallId && wall.id !== otherWallId) {
+              return wall;
             }
-            return wall;
-          }),
-        }));
+
+            const nextConnectedWalls = wall.connectedWalls.filter((id) => id !== wallId && id !== otherWallId);
+            if (nextConnectedWalls.length === wall.connectedWalls.length) {
+              return wall;
+            }
+
+            didChange = true;
+            return {
+              ...wall,
+              connectedWalls: nextConnectedWalls,
+            };
+          });
+
+          return didChange ? { walls: nextWalls } : state;
+        });
+        if (didChange) {
+          get().detectRooms({ debounce: true });
+        }
       },
 
       setWallSettings: (settings) => {
@@ -3246,16 +3266,24 @@ export const useDrawingStore = create<DrawingState>()(
           const rawRooms = Array.isArray(data.rooms) ? data.rooms : [];
           const importedRooms: Room[] = rawRooms.map((rawRoom: Partial<Room>) => {
             const fallbackVertices = Array.isArray(rawRoom.vertices) ? rawRoom.vertices : [];
-            const fallbackArea = typeof rawRoom.area === 'number' ? rawRoom.area : polygonArea(fallbackVertices);
+            const fallbackHoles = Array.isArray(rawRoom.holes)
+              ? rawRoom.holes.map((hole) => (Array.isArray(hole) ? hole : []))
+              : [];
+            const fallbackArea = typeof rawRoom.area === 'number'
+              ? rawRoom.area
+              : polygonArea(fallbackVertices, fallbackHoles);
             const baseRoom: Room = {
               id: rawRoom.id ?? generateId(),
               name: rawRoom.name ?? 'Room',
               roomType: rawRoom.roomType ?? inferRoomType(fallbackArea / 1_000_000),
               vertices: fallbackVertices,
+              holes: fallbackHoles,
               wallIds: Array.isArray(rawRoom.wallIds) ? rawRoom.wallIds : [],
               area: fallbackArea,
-              perimeter: typeof rawRoom.perimeter === 'number' ? rawRoom.perimeter : polygonPerimeter(fallbackVertices),
-              centroid: rawRoom.centroid ?? polygonCentroid(fallbackVertices),
+              perimeter: typeof rawRoom.perimeter === 'number'
+                ? rawRoom.perimeter
+                : polygonPerimeter(fallbackVertices, fallbackHoles),
+              centroid: rawRoom.centroid ?? polygonCentroid(fallbackVertices, fallbackHoles),
               finishes: rawRoom.finishes ?? '',
               notes: rawRoom.notes ?? '',
               fillColor: rawRoom.fillColor ?? roomTypeFillColor(rawRoom.roomType ?? inferRoomType(fallbackArea / 1_000_000)),

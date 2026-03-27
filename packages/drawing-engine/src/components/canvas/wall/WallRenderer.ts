@@ -481,6 +481,7 @@ export class WallRenderer {
     this.rooms = rooms.map((room) => ({
       ...room,
       vertices: room.vertices.map((vertex) => ({ ...vertex })),
+      holes: room.holes?.map((hole) => hole.map((vertex) => ({ ...vertex }))),
       wallIds: [...room.wallIds],
     }));
     this.setRoomWallIds(this.rooms.flatMap((room) => room.wallIds));

@@ -10,6 +10,8 @@
 import * as fabric from 'fabric';
 
 import type { Point2D, Room, Wall } from '../../../types';
+import { distancePointToSegment } from '../../../utils/geometry';
+import { GeometryEngine } from '../../../utils/geometry-engine';
 import { MM_TO_PX } from '../scale';
 
 import { isRoomIsolatedFromAttachments } from './roomIsolation';
@@ -29,14 +31,24 @@ type RoomGroup = fabric.Group & { roomId?: string; id?: string; name?: string };
 type RoomLabelGroup = fabric.Group & { roomId?: string; id?: string; name?: string };
 type RoomControlGroup = fabric.Group & { roomId?: string; id?: string; name?: string };
 
-const MIN_LABEL_FONT_SIZE = 72;
-const MAX_LABEL_FONT_SIZE = 56;
-const LABEL_MIN_SCREEN_SCALE = 1.4;
-const LABEL_MIN_SCENE_SCALE = 1.05;
-const LABEL_SELECTED_MARGIN_X = 18;
-const LABEL_SELECTED_MARGIN_Y = 16;
-const LABEL_SELECTED_INSET = 6;
-const LABEL_FIT_STEPS = 18;
+interface AreaTag {
+  id: string;
+  roomId: string;
+  area: number;
+  centroid: Point2D;
+  vertices: Point2D[];
+  holes: Point2D[][];
+  accentColor: string;
+}
+
+const AREA_TAG_FONT_SIZE = 56;
+const LABEL_TARGET_SCREEN_SCALE = 1.2;
+const LABEL_MIN_SCENE_SCALE = 0.1;
+const LABEL_MIN_FIT_RATIO = 0.72;
+const LABEL_FIT_STEPS = 12;
+const AREA_TAG_PADDING_X = 14;
+const AREA_TAG_PADDING_Y = 10;
+const AREA_TAG_CANDIDATE_GRID = 7;
 
 interface SyncRoomsOptions {
   force?: boolean;
@@ -78,21 +90,40 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-function polygonArea(vertices: Point2D[]): number {
-  let area = 0;
-  for (let index = 0, prevIndex = vertices.length - 1; index < vertices.length; prevIndex = index++) {
-    const current = vertices[index];
-    const previous = vertices[prevIndex];
-    area += previous.x * current.y - current.x * previous.y;
+function formatRoomArea(areaMm2: number): string {
+  const areaM2 = areaMm2 / 1_000_000;
+  const precision = areaM2 >= 100 ? 0 : areaM2 >= 10 ? 1 : 2;
+  return `${areaM2.toFixed(precision)} m²`;
+}
+
+function ringPathData(vertices: Point2D[]): string {
+  if (vertices.length < 3) return '';
+  const [first, ...rest] = vertices.map(toCanvasPoint);
+  const commands = [`M ${first.x} ${first.y}`];
+  rest.forEach((point) => {
+    commands.push(`L ${point.x} ${point.y}`);
+  });
+  commands.push('Z');
+  return commands.join(' ');
+}
+
+function distanceToRingEdges(point: Point2D, ring: Point2D[]): number {
+  if (ring.length < 2) return 0;
+  let best = Number.POSITIVE_INFINITY;
+  for (let index = 0; index < ring.length; index += 1) {
+    const start = ring[index];
+    const end = ring[(index + 1) % ring.length];
+    best = Math.min(best, distancePointToSegment(point, start, end).distance);
   }
-  return Math.abs(area) / 2;
+  return Number.isFinite(best) ? best : 0;
 }
 
 export class RoomRenderer {
   private canvas: fabric.Canvas;
   private roomGroups = new Map<string, RoomGroup>();
   private roomControlGroups = new Map<string, RoomControlGroup>();
-  private roomLabelGroups = new Map<string, RoomLabelGroup>();
+  private areaTagGroups = new Map<string, RoomLabelGroup>();
+  private areaTagData = new Map<string, AreaTag>();
   private roomData = new Map<string, Room>();
   private wallData = new Map<string, Wall>();
   private selectedRoomIds = new Set<string>();
@@ -123,6 +154,13 @@ export class RoomRenderer {
     return inside;
   }
 
+  private pointInArea(point: Point2D, outer: Point2D[], holes: Point2D[][] = []): boolean {
+    if (!this.pointInPolygon(point, outer)) {
+      return false;
+    }
+    return holes.every((hole) => !this.pointInPolygon(point, hole));
+  }
+
   setShowTemperatureIcons(show: boolean): void {
     this.showTemperatureIcons = show;
     this.syncRooms(Array.from(this.roomData.values()), { force: true });
@@ -133,11 +171,14 @@ export class RoomRenderer {
     this.syncRooms(Array.from(this.roomData.values()), { force: true });
   }
 
-  setViewportZoom(zoom: number): void {
+  setViewportZoom(zoom: number, options: { requestRender?: boolean } = {}): void {
+    const { requestRender = true } = options;
     this.viewportZoom = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
     this.applyLabelZoomScaling();
     this.refreshViewportVisibility();
-    this.canvas.requestRenderAll();
+    if (requestRender) {
+      this.canvas.requestRenderAll();
+    }
   }
 
   private annotate(target: fabric.FabricObject, roomId: string, name?: string): void {
@@ -165,9 +206,9 @@ export class RoomRenderer {
     return screenPx / this.viewportZoom;
   }
 
-  private getLabelScale(): number {
+  private getBaseLabelScale(): number {
     const safeZoom = Math.max(this.viewportZoom, 0.05);
-    return clamp(LABEL_MIN_SCREEN_SCALE / safeZoom, LABEL_MIN_SCENE_SCALE, 10);
+    return clamp(LABEL_TARGET_SCREEN_SCALE / safeZoom, LABEL_MIN_SCENE_SCALE, 10);
   }
 
   private isRoomControlVisible(roomId: string): boolean {
@@ -251,7 +292,6 @@ export class RoomRenderer {
       }
       const visible = this.isObjectVisibleInViewport(roomGroup, bounds);
       const controlGroup = this.roomControlGroups.get(roomId);
-      const labelGroup = this.roomLabelGroups.get(roomId);
 
       if (roomGroup.visible !== visible) {
         roomGroup.set('visible', visible);
@@ -261,9 +301,13 @@ export class RoomRenderer {
         controlGroup.set('visible', visible);
         controlGroup.set('dirty', true);
       }
-      if (labelGroup && labelGroup.visible !== visible) {
-        labelGroup.set('visible', visible);
-        labelGroup.set('dirty', true);
+    });
+
+    this.areaTagGroups.forEach((group) => {
+      const visible = this.isObjectVisibleInViewport(group, bounds);
+      if (group.visible !== visible) {
+        group.set('visible', visible);
+        group.set('dirty', true);
       }
     });
   }
@@ -292,37 +336,29 @@ export class RoomRenderer {
       this.updateRoomControlGroupVisibility(group, roomId);
     });
 
-    this.roomLabelGroups.forEach((group) => {
+    this.areaTagGroups.forEach((group) => {
       this.applyZoomScaleToLabelGroup(group);
       group.set('dirty', true);
+      this.canvas.bringObjectToFront(group);
     });
-
-    if (this.activeDragRoomId) {
-      const labelGroup = this.roomLabelGroups.get(this.activeDragRoomId);
-      if (labelGroup) {
-        this.canvas.bringObjectToFront(labelGroup);
-      }
-    }
 
     if (this.persistentControlRoomId) {
       const controlGroup = this.roomControlGroups.get(this.persistentControlRoomId);
       if (controlGroup) {
         this.canvas.bringObjectToFront(controlGroup);
       }
-      const labelGroup = this.roomLabelGroups.get(this.persistentControlRoomId);
-      if (labelGroup) {
-        this.canvas.bringObjectToFront(labelGroup);
-      }
     }
   }
 
-  private doesLabelRectFitRoom(
+  private doesLabelRectFitArea(
     center: Point2D,
     halfWidth: number,
     halfHeight: number,
-    room: Room
+    vertices: Point2D[],
+    holes: Point2D[][] = []
   ): boolean {
-    const polygon = room.vertices.map(toCanvasPoint);
+    const outer = vertices.map(toCanvasPoint);
+    const canvasHoles = holes.map((hole) => hole.map(toCanvasPoint));
     const testPoints: Point2D[] = [
       center,
       { x: center.x - halfWidth, y: center.y - halfHeight },
@@ -330,147 +366,148 @@ export class RoomRenderer {
       { x: center.x + halfWidth, y: center.y + halfHeight },
       { x: center.x - halfWidth, y: center.y + halfHeight },
     ];
-    return testPoints.every((point) => this.pointInPolygon(point, polygon));
+    return testPoints.every((point) => this.pointInArea(point, outer, canvasHoles));
   }
 
-  private findFittedLabelCenter(
-    room: Room,
-    preferredCenter: Point2D,
-    fallbackCenter: Point2D,
-    halfWidth: number,
-    halfHeight: number
-  ): Point2D {
-    if (this.doesLabelRectFitRoom(preferredCenter, halfWidth, halfHeight, room)) {
-      return preferredCenter;
-    }
+  private getAreaTagCandidatePoints(areaTag: Pick<AreaTag, 'centroid' | 'vertices' | 'holes'>): Point2D[] {
+    const candidates: Point2D[] = [{ ...areaTag.centroid }];
+    const bounds = roomBounds(areaTag.vertices);
+    const width = Math.max(bounds.maxX - bounds.minX, 1);
+    const height = Math.max(bounds.maxY - bounds.minY, 1);
+    const steps = AREA_TAG_CANDIDATE_GRID;
 
-    for (let step = 1; step <= LABEL_FIT_STEPS; step += 1) {
-      const t = step / LABEL_FIT_STEPS;
-      const candidate = {
-        x: preferredCenter.x + (fallbackCenter.x - preferredCenter.x) * t,
-        y: preferredCenter.y + (fallbackCenter.y - preferredCenter.y) * t,
-      };
-      if (this.doesLabelRectFitRoom(candidate, halfWidth, halfHeight, room)) {
-        return candidate;
+    for (let row = 0; row <= steps; row += 1) {
+      for (let column = 0; column <= steps; column += 1) {
+        const point = {
+          x: bounds.minX + (width * column) / steps,
+          y: bounds.minY + (height * row) / steps,
+        };
+        if (GeometryEngine.pointInRoom(point, areaTag)) {
+          candidates.push(point);
+        }
       }
     }
 
-    return fallbackCenter;
+    areaTag.vertices.forEach((vertex, index) => {
+      const next = areaTag.vertices[(index + 1) % areaTag.vertices.length];
+      candidates.push(midpoint(vertex, next));
+    });
+
+    const deduped: Point2D[] = [];
+    candidates.forEach((candidate) => {
+      if (!GeometryEngine.pointInRoom(candidate, areaTag)) {
+        return;
+      }
+      const exists = deduped.some((point) => (
+        Math.abs(point.x - candidate.x) < 1 &&
+        Math.abs(point.y - candidate.y) < 1
+      ));
+      if (!exists) {
+        deduped.push(candidate);
+      }
+    });
+    return deduped;
   }
 
-  private getRoomLabelCenter(
-    room: Room,
+  private getAreaTagClearance(
+    point: Point2D,
+    areaTag: Pick<AreaTag, 'vertices' | 'holes'>
+  ): number {
+    const outerClearance = distanceToRingEdges(point, areaTag.vertices);
+    const holeClearance = areaTag.holes.reduce((best, hole) => (
+      Math.min(best, distanceToRingEdges(point, hole))
+    ), Number.POSITIVE_INFINITY);
+    return Math.min(outerClearance, holeClearance);
+  }
+
+  private getAreaTagPlacement(
+    areaTag: Pick<AreaTag, 'centroid' | 'vertices' | 'holes'>,
     baseWidth: number,
-    baseHeight: number,
-    scale: number
-  ): Point2D {
-    const centroidCanvas = toCanvasPoint(room.centroid);
-    const halfWidth = (baseWidth * scale) / 2;
-    const halfHeight = (baseHeight * scale) / 2;
+    baseHeight: number
+  ): { center: Point2D; scale: number } {
+    const preferredScale = this.getBaseLabelScale();
+    const minimumScale = Math.max(preferredScale * LABEL_MIN_FIT_RATIO, LABEL_MIN_SCENE_SCALE);
+    const candidates = this.getAreaTagCandidatePoints(areaTag)
+      .map((candidate) => ({
+        center: candidate,
+        clearance: this.getAreaTagClearance(candidate, areaTag),
+      }))
+      .sort((left, right) => right.clearance - left.clearance);
 
-    if (this.activeDragRoomId !== room.id) {
-      return this.findFittedLabelCenter(
-        room,
-        centroidCanvas,
-        centroidCanvas,
-        halfWidth,
-        halfHeight
-      );
-    }
-
-    const bounds = roomBounds(room.vertices);
-    const minX = bounds.minX * MM_TO_PX;
-    const minY = bounds.minY * MM_TO_PX;
-    const maxX = bounds.maxX * MM_TO_PX;
-    const maxY = bounds.maxY * MM_TO_PX;
-    const preferredX = minX + this.sp(LABEL_SELECTED_MARGIN_X) + halfWidth;
-    const preferredY = minY + this.sp(LABEL_SELECTED_MARGIN_Y) + halfHeight;
-    const clampedMinX = minX + halfWidth + this.sp(LABEL_SELECTED_INSET);
-    const clampedMaxX = maxX - halfWidth - this.sp(LABEL_SELECTED_INSET);
-    const clampedMinY = minY + halfHeight + this.sp(LABEL_SELECTED_INSET);
-    const clampedMaxY = maxY - halfHeight - this.sp(LABEL_SELECTED_INSET);
-
-    if (clampedMaxX <= clampedMinX || clampedMaxY <= clampedMinY) {
-      return {
-        x: minX + halfWidth + this.sp(LABEL_SELECTED_MARGIN_X),
-        y: minY + halfHeight + this.sp(LABEL_SELECTED_MARGIN_Y),
-      };
-    }
-
-    const preferredCenter = {
-      x: clamp(preferredX, clampedMinX, clampedMaxX),
-      y: clamp(preferredY, clampedMinY, clampedMaxY),
+    let best = {
+      center: areaTag.centroid,
+      scale: minimumScale,
+      score: Number.NEGATIVE_INFINITY,
     };
-    return this.findFittedLabelCenter(
-      room,
-      preferredCenter,
-      centroidCanvas,
-      halfWidth,
-      halfHeight
-    );
+
+    candidates.forEach(({ center, clearance }) => {
+      const labelCenter = toCanvasPoint(center);
+      let bestScaleForCandidate = minimumScale;
+      let fits = false;
+
+      for (let step = 0; step <= LABEL_FIT_STEPS; step += 1) {
+        const t = step / LABEL_FIT_STEPS;
+        const scale = preferredScale - (preferredScale - minimumScale) * t;
+        const halfWidth = (baseWidth * scale) / 2;
+        const halfHeight = (baseHeight * scale) / 2;
+        if (this.doesLabelRectFitArea(labelCenter, halfWidth, halfHeight, areaTag.vertices, areaTag.holes)) {
+          bestScaleForCandidate = scale;
+          fits = true;
+          break;
+        }
+      }
+
+      const score = (fits ? 1_000_000 : 0) + bestScaleForCandidate * 10_000 + clearance;
+      if (score > best.score) {
+        best = {
+          center,
+          scale: bestScaleForCandidate,
+          score,
+        };
+      }
+    });
+
+    return {
+      center: best.center,
+      scale: best.scale,
+    };
   }
 
-  private createRoomLabelGroup(room: Room): RoomLabelGroup | null {
-    if (!room.showLabel) {
-      return null;
-    }
-    const areaM2 = room.area / 1_000_000;
-    const titleFontSize = clamp(Math.sqrt(Math.max(areaM2, 1)) * 2.2 + 11, MIN_LABEL_FONT_SIZE, MAX_LABEL_FONT_SIZE);
-    const metaFontSize = clamp(titleFontSize - 2, MIN_LABEL_FONT_SIZE - 1, MAX_LABEL_FONT_SIZE - 2);
-    const titleText = room.name;
-    const areaText = `${areaM2.toFixed(1)} m²`;
+  private createAreaTagGroup(areaTag: AreaTag): RoomLabelGroup {
+    const areaText = formatRoomArea(areaTag.area);
+    const areaFontSize = AREA_TAG_FONT_SIZE;
 
-    const title = new fabric.Text(titleText, {
+    const areaLabel = new fabric.Text(areaText, {
       left: 0,
       top: 0,
-      fontSize: titleFontSize,
+      fontSize: areaFontSize,
       fontWeight: 'bold',
       fill: '#0F172A',
       fontFamily: 'Arial',
-      originX: 'left',
+      textAlign: 'center',
+      originX: 'center',
       originY: 'top',
       selectable: false,
       evented: false,
     });
-    this.annotate(title, room.id, 'roomLabelTitle');
+    this.annotate(areaLabel, areaTag.id, 'roomLabelArea');
 
-    const meta = new fabric.Text(areaText, {
-      left: 0,
-      top: 0,
-      fontSize: metaFontSize,
-      fill: '#1E293B',
-      fontFamily: 'Arial',
-      originX: 'left',
-      originY: 'top',
-      selectable: false,
-      evented: false,
-    });
-    this.annotate(meta, room.id, 'roomLabelArea');
-
-    const paddingX = 10;
-    const paddingY = 8;
-    const lineGap = 4;
-    const dotRadius = 5;
-    const dotGap = 8;
-    const titleWidth = title.width ?? titleText.length * titleFontSize * 0.55;
-    const metaWidth = meta.width ?? areaText.length * metaFontSize * 0.55;
-    const titleHeight = title.height ?? titleFontSize * 1.2;
-    const metaHeight = meta.height ?? metaFontSize * 1.2;
-    const textWidth = Math.max(titleWidth, metaWidth);
-    const textHeight = titleHeight + lineGap + metaHeight;
-    const contentWidth = dotRadius * 2 + dotGap + textWidth;
-    const labelWidth = contentWidth + paddingX * 2;
-    const labelHeight = textHeight + paddingY * 2;
+    const paddingX = AREA_TAG_PADDING_X;
+    const paddingY = AREA_TAG_PADDING_Y;
+    const areaWidth = areaLabel.width ?? areaText.length * areaFontSize * 0.52;
+    const areaHeight = areaLabel.height ?? areaFontSize * 1.2;
+    const labelWidth = areaWidth + paddingX * 2;
+    const labelHeight = areaHeight + paddingY * 2;
 
     const background = new fabric.Rect({
       left: 0,
       top: 0,
       width: labelWidth,
       height: labelHeight,
-      rx: 6,
-      ry: 6,
-      fill: 'rgba(255,255,255,0.96)',
-      stroke: 'rgba(15,23,42,0.35)',
+      rx: 10,
+      ry: 10,
+      fill: 'rgba(255,255,255,0.94)',
+      stroke: areaTag.accentColor,
       strokeWidth: 1,
       originX: 'left',
       originY: 'top',
@@ -478,88 +515,106 @@ export class RoomRenderer {
       evented: false,
       shadow: new fabric.Shadow({
         color: 'rgba(15,23,42,0.2)',
-        blur: 5,
+        blur: 7,
         offsetX: 0,
-        offsetY: 1,
+        offsetY: 2,
       }),
     });
-    this.annotate(background, room.id, 'roomLabelBackground');
+    this.annotate(background, areaTag.id, 'roomLabelBackground');
 
-    const dotCenterX = paddingX + dotRadius;
-    const textStartX = paddingX + dotRadius * 2 + dotGap;
-    const dotCenterY = paddingY + titleHeight * 0.5 + 1;
-
-    const colorDot = new fabric.Circle({
-      left: dotCenterX,
-      top: dotCenterY,
-      radius: dotRadius,
-      fill: room.fillColor,
-      stroke: '#0F172A',
-      strokeWidth: 0.5,
-      originX: 'center',
-      originY: 'center',
-      selectable: false,
-      evented: false,
-    });
-    this.annotate(colorDot, room.id, 'roomLabelDot');
-
-    title.set({
-      left: textStartX,
+    areaLabel.set({
+      left: labelWidth / 2,
       top: paddingY,
     });
-    meta.set({
-      left: textStartX,
-      top: paddingY + titleHeight + lineGap,
-    });
 
-    const labelScale = this.getLabelScale();
-    const labelCenter = this.getRoomLabelCenter(room, labelWidth, labelHeight, labelScale);
+    const labelCenter = toCanvasPoint(areaTag.centroid);
 
-    const labelGroup = new fabric.Group([background, colorDot, title, meta], {
+    const labelGroup = new fabric.Group([background, areaLabel], {
       left: labelCenter.x,
       top: labelCenter.y,
       originX: 'center',
       originY: 'center',
       selectable: false,
       evented: false,
-      objectCaching: true,
+      objectCaching: false,
       excludeFromExport: true,
     }) as RoomLabelGroup;
-    labelGroup.id = room.id;
-    labelGroup.roomId = room.id;
-    labelGroup.name = `room-label-${room.id}`;
+    labelGroup.id = areaTag.id;
+    labelGroup.roomId = areaTag.id;
+    labelGroup.name = `room-area-tag-${areaTag.id}`;
     this.applyZoomScaleToLabelGroup(labelGroup);
     return labelGroup;
   }
 
   private applyZoomScaleToLabelGroup(group: RoomLabelGroup): void {
-    const scale = this.getLabelScale();
-    const room = group.roomId ? this.roomData.get(group.roomId) : null;
-    if (room) {
-      const center = this.getRoomLabelCenter(room, group.width ?? 0, group.height ?? 0, scale);
+    const areaTag = group.roomId ? this.areaTagData.get(group.roomId) : null;
+    const placement = areaTag
+      ? this.getAreaTagPlacement(areaTag, group.width ?? 0, group.height ?? 0)
+      : { center: { x: 0, y: 0 }, scale: this.getBaseLabelScale() };
+    if (areaTag) {
+      const center = toCanvasPoint(placement.center);
       group.set({
         left: center.x,
         top: center.y,
       });
     }
     group.set({
-      scaleX: scale,
-      scaleY: scale,
+      scaleX: placement.scale,
+      scaleY: placement.scale,
     });
     group.setCoords();
   }
 
   private applyLabelZoomScaling(): void {
-    this.roomLabelGroups.forEach((group) => {
+    this.areaTagGroups.forEach((group) => {
       this.applyZoomScaleToLabelGroup(group);
     });
   }
 
-  private createRoomGroup(room: Room): RoomGroup {
-    const polygonPoints = room.vertices.map((point) => toCanvasPoint(point));
+  private buildAreaTagsFromRooms(rooms: Room[]): AreaTag[] {
+    return rooms
+      .filter((room) => room.showLabel)
+      .map((room) => ({
+        id: room.id,
+        roomId: room.id,
+        area: room.area,
+        centroid: { ...room.centroid },
+        vertices: room.vertices.map((vertex) => ({ ...vertex })),
+        holes: (room.holes ?? []).map((hole) => hole.map((vertex) => ({ ...vertex }))),
+        accentColor: '#94A3B8',
+      }));
+  }
 
-    const fill = new fabric.Polygon(polygonPoints, {
+  private roomPathData(room: Pick<Room, 'vertices' | 'holes'>): string {
+    return [room.vertices, ...(room.holes ?? [])]
+      .map((ring) => ringPathData(ring))
+      .filter((path) => path.length > 0)
+      .join(' ');
+  }
+
+  private syncAreaTagsFromRooms(rooms: Room[]): void {
+    this.areaTagGroups.forEach((group) => this.canvas.remove(group));
+    this.areaTagGroups.clear();
+    this.areaTagData.clear();
+
+    this.buildAreaTagsFromRooms(rooms).forEach((areaTag) => {
+      this.areaTagData.set(areaTag.id, areaTag);
+      const group = this.createAreaTagGroup(areaTag);
+      this.areaTagGroups.set(areaTag.id, group);
+      this.canvas.add(group);
+      this.canvas.bringObjectToFront(group);
+    });
+
+    this.applyLabelZoomScaling();
+    this.refreshViewportVisibility();
+  }
+
+  private createRoomGroup(room: Room): RoomGroup {
+    const pathData = this.roomPathData(room);
+
+    const fill = new fabric.Path(pathData, {
       fill: room.fillColor,
+      fillRule: 'evenodd',
       opacity: 0.12,
       stroke: 'transparent',
       strokeWidth: 0,
@@ -568,8 +623,9 @@ export class RoomRenderer {
     });
     this.annotate(fill, room.id, 'roomFill');
 
-    const selectionOutline = new fabric.Polygon(polygonPoints, {
+    const selectionOutline = new fabric.Path(pathData, {
       fill: 'rgba(37,99,235,0.12)',
+      fillRule: 'evenodd',
       stroke: '#1D4ED8',
       strokeWidth: 3,
       strokeDashArray: [6, 4],
@@ -579,8 +635,9 @@ export class RoomRenderer {
     });
     this.annotate(selectionOutline, room.id, 'selectionOutline');
 
-    const hoverOutline = new fabric.Polygon(polygonPoints, {
+    const hoverOutline = new fabric.Path(pathData, {
       fill: 'rgba(16,185,129,0.1)',
+      fillRule: 'evenodd',
       stroke: '#059669',
       strokeWidth: 2.5,
       strokeDashArray: [5, 5],
@@ -1038,13 +1095,6 @@ export class RoomRenderer {
     this.roomControlGroups.set(room.id, controlGroup);
     this.canvas.add(controlGroup);
     this.canvas.bringObjectToFront(controlGroup);
-
-    const labelGroup = this.createRoomLabelGroup(room);
-    if (labelGroup) {
-      this.roomLabelGroups.set(room.id, labelGroup);
-      this.canvas.add(labelGroup);
-      this.canvas.bringObjectToFront(labelGroup);
-    }
   }
 
   renderAllRooms(rooms: Room[]): void {
@@ -1067,8 +1117,7 @@ export class RoomRenderer {
       const previousRoom = this.roomData.get(room.id);
       const hasRequiredGroups =
         this.roomGroups.has(room.id) &&
-        this.roomControlGroups.has(room.id) &&
-        (!room.showLabel || this.roomLabelGroups.has(room.id));
+        this.roomControlGroups.has(room.id);
       if (!force && hasRequiredGroups && !this.roomNeedsRerender(previousRoom, room)) {
         return;
       }
@@ -1080,6 +1129,7 @@ export class RoomRenderer {
       return;
     }
 
+    this.syncAreaTagsFromRooms(Array.from(this.roomData.values()));
     this.applyLabelZoomScaling();
     this.refreshViewportVisibility();
     this.syncRoomVisualState();
@@ -1115,13 +1165,13 @@ export class RoomRenderer {
     let bestArea = Number.POSITIVE_INFINITY;
 
     this.roomData.forEach((room, roomId) => {
-      if (!this.pointInPolygon(point, room.vertices)) {
+      if (!GeometryEngine.pointInRoom(point, room)) {
         return;
       }
 
       const area = Number.isFinite(room.area) && room.area > 0
         ? room.area
-        : polygonArea(room.vertices);
+        : GeometryEngine.calculateRoomAreaMm2(room);
       if (area < bestArea) {
         bestArea = area;
         bestRoomId = roomId;
@@ -1142,11 +1192,6 @@ export class RoomRenderer {
       this.canvas.remove(controlGroup);
       this.roomControlGroups.delete(roomId);
     }
-    const labelGroup = this.roomLabelGroups.get(roomId);
-    if (labelGroup) {
-      this.canvas.remove(labelGroup);
-      this.roomLabelGroups.delete(roomId);
-    }
     this.roomData.delete(roomId);
     this.selectedRoomIds.delete(roomId);
     if (this.activeDragRoomId === roomId) {
@@ -1163,10 +1208,11 @@ export class RoomRenderer {
   clearAllRooms(): void {
     this.roomGroups.forEach((group) => this.canvas.remove(group));
     this.roomControlGroups.forEach((group) => this.canvas.remove(group));
-    this.roomLabelGroups.forEach((group) => this.canvas.remove(group));
+    this.areaTagGroups.forEach((group) => this.canvas.remove(group));
     this.roomGroups.clear();
     this.roomControlGroups.clear();
-    this.roomLabelGroups.clear();
+    this.areaTagGroups.clear();
+    this.areaTagData.clear();
     this.roomData.clear();
     this.selectedRoomIds.clear();
     this.activeDragRoomId = null;

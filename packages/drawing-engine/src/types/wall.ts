@@ -293,6 +293,7 @@ export interface Room {
   name: string;
   roomType: RoomType;
   vertices: Point2D[];
+  holes?: Point2D[][];
   wallIds: string[];
   area: number;                  // in mm^2
   perimeter: number;             // in mm
@@ -326,6 +327,7 @@ export interface CreateWallParams {
 export interface CreateRoomParams {
   name?: string;
   vertices: Point2D[];
+  holes?: Point2D[][];
   wallIds?: string[];
   properties3D?: Partial<Room3D>;
 }

@@ -425,7 +425,7 @@ function pointOnBoundaryOrInside(point: Point, polygon: Point[], tolerance = DIV
 
 function wallIsDividerForRoom(
   wall: WallSegment,
-  room: DetectedRoom,
+  room: Pick<DetectedRoom, 'polygon'>,
   tolerance = DIVIDER_TOLERANCE
 ): boolean {
   return (
@@ -529,6 +529,46 @@ function deduplicateWalls(walls: WallSegment[], tolerance: number): WallSegment[
   return result;
 }
 
+function deduplicateNormalizedWalls(
+  walls: NormalizedWallSegment[],
+  tolerance: number
+): NormalizedWallSegment[] {
+  const result: NormalizedWallSegment[] = [];
+
+  walls.forEach((wall) => {
+    const duplicateIndex = result.findIndex((existing) => {
+      const sameDirection =
+        pointsEqual(existing.startPoint, wall.startPoint, tolerance) &&
+        pointsEqual(existing.endPoint, wall.endPoint, tolerance);
+      const reverseDirection =
+        pointsEqual(existing.startPoint, wall.endPoint, tolerance) &&
+        pointsEqual(existing.endPoint, wall.startPoint, tolerance);
+      return sameDirection || reverseDirection;
+    });
+
+    if (duplicateIndex < 0) {
+      result.push({
+        ...wall,
+        startPoint: { ...wall.startPoint },
+        endPoint: { ...wall.endPoint },
+        originalWallIds: [...wall.originalWallIds],
+      });
+      return;
+    }
+
+    const existing = result[duplicateIndex];
+    result[duplicateIndex] = {
+      ...existing,
+      thickness: (existing.thickness + wall.thickness) / 2,
+      snapToGrid: existing.snapToGrid || wall.snapToGrid,
+      parentRoomId: existing.parentRoomId ?? wall.parentRoomId,
+      originalWallIds: [...new Set([...existing.originalWallIds, ...wall.originalWallIds])],
+    };
+  });
+
+  return result;
+}
+
 function splitWallsAtIntersections(
   walls: WallSegment[],
   tolerance: number
@@ -629,6 +669,12 @@ function mergeCollinearLogicalWalls(
           pointsEqual(a.endPoint, b.endPoint, tolerance) ? a.endPoint :
           null;
         if (!sharedPoint) continue;
+        const wallsAtSharedPoint = segments.filter((segment) =>
+          pointsEqual(segment.startPoint, sharedPoint, tolerance) ||
+          pointsEqual(segment.endPoint, sharedPoint, tolerance)
+        );
+        // Preserve split nodes that represent room corners or T-junctions.
+        if (wallsAtSharedPoint.length !== 2) continue;
 
         const endpoints = [a.startPoint, a.endPoint, b.startPoint, b.endPoint];
         const nonShared = endpoints.filter((point) => !pointsEqual(point, sharedPoint, tolerance));
@@ -661,7 +707,9 @@ function mergeCollinearLogicalWalls(
 function preprocessWalls(walls: WallSegment[], config: RoomDetectionConfig): NormalizedWallSegment[] {
   const deduped = deduplicateWalls(walls, config.snapTolerance / 2);
   const split = splitWallsAtIntersections(deduped, config.snapTolerance / 2);
-  return mergeCollinearLogicalWalls(split, config.snapTolerance / 2, config.snapTolerance);
+  const dedupedSplit = deduplicateNormalizedWalls(split, config.snapTolerance / 2);
+  const merged = mergeCollinearLogicalWalls(dedupedSplit, config.snapTolerance / 2, config.snapTolerance);
+  return deduplicateNormalizedWalls(merged, config.snapTolerance / 2);
 }
 
 function buildGraph(
@@ -1097,7 +1145,7 @@ function roomCandidateFromPolygon(
 }
 
 function splitRoomWithDivider(
-  room: DetectedRoom,
+  room: Pick<DetectedRoom, 'polygon'>,
   divider: WallSegment,
   config: RoomDetectionConfig
 ): CycleCandidate[] {
@@ -1173,6 +1221,73 @@ function splitRoomWithDivider(
   return [...unique.values()];
 }
 
+function normalizedWallToSegment(wall: NormalizedWallSegment): WallSegment {
+  return {
+    id: wall.originalWallIds[0] ?? wall.id,
+    startPoint: { ...wall.startPoint },
+    endPoint: { ...wall.endPoint },
+    thickness: wall.thickness,
+    snapToGrid: wall.snapToGrid,
+    parentRoomId: wall.parentRoomId,
+    startBevel: {
+      outerOffset: 0,
+      innerOffset: 0,
+    },
+    endBevel: {
+      outerOffset: 0,
+      innerOffset: 0,
+    },
+  };
+}
+
+function splitCandidatesByDividerWalls(
+  candidates: CycleCandidate[],
+  walls: NormalizedWallSegment[],
+  config: RoomDetectionConfig
+): CycleCandidate[] {
+  const queue = candidates.map((candidate) => ({
+    polygon: candidate.polygon.map((point) => ({ ...point })),
+    holes: candidate.holes.map((hole) => hole.map((point) => ({ ...point }))),
+    area: candidate.area,
+    signature: candidate.signature,
+    wallIds: [...candidate.wallIds],
+  }));
+  const result: CycleCandidate[] = [];
+
+  while (queue.length > 0) {
+    const candidate = queue.shift();
+    if (!candidate) continue;
+
+    let splitApplied = false;
+
+    for (const wall of walls) {
+      const divider = normalizedWallToSegment(wall);
+      if (!wallIsDividerForRoom(divider, candidate, DIVIDER_TOLERANCE)) {
+        continue;
+      }
+
+      const children = dedupeCandidates(
+        splitRoomWithDivider(candidate, divider, config).filter(
+          (child) => child.signature !== candidate.signature
+        )
+      );
+      if (children.length < 2) {
+        continue;
+      }
+
+      queue.unshift(...children);
+      splitApplied = true;
+      break;
+    }
+
+    if (!splitApplied) {
+      result.push(candidate);
+    }
+  }
+
+  return dedupeCandidates(attachWallIdsToCandidates(result, walls));
+}
+
 function candidateListForWalls(
   walls: NormalizedWallSegment[],
   config: RoomDetectionConfig
@@ -1181,7 +1296,7 @@ function candidateListForWalls(
   const dfsBased = dfsCycles(graph.adjacency, graph.nodeByKey, graph.wallById, config);
   const polygonized = polygonizeCandidates(walls, config);
   const source = polygonized.length > 0 ? polygonized : dfsBased;
-  return attachWallIdsToCandidates(source, walls)
+  return splitCandidatesByDividerWalls(source, walls, config)
     .filter((candidate) => candidate.area >= config.minRoomArea)
     .filter((candidate) => candidate.polygon.length >= 3);
 }
@@ -1265,7 +1380,7 @@ export function detectRoomsFromWalls(options: RoomDetectionRunOptions): RoomDete
     });
   }
 
-  candidates = dedupeCandidates(candidates);
+  candidates = dedupeCandidates(attachWallIdsToCandidates(candidates, normalized));
   const hierarchy = assignHierarchy(candidates, existingRooms, config);
   let nextRooms = hierarchy.rooms;
 

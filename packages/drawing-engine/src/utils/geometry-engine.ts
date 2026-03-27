@@ -18,6 +18,7 @@ import {
   nearestPoint,
   nearestPointOnLine,
   point as turfPoint,
+  pointOnFeature as turfPointOnFeature,
   polygon as turfPolygon,
 } from '@turf/turf';
 
@@ -33,7 +34,7 @@ import {
 } from './geometry';
 
 type WallLike = Pick<Wall, 'startPoint' | 'endPoint'>;
-type RoomLike = Pick<Room, 'vertices'>;
+type RoomLike = Pick<Room, 'vertices'> & { holes?: Point2D[][] };
 
 const EPSILON = 0.000001;
 const ROOM_MIN_AREA_M2 = 2;
@@ -88,6 +89,15 @@ function closeRing(vertices: Point2D[]): Coordinate2D[] {
     ring.push([first[0], first[1]]);
   }
   return ring;
+}
+
+function normalizeRoomGeometry(room: RoomLike): { outer: Point2D[]; holes: Point2D[][] } {
+  return {
+    outer: normalizeLoop(room.vertices),
+    holes: (room.holes ?? [])
+      .map((hole) => normalizeLoop(hole))
+      .filter((hole) => hole.length >= 3),
+  };
 }
 
 function signedArea(vertices: Point2D[]): number {
@@ -191,7 +201,8 @@ export class GeometryEngine {
   }
 
   static roomToPolygon(room: RoomLike): ReturnType<typeof turfPolygon> {
-    const ring = closeRing(room.vertices);
+    const { outer, holes } = normalizeRoomGeometry(room);
+    const ring = closeRing(outer);
     if (ring.length < 4) {
       return turfPolygon([[
         [0, 0],
@@ -200,7 +211,10 @@ export class GeometryEngine {
         [0, 0],
       ]]);
     }
-    return turfPolygon([ring]);
+    const holeRings = holes
+      .map((hole) => closeRing(hole))
+      .filter((holeRing) => holeRing.length >= 4);
+    return turfPolygon([ring, ...holeRings]);
   }
 
   static calculateSignedArea(vertices: Point2D[]): number {
@@ -208,7 +222,9 @@ export class GeometryEngine {
   }
 
   static calculateRoomAreaMm2(room: RoomLike): number {
-    return calculatePolygonArea(normalizeLoop(room.vertices));
+    const { outer, holes } = normalizeRoomGeometry(room);
+    const holeArea = holes.reduce((sum, hole) => sum + calculatePolygonArea(hole), 0);
+    return Math.max(0, calculatePolygonArea(outer) - holeArea);
   }
 
   static calculateRoomAreaM2(room: RoomLike): number {
@@ -216,32 +232,47 @@ export class GeometryEngine {
   }
 
   static calculateRoomPerimeterMm(room: RoomLike): number {
-    const loop = normalizeLoop(room.vertices);
-    if (loop.length < 2) return 0;
-    return polylineLength([...loop, loop[0]]);
+    const { outer, holes } = normalizeRoomGeometry(room);
+    const rings = [outer, ...holes];
+    return rings.reduce((sum, ring) => {
+      if (ring.length < 2) return sum;
+      return sum + polylineLength([...ring, ring[0]]);
+    }, 0);
   }
 
   static findRoomCentroid(room: RoomLike): Point2D {
-    const loop = normalizeLoop(room.vertices);
-    if (loop.length === 0) return { x: 0, y: 0 };
+    const { outer, holes } = normalizeRoomGeometry(room);
+    if (outer.length === 0) return { x: 0, y: 0 };
     try {
-      const roomCentroid = turfCentroid(this.roomToPolygon({ vertices: loop }));
-      return {
+      const polygon = this.roomToPolygon({ vertices: outer, holes });
+      const roomCentroid = turfCentroid(polygon);
+      const centroidPoint = {
         x: roomCentroid.geometry.coordinates[0],
         y: roomCentroid.geometry.coordinates[1],
       };
+      if (booleanPointInPolygon(turfPoint([centroidPoint.x, centroidPoint.y]), polygon, { ignoreBoundary: false })) {
+        return centroidPoint;
+      }
+      const fallbackPoint = turfPointOnFeature(polygon);
+      return {
+        x: fallbackPoint.geometry.coordinates[0],
+        y: fallbackPoint.geometry.coordinates[1],
+      };
     } catch {
-      return calculateCentroid(loop);
+      return calculateCentroid(outer);
     }
   }
 
   static pointInRoom(point: Point2D, room: RoomLike): boolean {
-    const loop = normalizeLoop(room.vertices);
-    if (loop.length < 3) return false;
+    const { outer, holes } = normalizeRoomGeometry(room);
+    if (outer.length < 3) return false;
     try {
-      return booleanPointInPolygon(turfPoint([point.x, point.y]), this.roomToPolygon({ vertices: loop }));
+      return booleanPointInPolygon(
+        turfPoint([point.x, point.y]),
+        this.roomToPolygon({ vertices: outer, holes })
+      );
     } catch {
-      return isPointInPolygon(point, loop);
+      return isPointInPolygon(point, outer) && holes.every((hole) => !isPointInPolygon(point, hole));
     }
   }
 

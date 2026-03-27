@@ -1681,6 +1681,7 @@ export function useSelectMode({
         baselineRoom: {
           ...room,
           vertices: room.vertices.map((vertex) => ({ ...vertex })),
+          holes: room.holes?.map((hole) => hole.map((vertex) => ({ ...vertex }))),
           wallIds: [...room.wallIds],
         },
         baselineWalls,
@@ -1711,6 +1712,7 @@ export function useSelectMode({
         baselineRoom: {
           ...room,
           vertices: room.vertices.map((vertex) => ({ ...vertex })),
+          holes: room.holes?.map((hole) => hole.map((vertex) => ({ ...vertex }))),
           wallIds: [...room.wallIds],
         },
         baselineWalls,
@@ -1747,6 +1749,7 @@ export function useSelectMode({
           ...room,
           centroid: { ...room.centroid },
           vertices: room.vertices.map((vertex) => ({ ...vertex })),
+          holes: room.holes?.map((hole) => hole.map((vertex) => ({ ...vertex }))),
           wallIds: [...room.wallIds],
         },
         baselineWalls,

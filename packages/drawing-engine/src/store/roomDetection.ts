@@ -695,6 +695,7 @@ export function roomTopologyHash(walls: Wall[]): string {
       Math.round(wall.endPoint.y),
       Math.round(wall.thickness),
       wall.openings.filter((opening) => opening.type === 'window').length,
+      [...wall.connectedWalls].sort().join(','),
     ].join(':'))
     .sort();
   return entries.join('|');

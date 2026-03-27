@@ -536,7 +536,7 @@ function getSharedFloorMaterial(color: string): THREE.MeshStandardMaterial {
 }
 
 function createRoomFloor(room: Room): THREE.Mesh | null {
-  const shape = buildShapeFromPolygon([room.vertices]);
+  const shape = buildShapeFromPolygon([room.vertices, ...(room.holes ?? [])]);
   if (!shape) {
     return null;
   }
