@@ -55,6 +55,7 @@ interface EndpointNodeResolution {
   rightSectorAngleDeg: number;
   leftSectorJoinType: NodeJoinType;
   rightSectorJoinType: NodeJoinType;
+  denseFallback?: boolean;
 }
 
 const NODE_TOLERANCE_MM = 2;
@@ -66,6 +67,11 @@ const ACUTE_BEVEL_THRESHOLD_DEG = 30;
 // Keep endpoint-node miters aligned with the safer per-wall update pipeline:
 // very small endpoint angles should not create long render-time spikes.
 const MIN_ENDPOINT_MITER_ANGLE_DEG = 15;
+const NODE_MITER_LIMIT = 2.5;
+const MAX_NODE_MITER_LENGTH_FRACTION = 0.35;
+const MAX_FULL_JOIN_ENDPOINTS = 6;
+const DENSE_NODE_HUB_DEPTH_MULTIPLIER = 1.25;
+const MAX_DENSE_NODE_HUB_LENGTH_FRACTION = 0.25;
 
 function pointDistance(a: Point2D, b: Point2D): number {
   return Math.hypot(a.x - b.x, a.y - b.y);
@@ -128,6 +134,46 @@ function computeMaxBevelOffset(lengths: number[]): number {
     0,
     Math.min(...lengths.map((length) => Math.max(0, length / 2)))
   );
+}
+
+function clampPointToDistance(
+  point: Point2D,
+  origin: Point2D,
+  maxDistance: number
+): Point2D {
+  const distance = pointDistance(point, origin);
+  if (distance <= maxDistance || distance < 0.000001) {
+    return copyPoint(point);
+  }
+
+  const ratio = maxDistance / distance;
+  return {
+    x: origin.x + (point.x - origin.x) * ratio,
+    y: origin.y + (point.y - origin.y) * ratio,
+  };
+}
+
+function clampSectorMiterPoint(
+  prev: WallEndpointRef,
+  next: WallEndpointRef,
+  miterPoint: Point2D,
+  angleDeg: number
+): Point2D {
+  const joinPoint = {
+    x: (prev.point.x + next.point.x) / 2,
+    y: (prev.point.y + next.point.y) / 2,
+  };
+  const halfThickness = Math.max(prev.wall.thickness, next.wall.thickness) / 2;
+  const shortestLen = Math.min(prev.length, next.length);
+  const halfAngleRad = Math.max(0.05, (angleDeg / 2) * (Math.PI / 180));
+  const geometricReach = halfThickness / Math.sin(halfAngleRad);
+  const maxReach = Math.min(
+    halfThickness * NODE_MITER_LIMIT,
+    geometricReach * 1.05,
+    shortestLen * MAX_NODE_MITER_LENGTH_FRACTION
+  );
+
+  return clampPointToDistance(miterPoint, joinPoint, maxReach);
 }
 
 function projectPointToSegment(
@@ -287,13 +333,20 @@ function solveSector(prev: WallEndpointRef, next: WallEndpointRef): SectorSoluti
     };
   }
 
+  const clampedMiterPoint = clampSectorMiterPoint(
+    prev,
+    next,
+    miterPoint,
+    effectiveCornerAngleDeg
+  );
+
   return {
     prev,
     next,
     angleDeg: effectiveCornerAngleDeg,
     joinType: 'miter',
-    prevVertex: copyPoint(miterPoint),
-    nextVertex: copyPoint(miterPoint),
+    prevVertex: copyPoint(clampedMiterPoint),
+    nextVertex: copyPoint(clampedMiterPoint),
   };
 }
 
@@ -303,6 +356,10 @@ function sectorKey(prev: WallEndpointRef, next: WallEndpointRef): string {
 
 function solveEndpointNode(node: EndpointNode): EndpointNodeResolution[] {
   const sorted = [...node.endpoints].sort((a, b) => a.angleDeg - b.angleDeg);
+  if (sorted.length > MAX_FULL_JOIN_ENDPOINTS) {
+    return solveDenseEndpointNode(node, sorted);
+  }
+
   const sectors = new Map<string, SectorSolution>();
 
   for (let index = 0; index < sorted.length; index += 1) {
@@ -331,6 +388,53 @@ function solveEndpointNode(node: EndpointNode): EndpointNodeResolution[] {
       rightSectorAngleDeg: rightSector.angleDeg,
       leftSectorJoinType: leftSector.joinType,
       rightSectorJoinType: rightSector.joinType,
+    };
+  });
+}
+
+function denseNodeHubDepth(node: EndpointNode, endpointRef: WallEndpointRef): number {
+  const nodeMaxThickness = node.endpoints.reduce(
+    (max, candidate) => Math.max(max, candidate.wall.thickness),
+    endpointRef.wall.thickness
+  );
+
+  return Math.min(
+    endpointRef.length * MAX_DENSE_NODE_HUB_LENGTH_FRACTION,
+    Math.max(
+      endpointRef.wall.thickness * DENSE_NODE_HUB_DEPTH_MULTIPLIER,
+      nodeMaxThickness
+    )
+  );
+}
+
+function solveDenseEndpointNode(
+  node: EndpointNode,
+  sorted: WallEndpointRef[]
+): EndpointNodeResolution[] {
+  return sorted.map((endpointRef, index) => {
+    const cwNeighbor = sorted[(index - 1 + sorted.length) % sorted.length];
+    const ccwNeighbor = sorted[(index + 1) % sorted.length];
+    const hubDepth = denseNodeHubDepth(node, endpointRef);
+    const leftVertex = {
+      x: endpointRef.left.anchor.x + endpointRef.direction.x * hubDepth,
+      y: endpointRef.left.anchor.y + endpointRef.direction.y * hubDepth,
+    };
+    const rightVertex = {
+      x: endpointRef.right.anchor.x + endpointRef.direction.x * hubDepth,
+      y: endpointRef.right.anchor.y + endpointRef.direction.y * hubDepth,
+    };
+
+    return {
+      endpointRef,
+      cwNeighbor,
+      ccwNeighbor,
+      leftVertex,
+      rightVertex,
+      leftSectorAngleDeg: 180,
+      rightSectorAngleDeg: 180,
+      leftSectorJoinType: 'bevel',
+      rightSectorJoinType: 'bevel',
+      denseFallback: true,
     };
   });
 }
@@ -397,7 +501,7 @@ function buildNodeJoinData(
     angle: Math.min(resolution.leftSectorAngleDeg, resolution.rightSectorAngleDeg),
     interiorVertex: vertices.interiorVertex,
     exteriorVertex: vertices.exteriorVertex,
-    bevelDirection: computeNodeBevelDirection(resolution),
+    bevelDirection: resolution.denseFallback ? undefined : computeNodeBevelDirection(resolution),
     maxBevelOffset: computeMaxBevelOffset([
       endpointRef.length,
       cwNeighbor.length,
