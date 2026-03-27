@@ -115,7 +115,7 @@ export const proposalRouter = createTRPCRouter({
       }
 
       // Calculate totals
-      const subtotal = project.boqItems.reduce((sum, item) => sum + item.totalCost, 0);
+      const subtotal = project.boqItems.reduce((sum: number, item: (typeof project.boqItems)[number]) => sum + item.totalCost, 0);
       const taxAmount = subtotal * (project.taxRate / 100);
       const total = subtotal + taxAmount;
 
@@ -221,7 +221,7 @@ export const proposalRouter = createTRPCRouter({
       }
 
       // Calculate totals
-      const subtotal = project.boqItems.reduce((sum, item) => sum + item.totalCost, 0);
+      const subtotal = project.boqItems.reduce((sum: number, item: (typeof project.boqItems)[number]) => sum + item.totalCost, 0);
       const taxAmount = subtotal * (project.taxRate / 100);
       const total = subtotal + taxAmount;
 

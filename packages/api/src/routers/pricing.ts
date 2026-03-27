@@ -333,15 +333,15 @@ export const pricingRouter = createTRPCRouter({
 
       // Create rate lookup map
       const rateMap = new Map(
-        unitRates.map((r) => [`${r.category}-${r.description}`, r])
+        unitRates.map((r: (typeof unitRates)[number]) => [`${r.category}-${r.description}`, r])
       );
 
       // Update each BOQ item
       const updatedItems = await Promise.all(
-        project.boqItems.map(async (item) => {
+        project.boqItems.map(async (item: (typeof project.boqItems)[number]) => {
           // Find matching rate
           const rate = rateMap.get(`${item.category}-${item.description}`) ||
-            unitRates.find((r) => r.category === item.category);
+            unitRates.find((r: (typeof unitRates)[number]) => r.category === item.category);
 
           if (!rate) return item;
 
@@ -414,14 +414,14 @@ export const pricingRouter = createTRPCRouter({
         });
       }
 
-      const materialCost = project.boqItems.reduce((sum, i) => sum + i.materialCost, 0);
-      const labourCost = project.boqItems.reduce((sum, i) => sum + i.labourCost, 0);
+      const materialCost = project.boqItems.reduce((sum: number, i: (typeof project.boqItems)[number]) => sum + i.materialCost, 0);
+      const labourCost = project.boqItems.reduce((sum: number, i: (typeof project.boqItems)[number]) => sum + i.labourCost, 0);
       const subtotal = materialCost + labourCost;
 
       // Get overhead, profit, contingency from rules
-      const overheadRule = project.pricingRules.find((r) => r.type === "OVERHEAD");
-      const profitRule = project.pricingRules.find((r) => r.type === "PROFIT");
-      const contingencyRule = project.pricingRules.find((r) => r.type === "CONTINGENCY");
+      const overheadRule = project.pricingRules.find((r: (typeof project.pricingRules)[number]) => r.type === "OVERHEAD");
+      const profitRule = project.pricingRules.find((r: (typeof project.pricingRules)[number]) => r.type === "PROFIT");
+      const contingencyRule = project.pricingRules.find((r: (typeof project.pricingRules)[number]) => r.type === "CONTINGENCY");
 
       const overhead = subtotal * ((overheadRule?.value ?? 0) / 100);
       const profit = (subtotal + overhead) * ((profitRule?.value ?? 0) / 100);

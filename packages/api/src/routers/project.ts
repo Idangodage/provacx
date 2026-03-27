@@ -102,7 +102,7 @@ export const projectRouter = createTRPCRouter({
       }
 
       // Calculate totals
-      const subtotal = project.boqItems.reduce((sum, item) => sum + item.totalCost, 0);
+      const subtotal = project.boqItems.reduce((sum: number, item: (typeof project.boqItems)[number]) => sum + item.totalCost, 0);
       const taxAmount = subtotal * (project.taxRate / 100);
       const total = subtotal + taxAmount;
 
@@ -269,7 +269,7 @@ export const projectRouter = createTRPCRouter({
       // Copy BOQ items
       if (original.boqItems.length > 0) {
         await ctx.prisma.bOQItem.createMany({
-          data: original.boqItems.map((item) => ({
+          data: original.boqItems.map((item: (typeof original.boqItems)[number]) => ({
             projectId: newProject.id,
             category: item.category,
             itemNumber: item.itemNumber,
@@ -290,7 +290,7 @@ export const projectRouter = createTRPCRouter({
       // Copy pricing rules
       if (original.pricingRules.length > 0) {
         await ctx.prisma.pricingRule.createMany({
-          data: original.pricingRules.map((rule) => ({
+          data: original.pricingRules.map((rule: (typeof original.pricingRules)[number]) => ({
             projectId: newProject.id,
             name: rule.name,
             type: rule.type,

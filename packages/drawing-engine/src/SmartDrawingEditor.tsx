@@ -498,8 +498,8 @@ export function SmartDrawingEditor({
     walls,
     rooms,
     activeTool,
-    history,
-    historyIndex,
+    canUndo,
+    canRedo,
     showGrid,
     showRulers,
     snapToGrid,
@@ -517,8 +517,8 @@ export function SmartDrawingEditor({
     walls: state.walls,
     rooms: state.rooms,
     activeTool: state.activeTool,
-    history: state.history,
-    historyIndex: state.historyIndex,
+    canUndo: state.canUndo,
+    canRedo: state.canRedo,
     showGrid: state.showGrid,
     showRulers: state.showRulers,
     snapToGrid: state.snapToGrid,
@@ -567,8 +567,6 @@ export function SmartDrawingEditor({
     panOffset: state.panOffset,
     setViewTransform: state.setViewTransform,
   }), shallow);
-  const canUndo = historyIndex > 0;
-  const canRedo = historyIndex < history.length - 1;
 
   const quickActions: { id: DrawingTool; label: string; icon: React.ReactNode }[] = [
     { id: 'wall', label: 'Add Wall', icon: <Minus size={14} /> },

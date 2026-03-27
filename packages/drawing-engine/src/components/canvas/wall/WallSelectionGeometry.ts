@@ -58,6 +58,11 @@ export interface WallSelectionPlan {
   mergedComponents: WallSelectionComponent[];
 }
 
+export interface WallSelectionComponentEntry {
+  wallId: string;
+  component: WallSelectionComponent | null;
+}
+
 // =============================================================================
 // Constants
 // =============================================================================
@@ -91,6 +96,34 @@ const ROOM_RING_COLLINEAR_DISTANCE_MIN_MM = 2;
 const ROOM_RING_MAX_AREA_DELTA_RATIO = 0.06;
 const ROOM_CONTOUR_INNER_AREA_RATIO_MIN = 0.6;
 const ROOM_CONTOUR_INNER_AREA_RATIO_MAX = 1.45;
+const WALL_SELECTION_CACHE_LIMIT = 24;
+
+const wallSelectionSignatureCache = new WeakMap<Wall[], string>();
+const wallSelectionComponentCache = new Map<string, Map<string, WallSelectionComponent>>();
+
+function touchCachedWallSelectionComponents(
+  signature: string,
+  componentsByWallId: Map<string, WallSelectionComponent>
+): Map<string, WallSelectionComponent> {
+  wallSelectionComponentCache.delete(signature);
+  wallSelectionComponentCache.set(signature, componentsByWallId);
+  return componentsByWallId;
+}
+
+function setCachedWallSelectionComponents(
+  signature: string,
+  componentsByWallId: Map<string, WallSelectionComponent>
+): void {
+  touchCachedWallSelectionComponents(signature, componentsByWallId);
+  if (wallSelectionComponentCache.size <= WALL_SELECTION_CACHE_LIMIT) {
+    return;
+  }
+
+  const oldestKey = wallSelectionComponentCache.keys().next().value;
+  if (typeof oldestKey === 'string') {
+    wallSelectionComponentCache.delete(oldestKey);
+  }
+}
 
 // =============================================================================
 // Ring Utilities
@@ -1859,6 +1892,73 @@ function buildWallSelectionComponent(
   };
 }
 
+export function getWallSelectionGeometrySignature(walls: Wall[]): string {
+  const cached = wallSelectionSignatureCache.get(walls);
+  if (cached) {
+    return cached;
+  }
+
+  const signature = JSON.stringify(
+    walls.map((wall) => ({
+      id: wall.id,
+      thickness: wall.thickness,
+      startPoint: wall.startPoint,
+      endPoint: wall.endPoint,
+      interiorLine: wall.interiorLine,
+      exteriorLine: wall.exteriorLine,
+      connectedWalls: wall.connectedWalls,
+      startBevel: wall.startBevel ?? null,
+      endBevel: wall.endBevel ?? null,
+    }))
+  );
+  wallSelectionSignatureCache.set(walls, signature);
+  return signature;
+}
+
+export function getCachedWallSelectionComponentsForSignature(
+  signature: string
+): Map<string, WallSelectionComponent> | null {
+  const cached = wallSelectionComponentCache.get(signature);
+  return cached ? touchCachedWallSelectionComponents(signature, cached) : null;
+}
+
+export function cacheWallSelectionComponentEntriesForSignature(
+  signature: string,
+  entries: WallSelectionComponentEntry[]
+): void {
+  const componentsByWallId = new Map<string, WallSelectionComponent>();
+  entries.forEach((entry) => {
+    if (entry.component) {
+      componentsByWallId.set(entry.wallId, entry.component);
+    }
+  });
+  setCachedWallSelectionComponents(signature, componentsByWallId);
+}
+
+export function buildAllWallSelectionComponentEntries(
+  walls: Wall[]
+): WallSelectionComponentEntry[] {
+  const joinsMap = computeWallUnionRenderData(walls).joinsMap;
+  return walls.map((wall) => ({
+    wallId: wall.id,
+    component: buildWallSelectionComponent(wall, joinsMap, walls),
+  }));
+}
+
+function getWallSelectionComponentMap(
+  walls: Wall[]
+): Map<string, WallSelectionComponent> {
+  const signature = getWallSelectionGeometrySignature(walls);
+  const cached = getCachedWallSelectionComponentsForSignature(signature);
+  if (cached) {
+    return cached;
+  }
+
+  const entries = buildAllWallSelectionComponentEntries(walls);
+  cacheWallSelectionComponentEntriesForSignature(signature, entries);
+  return getCachedWallSelectionComponentsForSignature(signature) ?? new Map<string, WallSelectionComponent>();
+}
+
 export function resolveWallSelectionPlan(
   walls: Wall[],
   rooms: Room[],
@@ -1879,13 +1979,9 @@ export function resolveWallSelectionPlan(
   const individualWallIds = Array.from(new Set(
     selectedWallIds.filter((wallId) => wallsById.has(wallId))
   ));
-  const joinsMap = computeWallUnionRenderData(walls).joinsMap;
+  const componentsByWallId = getWallSelectionComponentMap(walls);
   const mergedComponents = individualWallIds
-    .map((wallId) => {
-      const wall = wallsById.get(wallId);
-      if (!wall) return null;
-      return buildWallSelectionComponent(wall, joinsMap, walls);
-    })
+    .map((wallId) => componentsByWallId.get(wallId) ?? null)
     .filter((component): component is WallSelectionComponent => Boolean(component));
 
   return {

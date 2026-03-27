@@ -54,7 +54,7 @@ export const userRouter = createTRPCRouter({
       },
     });
 
-    return memberships.map((m) => ({
+    return memberships.map((m: (typeof memberships)[number]) => ({
       ...m.organization,
       role: m.role,
     }));

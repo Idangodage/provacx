@@ -50,17 +50,16 @@ export async function POST(request: Request) {
 
     const hashedPassword = await bcrypt.hash(parsed.data.password, 12);
 
-    await prisma.$transaction(async (tx) => {
-      await tx.user.updateMany({
+    await prisma.$transaction([
+      prisma.user.updateMany({
         where: { email: parsed.data.email },
         data: {
           password: hashedPassword,
           emailVerified: new Date(),
         },
-      });
-
-      await tx.verificationToken.deleteMany({ where: { identifier } });
-    });
+      }),
+      prisma.verificationToken.deleteMany({ where: { identifier } }),
+    ]);
 
     return NextResponse.json({ ok: true });
   } catch (error) {

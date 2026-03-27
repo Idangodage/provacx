@@ -195,8 +195,8 @@ export function Toolbar({
 }: ToolbarProps) {
   const {
     activeTool,
-    history,
-    historyIndex,
+    canUndo,
+    canRedo,
     setTool,
     setZoom,
     undo,
@@ -204,8 +204,8 @@ export function Toolbar({
     resetView,
   } = useSmartDrawingStore((state) => ({
     activeTool: state.activeTool,
-    history: state.history,
-    historyIndex: state.historyIndex,
+    canUndo: state.canUndo,
+    canRedo: state.canRedo,
     setTool: state.setTool,
     setZoom: state.setZoom,
     undo: state.undo,
@@ -221,9 +221,6 @@ export function Toolbar({
     panOffset: state.panOffset,
     setViewTransform: state.setViewTransform,
   }), shallow);
-  const canUndo = historyIndex > 0;
-  const canRedo = historyIndex < history.length - 1;
-
   const handleZoomIn = () => {
     const nextZoom = Math.min(zoom * 1.2, 5);
     setInteractionViewTransform(nextZoom, panOffset);

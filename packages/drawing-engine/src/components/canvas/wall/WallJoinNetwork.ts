@@ -657,12 +657,18 @@ function mergeJoin(joinsMap: Map<string, JoinData[]>, join: JoinData): void {
  * that position.  Keeping both walls causes degenerate 0° sectors in
  * endpoint nodes and confuses T-junction host selection.
  *
- * For each group of coincident walls we keep the one with the most
- * connections (or the first one if tied) and shadow the rest.
+ * For each group of coincident walls we keep the longest wall first so
+ * partially-overlapping room spans do not hide the wall segment that
+ * extends beyond the overlap. Connection count and thickness only break ties.
  */
 function findCoincidentShadowedWalls(walls: Wall[]): Set<string> {
   const shadowed = new Set<string>();
   const checked = new Set<string>();
+
+  const wallLength = (wall: Wall): number => Math.hypot(
+    wall.endPoint.x - wall.startPoint.x,
+    wall.endPoint.y - wall.startPoint.y
+  );
 
   for (let i = 0; i < walls.length; i++) {
     if (shadowed.has(walls[i].id) || checked.has(walls[i].id)) continue;
@@ -681,10 +687,15 @@ function findCoincidentShadowedWalls(walls: Wall[]): Set<string> {
 
     if (group.length < 2) continue;
 
-    // Keep the wall with the most connections (or first if tied)
+    // Keep the wall with the broadest coverage first. This avoids a shorter
+    // shared-room edge shadowing a longer wall that continues past the overlap.
     group.sort((a, b) => {
+      const lengthDiff = wallLength(b) - wallLength(a);
+      if (Math.abs(lengthDiff) > NODE_TOLERANCE_MM) return lengthDiff;
+
       const connDiff = b.connectedWalls.length - a.connectedWalls.length;
       if (connDiff !== 0) return connDiff;
+
       // Prefer thicker walls
       return b.thickness - a.thickness;
     });

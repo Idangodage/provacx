@@ -52,7 +52,8 @@ import {
   type WallSelectionPlan,
 } from './WallSelectionGeometry';
 import type { EnhancedSnapResult } from './WallSnapping';
-import { computeWallUnionRenderData, type WallUnionComponent } from './WallUnionGeometry';
+import { primeWallSelectionGeometryInBackground } from './wallSelectionWorkerClient';
+import { computeWallUnionRenderData, type WallUnionComponent, type WallUnionRenderData } from './WallUnionGeometry';
 import {
   refreshAllWalls, // [PATCH APPLIED]
   refreshAfterPointMove, // [PATCH APPLIED]
@@ -234,6 +235,10 @@ export class WallRenderer {
 
   // [NEW] Dimension label objects (cleared on selection change)
   private dimensionObjects: fabric.Object[] = [];
+
+  // Reuse the last union result when the wall geometry payload is unchanged.
+  private lastUnionSignature: string = '';
+  private lastUnionRenderData: WallUnionRenderData | null = null;
 
   // [NEW] Track dirty walls for incremental updates
   private dirtyWallIds: Set<string> = new Set();
@@ -712,10 +717,38 @@ export class WallRenderer {
     this.componentObjects = [];
   }
 
+  private wallUnionSignature(walls: Wall[]): string {
+    return JSON.stringify(
+      walls.map((wall) => ({
+        id: wall.id,
+        thickness: wall.thickness,
+        startPoint: wall.startPoint,
+        endPoint: wall.endPoint,
+        interiorLine: wall.interiorLine,
+        exteriorLine: wall.exteriorLine,
+        connectedWalls: wall.connectedWalls,
+        startBevel: wall.startBevel ?? null,
+        endBevel: wall.endBevel ?? null,
+      }))
+    );
+  }
+
+  private getWallUnionRenderData(walls: Wall[]): WallUnionRenderData {
+    const signature = this.wallUnionSignature(walls);
+    if (this.lastUnionSignature === signature && this.lastUnionRenderData) {
+      return this.lastUnionRenderData;
+    }
+
+    const renderData = computeWallUnionRenderData(walls);
+    this.lastUnionSignature = signature;
+    this.lastUnionRenderData = renderData;
+    return renderData;
+  }
+
   private rebuildMergedComponents(walls: Wall[]): Map<string, Wall[]> {
     this.clearMergedComponents();
 
-    const renderData = computeWallUnionRenderData(walls);
+    const renderData = this.getWallUnionRenderData(walls);
     const wallsById = new Map(walls.map((wall) => [wall.id, wall]));
     const componentWallsByWallId = new Map<string, Wall[]>();
 
@@ -1978,6 +2011,7 @@ export class WallRenderer {
       this.controlPointObjects.clear();
 
       walls.forEach((wall) => this.wallData.set(wall.id, wall));
+      primeWallSelectionGeometryInBackground(walls);
 
       // [PATCH APPLIED] Use pre-computed joins if available, otherwise compute fresh
       const joinsMap = precomputedJoinsMap ?? refreshAllWalls(walls); // [PATCH APPLIED]
@@ -2117,6 +2151,7 @@ export class WallRenderer {
 
       this.wallData.clear();
       walls.forEach((wall) => this.wallData.set(wall.id, wall));
+      primeWallSelectionGeometryInBackground(walls);
 
       this.selectedWallIds = new Set(selectedWallIds);
       if (selectedWallIds.length > 0 || this.selectionComponentObjects.length > 0 || this.controlPointObjects.size > 0) {
@@ -2192,6 +2227,7 @@ export class WallRenderer {
           this.wallData.set(wall.id, wall);
         }
       }
+      primeWallSelectionGeometryInBackground(walls);
 
       if (this.hoveredWallId && !nextWallsById.has(this.hoveredWallId)) {
         this.hoveredWallId = null;
@@ -2281,6 +2317,8 @@ export class WallRenderer {
 
   clearAllWalls(): void {
     this.dragOptimizedMode = false;
+    this.lastUnionSignature = '';
+    this.lastUnionRenderData = null;
     this.clearMergedComponents();
     this.clearSelectionComponents();
     this.clearHoverComponents();

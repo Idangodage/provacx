@@ -5,7 +5,7 @@
  * Thin wrapper around @provacx/drawing-engine for app-specific integration
  */
 
-import { SmartDrawingEditor } from "@provacx/drawing-engine";
+import { SmartDrawingEditor } from "@provacx/drawing-engine/editor";
 import { ArrowLeft, ArrowRight, Share2 } from "lucide-react";
 import Link from "next/link";
 

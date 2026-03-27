@@ -33,16 +33,15 @@ export async function GET(request: Request) {
     return NextResponse.redirect(new URL("/login?error=Verification", url));
   }
 
-  await prisma.$transaction(async (tx) => {
-    await tx.user.updateMany({
+  await prisma.$transaction([
+    prisma.user.updateMany({
       where: { email: parsed.data.email },
       data: { emailVerified: new Date() },
-    });
-
-    await tx.verificationToken.deleteMany({
+    }),
+    prisma.verificationToken.deleteMany({
       where: { identifier },
-    });
-  });
+    }),
+  ]);
 
   return NextResponse.redirect(new URL("/login?verified=1", url));
 }

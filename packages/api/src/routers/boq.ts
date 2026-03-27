@@ -48,7 +48,7 @@ export const boqRouter = createTRPCRouter({
       });
 
       // Group by category
-      const grouped = items.reduce((acc, item) => {
+      const grouped = items.reduce((acc: Record<string, typeof items>, item: (typeof items)[number]) => {
         const categoryKey = item.category;
         const bucket = acc[categoryKey] ?? [];
         bucket.push(item);
@@ -58,9 +58,9 @@ export const boqRouter = createTRPCRouter({
 
       // Calculate totals
       const totals = {
-        materialCost: items.reduce((sum, i) => sum + i.materialCost, 0),
-        labourCost: items.reduce((sum, i) => sum + i.labourCost, 0),
-        totalCost: items.reduce((sum, i) => sum + i.totalCost, 0),
+        materialCost: items.reduce((sum: number, i: (typeof items)[number]) => sum + i.materialCost, 0),
+        labourCost: items.reduce((sum: number, i: (typeof items)[number]) => sum + i.labourCost, 0),
+        totalCost: items.reduce((sum: number, i: (typeof items)[number]) => sum + i.totalCost, 0),
         itemCount: items.length,
       };
 

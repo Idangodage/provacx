@@ -50,6 +50,48 @@ export interface WallUnionRenderData {
   components: WallUnionComponent[];
 }
 
+const WALL_UNION_CACHE_LIMIT = 12;
+const wallUnionRenderDataCache = new Map<string, WallUnionRenderData>();
+
+function wallUnionSignature(walls: Wall[]): string {
+  return JSON.stringify(
+    walls.map((wall) => ({
+      id: wall.id,
+      thickness: wall.thickness,
+      startPoint: wall.startPoint,
+      endPoint: wall.endPoint,
+      interiorLine: wall.interiorLine,
+      exteriorLine: wall.exteriorLine,
+      connectedWalls: wall.connectedWalls,
+      startBevel: wall.startBevel ?? null,
+      endBevel: wall.endBevel ?? null,
+    }))
+  );
+}
+
+function getCachedWallUnionRenderData(signature: string): WallUnionRenderData | null {
+  const cached = wallUnionRenderDataCache.get(signature);
+  if (!cached) {
+    return null;
+  }
+
+  wallUnionRenderDataCache.delete(signature);
+  wallUnionRenderDataCache.set(signature, cached);
+  return cached;
+}
+
+function setCachedWallUnionRenderData(signature: string, renderData: WallUnionRenderData): void {
+  wallUnionRenderDataCache.set(signature, renderData);
+  if (wallUnionRenderDataCache.size <= WALL_UNION_CACHE_LIMIT) {
+    return;
+  }
+
+  const oldestKey = wallUnionRenderDataCache.keys().next().value;
+  if (typeof oldestKey === 'string') {
+    wallUnionRenderDataCache.delete(oldestKey);
+  }
+}
+
 function pointDistance(a: Point2D, b: Point2D): number {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
@@ -74,6 +116,10 @@ function subtract(a: Point2D, b: Point2D): Point2D {
 
 function dot(a: Point2D, b: Point2D): number {
   return a.x * b.x + a.y * b.y;
+}
+
+function cross(a: Point2D, b: Point2D): number {
+  return a.x * b.y - a.y * b.x;
 }
 
 function scale(vector: Point2D, scalar: number): Point2D {
@@ -267,10 +313,6 @@ function segmentIntersectionPoint(
 /**
  * Snap a coordinate to a fixed precision grid (0.01 mm) to prevent
  * floating-point noise from creating micro-notches in turf.js unions.
- * Miter vertices at a junction are computed from different line pairs
- * that should intersect at the same point, but floating-point arithmetic
- * can produce results that differ by a few ULPs.  Snapping eliminates
- * these micro-differences.
  */
 const COORDINATE_SNAP_PRECISION = 100; // 1/100 mm = 0.01 mm
 
@@ -394,9 +436,6 @@ function wallsTouch(wall: Wall, otherWall: Wall): boolean {
     }
   }
 
-  // Pure X-crossings do not place either wall endpoint on the other segment,
-  // so detect the centerline intersection explicitly and merge them into the
-  // same union component to avoid double-painted overlap fills.
   if (
     segmentIntersectionPoint(
       wall.startPoint,
@@ -644,25 +683,25 @@ function endpointResolvedCapVertices(
     const raw = endpointRawCapVertices(endpointRef);
     return endpointRef.endpoint === 'start'
       ? {
-        leftVertex: raw.interiorVertex,
-        rightVertex: raw.exteriorVertex,
-      }
+          leftVertex: raw.interiorVertex,
+          rightVertex: raw.exteriorVertex,
+        }
       : {
-        leftVertex: raw.exteriorVertex,
-        rightVertex: raw.interiorVertex,
-      };
+          leftVertex: raw.exteriorVertex,
+          rightVertex: raw.interiorVertex,
+        };
   }
 
   const resolved = resolveJoinEdgeVertices(endpointRef.wall, join);
   return endpointRef.endpoint === 'start'
     ? {
-      leftVertex: resolved.interiorVertex,
-      rightVertex: resolved.exteriorVertex,
-    }
+        leftVertex: resolved.interiorVertex,
+        rightVertex: resolved.exteriorVertex,
+      }
     : {
-      leftVertex: resolved.exteriorVertex,
-      rightVertex: resolved.interiorVertex,
-    };
+        leftVertex: resolved.exteriorVertex,
+        rightVertex: resolved.interiorVertex,
+      };
 }
 
 function resolveJoinEdgeVertices(wall: Wall, join: JoinData): {
@@ -740,6 +779,34 @@ function buildEndpointJoinPatchFeatures(
   return features;
 }
 
+// -----------------------------------------------------------------------------
+// Convex Hull (Andrew's monotone chain)
+// -----------------------------------------------------------------------------
+function convexHull(points: Point2D[]): Point2D[] {
+  if (points.length <= 3) return [...points];
+  const sorted = [...points].sort((a, b) => a.x - b.x || a.y - b.y);
+  const lower: Point2D[] = [];
+  for (const p of sorted) {
+    while (lower.length >= 2 && cross(subtract(lower[lower.length - 1], lower[lower.length - 2]),
+                                        subtract(p, lower[lower.length - 1])) <= 0) {
+      lower.pop();
+    }
+    lower.push(p);
+  }
+  const upper: Point2D[] = [];
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const p = sorted[i];
+    while (upper.length >= 2 && cross(subtract(upper[upper.length - 1], upper[upper.length - 2]),
+                                        subtract(p, upper[upper.length - 1])) <= 0) {
+      upper.pop();
+    }
+    upper.push(p);
+  }
+  lower.pop();
+  upper.pop();
+  return [...lower, ...upper];
+}
+
 function buildNodeCorePatchFeatures(
   walls: Wall[],
   joinsMap: Map<string, JoinData[]>,
@@ -749,34 +816,30 @@ function buildNodeCorePatchFeatures(
   const features: PolygonFeature[] = [];
 
   for (const node of nodes) {
-    if (node.endpoints.length < 2) {
-      continue;
-    }
-    if (includeNode && !includeNode(node)) {
-      continue;
-    }
+    if (node.endpoints.length < 2) continue;
+    if (includeNode && !includeNode(node)) continue;
 
     const resolvedVertices = node.endpoints.flatMap((endpointRef) => {
       const vertices = endpointResolvedCapVertices(endpointRef, joinsMap);
       return [vertices.leftVertex, vertices.rightVertex];
     });
+
+    // Deduplicate (keep unique points)
     const uniqueVertices: Point2D[] = [];
-    resolvedVertices.forEach((vertex) => {
-      if (!uniqueVertices.some((candidate) => pointDistance(candidate, vertex) <= COORDINATE_TOLERANCE_MM)) {
-        uniqueVertices.push(copyPoint(vertex));
+    for (const v of resolvedVertices) {
+      if (!uniqueVertices.some(u => pointDistance(u, v) <= COORDINATE_TOLERANCE_MM)) {
+        uniqueVertices.push(copyPoint(v));
       }
-    });
-
-    if (uniqueVertices.length < 3) {
-      continue;
     }
 
-    const ring = uniqueVertices
-      .sort((a, b) => anchorAngleDeg(node.point, a) - anchorAngleDeg(node.point, b));
-    const patch = patchPolygonFeature(ring);
-    if (patch) {
-      features.push(patch);
-    }
+    if (uniqueVertices.length < 3) continue;
+
+    // Build convex hull (always simple, covers all points)
+    const hull = convexHull(uniqueVertices);
+    if (hull.length < 3) continue;
+
+    const patch = patchPolygonFeature(hull);
+    if (patch) features.push(patch);
   }
 
   return features;
@@ -819,18 +882,8 @@ function unionWallComponent(
     ...buildNodeCorePatchFeatures(walls, joinsMap),
   ];
   const overlayFeatures = [
-    ...buildNodeCorePatchFeatures(
-      walls,
-      joinsMap,
-      (node) =>
-        node.endpoints.length >= 2 &&
-        !node.endpoints.some((endpointRef) => endpointJoinForRef(endpointRef, joinsMap)?.joinType === 'bevel')
-    ),
-    ...buildEndpointJoinPatchFeatures(
-      walls,
-      joinsMap,
-      (join) => join.joinType !== 'bevel'
-    ),
+    ...buildNodeCorePatchFeatures(walls, joinsMap),   // always include all nodes
+    ...buildEndpointJoinPatchFeatures(walls, joinsMap, (join) => join.joinType !== 'bevel'),
   ];
 
   return {
@@ -843,6 +896,15 @@ export function computeWallUnionRenderData(
   walls: Wall[],
   precomputedJoinsMap?: Map<string, JoinData[]>
 ): WallUnionRenderData {
+  const cacheable = !precomputedJoinsMap;
+  const signature = cacheable ? wallUnionSignature(walls) : null;
+  if (signature) {
+    const cached = getCachedWallUnionRenderData(signature);
+    if (cached) {
+      return cached;
+    }
+  }
+
   // When no precomputed joins are provided, use the shadow-aware variant
   // so that coincident duplicate walls (e.g. shared room edges) are excluded
   // from the polygon union — preventing double-thickness artifacts.
@@ -880,10 +942,14 @@ export function computeWallUnionRenderData(
     })
     .filter((component) => component.polygons.length > 0 || component.junctionOverlays.length > 0);
 
-  return {
+  const renderData = {
     joinsMap,
     components,
   };
+  if (signature) {
+    setCachedWallUnionRenderData(signature, renderData);
+  }
+  return renderData;
 }
 
 /**
@@ -919,16 +985,15 @@ export function computeJunctionPatchPolygons(
       continue;
     }
 
-    const ring = uniqueVertices.sort(
-      (a, b) => anchorAngleDeg(node.point, a) - anchorAngleDeg(node.point, b)
-    );
+    const hull = convexHull(uniqueVertices);
+    if (hull.length < 3) continue;
 
-    if (Math.abs(polygonArea(ring)) < MIN_PATCH_AREA_MM2) {
+    if (Math.abs(polygonArea(hull)) < MIN_PATCH_AREA_MM2) {
       continue;
     }
 
     patches.push({
-      polygon: ring,
+      polygon: hull,
       wallIds: node.endpoints.map((ep) => ep.wall.id),
     });
   }

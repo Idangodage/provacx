@@ -78,6 +78,7 @@ export const createHistorySlice: StateCreator<
     // Actions
     saveToHistory: (action) => {
         const state = get();
+        const previousSnapshot = state.history[state.historyIndex]?.snapshot;
         const snapshot = createHistorySnapshot({
             detectedElements: state.detectedElements,
             dimensions: state.dimensions,
@@ -90,7 +91,7 @@ export const createHistorySlice: StateCreator<
             elevationViews: state.elevationViews,
             activeElevationViewId: state.activeElevationViewId,
             hvacElements: state.hvacElements,
-        });
+        }, previousSnapshot);
         const entry = createHistoryEntry(action, snapshot);
         const trimmedHistory = state.history.slice(0, state.historyIndex + 1);
         const newHistory = [...trimmedHistory, entry];

@@ -4,17 +4,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
-import {
-  difference as turfDifference,
-  featureCollection as turfFeatureCollection,
-  multiPolygon as turfMultiPolygon,
-  polygon as turfPolygon,
-} from '@turf/turf';
-
 import type { ArchitecturalObjectDefinition } from '../../../data';
 import type { HvacElement, Point2D, Room, SymbolInstance2D, Wall } from '../../../types';
-import { computeWallJoinMap } from '../wall/WallJoinNetwork';
-import { computeWallUnionRenderData } from '../wall/WallUnionGeometry';
+import { buildIsometricWallBandsSignature } from './wallBands';
+import { buildIsometricWallBandsInBackground } from './isometricWallBandsWorkerClient';
 import { createWallOpenings3D, type OpeningRenderOptions } from './Opening3DRenderer';
 import { hasRenderer } from '../object/FurnitureSymbolRenderer';
 import { createOptimizedFurnitureModel3D } from '../object/three3d/Furniture3DRenderer';
@@ -49,14 +42,6 @@ type WallBand = {
   name: string;
   showOutline?: boolean;
   showTopCap?: boolean;
-};
-
-type OpeningSpan = {
-  id: string;
-  start: number;
-  end: number;
-  bottom: number;
-  top: number;
 };
 
 type LabelAnchor = {
@@ -370,18 +355,6 @@ function projectLabels(
   });
 }
 
-function wallPalette(material: Wall['material']): WallPalette {
-  switch (material) {
-    case 'brick':
-      return { top: '#d9b8a4', side: '#b7866b', outline: '#7a5643' };
-    case 'concrete':
-      return { top: '#d7dde5', side: '#b6c0cb', outline: '#6c7783' };
-    case 'partition':
-    default:
-      return { top: '#e4d2c2', side: '#ba8a6d', outline: '#8a654d' };
-  }
-}
-
 function solidPalette(category: ArchitecturalObjectDefinition['category'] | 'hvac' | 'unknown'): SolidPalette {
   switch (category) {
     case 'doors':
@@ -402,261 +375,6 @@ function solidPalette(category: ArchitecturalObjectDefinition['category'] | 'hva
     default:
       return { color: '#aab8c8' };
   }
-}
-
-function wallStyleKey(wall: Wall): string {
-  return [
-    wall.material,
-    Math.round(wall.properties3D.baseElevation ?? 0),
-    Math.round(wall.properties3D.height ?? 2700),
-  ].join('|');
-}
-
-function openingHoleRectWorld(wall: Wall, span: OpeningSpan): Point2D[] {
-  const dx = wall.endPoint.x - wall.startPoint.x;
-  const dy = wall.endPoint.y - wall.startPoint.y;
-  const len = Math.hypot(dx, dy);
-  if (len <= EPSILON) {
-    return [];
-  }
-
-  const dirX = dx / len;
-  const dirY = dy / len;
-  const perpX = -dirY;
-  const perpY = dirX;
-  // Use generous overshoot so the cut fully covers the wall thickness.
-  // The rectangle will be clipped to the union polygon via turf.difference.
-  const halfThickCut = wall.thickness / 2 + 50;
-
-  const cx = wall.startPoint.x + dirX * (span.start + span.end) / 2;
-  const cy = wall.startPoint.y + dirY * (span.start + span.end) / 2;
-  const halfLen = (span.end - span.start) / 2;
-
-  return [
-    { x: cx - dirX * halfLen + perpX * halfThickCut, y: cy - dirY * halfLen + perpY * halfThickCut },
-    { x: cx + dirX * halfLen + perpX * halfThickCut, y: cy + dirY * halfLen + perpY * halfThickCut },
-    { x: cx + dirX * halfLen - perpX * halfThickCut, y: cy + dirY * halfLen - perpY * halfThickCut },
-    { x: cx - dirX * halfLen - perpX * halfThickCut, y: cy - dirY * halfLen - perpY * halfThickCut },
-  ];
-}
-
-/** Convert Point2D[] ring to a closed turf-compatible coordinate array */
-function ringToCoords(ring: Point2D[]): number[][] {
-  const coords = ring.map((p) => [p.x, p.y]);
-  if (coords.length > 0) {
-    coords.push([ring[0].x, ring[0].y]);
-  }
-  return coords;
-}
-
-/** Convert turf geometry coordinates back to Point2D[][] polygons */
-function turfCoordsToPolygons(
-  geometry: { type: string; coordinates: number[][][] | number[][][][] }
-): Point2D[][][] {
-  if (geometry.type === 'Polygon') {
-    const coords = geometry.coordinates as number[][][];
-    return [coords.map((ring) => ring.slice(0, -1).map((c) => ({ x: c[0], y: c[1] })))];
-  }
-  if (geometry.type === 'MultiPolygon') {
-    const coords = geometry.coordinates as number[][][][];
-    return coords.map((poly) =>
-      poly.map((ring) => ring.slice(0, -1).map((c) => ({ x: c[0], y: c[1] })))
-    );
-  }
-  return [];
-}
-
-/**
- * Subtract opening hole rectangles from a wall polygon using turf.difference.
- * Returns one or more result polygons (an opening can split a wall into pieces).
- * This guarantees holes are properly clipped to the polygon boundary,
- * preventing triangulation artifacts at mitered corners.
- */
-function subtractOpeningHoles(
-  polygon: Point2D[][],
-  holes: Point2D[][]
-): Point2D[][][] {
-  const outerRing = polygon[0];
-  if (!outerRing || outerRing.length < 3) {
-    return [polygon];
-  }
-
-  const existingHoles = polygon.slice(1).filter((r) => r.length >= 3);
-  const turfOuter = ringToCoords(outerRing);
-  const turfHoles = existingHoles.map(ringToCoords);
-
-  let current: ReturnType<typeof turfPolygon> | ReturnType<typeof turfMultiPolygon>;
-  try {
-    current = turfPolygon([turfOuter, ...turfHoles]);
-  } catch {
-    return [polygon];
-  }
-
-  for (const hole of holes) {
-    if (hole.length < 3) {
-      continue;
-    }
-    try {
-      const holePoly = turfPolygon([ringToCoords(hole)]);
-      const diff = turfDifference(turfFeatureCollection([current, holePoly]));
-      if (!diff) {
-        return [];
-      }
-      current = diff as typeof current;
-    } catch {
-      // If difference fails, keep current polygon unchanged for this hole
-    }
-  }
-
-  return turfCoordsToPolygons(current.geometry as { type: string; coordinates: number[][][] | number[][][][] });
-}
-
-function buildUnifiedWallBands(
-  walls: Wall[],
-  joinsMap: Map<string, import('../../../types').JoinData[]>
-): WallBand[] {
-  const groups = new Map<string, Wall[]>();
-  walls.forEach((wall) => {
-    const key = wallStyleKey(wall);
-    groups.set(key, [...(groups.get(key) ?? []), wall]);
-  });
-
-  const bands: WallBand[] = [];
-  let groupIdx = 0;
-
-  groups.forEach((groupWalls) => {
-    if (groupWalls.length === 0) {
-      return;
-    }
-
-    groupIdx += 1;
-    const renderData = computeWallUnionRenderData(groupWalls, joinsMap);
-    const baseElev = groupWalls[0].properties3D.baseElevation ?? 0;
-    const wallH = Math.max(1, groupWalls[0].properties3D.height ?? 2700);
-    const wallTop = baseElev + wallH;
-    const pal = wallPalette(groupWalls[0].material);
-
-    // Collect all opening spans from ALL walls in this style group
-    const allSpans: Array<{ wall: Wall; span: OpeningSpan }> = [];
-    groupWalls.forEach((wall) => {
-      openingSpansForWall(wall).forEach((span) => {
-        allSpans.push({ wall, span });
-      });
-    });
-
-    renderData.components.forEach((component, cIdx) => {
-      if (component.polygons.length === 0) {
-        return;
-      }
-
-      component.polygons.forEach((polygon, pIdx) => {
-        const baseName = `wall-${groupIdx}-${cIdx}-${pIdx}`;
-
-        if (allSpans.length === 0) {
-          // No openings — single full-height extrusion
-          bands.push({
-            polygon,
-            baseElevation: baseElev,
-            height: wallH,
-            palette: pal,
-            name: baseName,
-            showOutline: true,
-            showTopCap: true,
-          });
-          return;
-        }
-
-        // Height-band decomposition: split at every opening edge
-        const heightBreaks = new Set<number>([baseElev, wallTop]);
-        allSpans.forEach(({ span }) => {
-          heightBreaks.add(Math.max(baseElev, span.bottom));
-          heightBreaks.add(Math.min(wallTop, span.top));
-        });
-        const sorted = [...heightBreaks].filter(Number.isFinite).sort((a, b) => a - b);
-
-        for (let i = 0; i < sorted.length - 1; i += 1) {
-          const bBot = sorted[i];
-          const bTop = sorted[i + 1];
-          const bH = bTop - bBot;
-          if (bH <= EPSILON) {
-            continue;
-          }
-
-          const active = allSpans.filter(
-            ({ span }) => span.bottom < bTop - EPSILON && span.top > bBot + EPSILON
-          );
-
-          if (active.length === 0) {
-            bands.push({
-              polygon,
-              baseElevation: bBot,
-              height: bH,
-              palette: pal,
-              name: `${baseName}-b${i}`,
-              showOutline: bTop >= wallTop - EPSILON,
-              showTopCap: bTop >= wallTop - EPSILON,
-            });
-          } else {
-            const holes = active.map(({ wall, span }) => openingHoleRectWorld(wall, span));
-            const resultPolygons = subtractOpeningHoles(polygon, holes);
-            resultPolygons.forEach((resultPoly, rIdx) => {
-              bands.push({
-                polygon: resultPoly,
-                baseElevation: bBot,
-                height: bH,
-                palette: pal,
-                name: `${baseName}-b${i}-r${rIdx}`,
-                showOutline: bTop >= wallTop - EPSILON,
-                showTopCap: bTop >= wallTop - EPSILON,
-              });
-            });
-          }
-        }
-      });
-    });
-  });
-
-  return bands;
-}
-
-function openingSpansForWall(wall: Wall): OpeningSpan[] {
-  const dx = wall.endPoint.x - wall.startPoint.x;
-  const dy = wall.endPoint.y - wall.startPoint.y;
-  const wallLength = Math.hypot(dx, dy);
-  if (wallLength <= EPSILON) {
-    return [];
-  }
-
-  const wallBase = wall.properties3D.baseElevation ?? 0;
-  const wallTop = wallBase + Math.max(1, wall.properties3D.height ?? 2700);
-
-  const spans = wall.openings
-    .map((opening) => {
-      const halfWidth = Math.max(10, opening.width / 2);
-      const start = THREE.MathUtils.clamp(opening.position - halfWidth, 0, wallLength);
-      const end = THREE.MathUtils.clamp(opening.position + halfWidth, 0, wallLength);
-      const bottom = opening.type === 'window'
-        ? wallBase + (opening.sillHeight ?? 900)
-        : wallBase;
-      const top = Math.min(
-        wallTop,
-        bottom + Math.max(100, opening.height || (opening.type === 'door' ? 2100 : 1200))
-      );
-      if (end - start <= EPSILON || top - bottom <= EPSILON) {
-        return null;
-      }
-      return {
-        id: opening.id,
-        start,
-        end,
-        bottom,
-        top,
-      } as OpeningSpan;
-    })
-    .filter((span): span is OpeningSpan => span !== null)
-    .sort((left, right) => left.start - right.start);
-
-  return spans;
 }
 
 // ─── Shared material caches (module-scoped, persist across re-renders) ────────
@@ -1029,10 +747,16 @@ export function IsometricViewCanvas({
   const renderRequestedRef = useRef(true);
   const hasAutoFitRef = useRef(false);
   const isInteractingRef = useRef(false);
+  const wallBandRequestIdRef = useRef(0);
+  const lastResolvedWallBandSignatureRef = useRef('');
+  const pendingWallBandSignatureRef = useRef('');
   const [containerSize, setContainerSize] = useState(DEFAULT_EMPTY_SIZE);
   const [screenLabels, setScreenLabels] = useState<ScreenLabel[]>([]);
   const [isEmpty, setIsEmpty] = useState(false);
   const [webglInitError, setWebglInitError] = useState<string | null>(null);
+  const [wallBands, setWallBands] = useState<WallBand[]>([]);
+  const [resolvedWallBandSignature, setResolvedWallBandSignature] = useState('');
+  const [isWallBandsPending, setIsWallBandsPending] = useState(false);
 
   const definitionsById = useMemo(
     () => new Map(objectDefinitions.map((definition) => [definition.id, definition])),
@@ -1054,11 +778,55 @@ export function IsometricViewCanvas({
     return options;
   }, [definitionsById, symbols]);
   const wallsById = useMemo(() => new Map(walls.map((wall) => [wall.id, wall])), [walls]);
-  const allJoinsMap = useMemo(() => computeWallJoinMap(walls), [walls]);
-  const wallBands = useMemo(
-    () => buildUnifiedWallBands(walls, allJoinsMap),
-    [walls, allJoinsMap]
-  );
+  const wallBandSignature = useMemo(() => buildIsometricWallBandsSignature(walls), [walls]);
+  const activeWallBands = resolvedWallBandSignature === wallBandSignature ? wallBands : [];
+  const showPendingWallBands = isWallBandsPending && walls.length > 0 && activeWallBands.length === 0;
+
+  useEffect(() => {
+    if (walls.length === 0) {
+      wallBandRequestIdRef.current += 1;
+      lastResolvedWallBandSignatureRef.current = '';
+      pendingWallBandSignatureRef.current = '';
+      setWallBands([]);
+      setResolvedWallBandSignature('');
+      setIsWallBandsPending(false);
+      return;
+    }
+
+    if (
+      wallBandSignature === lastResolvedWallBandSignatureRef.current ||
+      wallBandSignature === pendingWallBandSignatureRef.current
+    ) {
+      return;
+    }
+
+    const requestId = ++wallBandRequestIdRef.current;
+    pendingWallBandSignatureRef.current = wallBandSignature;
+    setIsWallBandsPending(true);
+
+    void buildIsometricWallBandsInBackground({
+      signature: wallBandSignature,
+      walls,
+    }).then((nextWallBands) => {
+      if (requestId !== wallBandRequestIdRef.current) {
+        return;
+      }
+
+      pendingWallBandSignatureRef.current = '';
+      lastResolvedWallBandSignatureRef.current = wallBandSignature;
+      setWallBands(nextWallBands);
+      setResolvedWallBandSignature(wallBandSignature);
+      setIsWallBandsPending(false);
+      renderRequestedRef.current = true;
+    }).catch(() => {
+      if (requestId !== wallBandRequestIdRef.current) {
+        return;
+      }
+
+      pendingWallBandSignatureRef.current = '';
+      setIsWallBandsPending(false);
+    });
+  }, [wallBandSignature, walls]);
 
   const renderViewport = useCallback(() => {
     const sceneState = sceneRef.current;
@@ -1375,7 +1143,7 @@ export function IsometricViewCanvas({
     // Render all wall geometry as unified bands. The union system merges
     // all walls (including those with openings) into continuous corner
     // geometry. Openings are punched as holes in the appropriate height bands.
-    wallBands.forEach((band) => {
+    activeWallBands.forEach((band) => {
       const wallMesh = createWallMesh(
         band.polygon,
         band.baseElevation,
@@ -1605,7 +1373,7 @@ export function IsometricViewCanvas({
     }
     controls.update();
     renderRequestedRef.current = true;
-  }, [definitionsById, hvacElements, openingRenderOptionsById, rooms, symbols, wallBands, walls, wallsById]);
+  }, [activeWallBands, definitionsById, hvacElements, openingRenderOptionsById, rooms, symbols, walls, wallsById]);
 
   return (
     <div
@@ -1639,7 +1407,15 @@ export function IsometricViewCanvas({
             {webglInitError}
           </div>
         )}
-        {isEmpty && !webglInitError && (
+        {showPendingWallBands && !webglInitError && (
+          <div
+            className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sm text-slate-500"
+            style={{ fontFamily: 'monospace' }}
+          >
+            Preparing isometric wall geometry...
+          </div>
+        )}
+        {isEmpty && !webglInitError && !showPendingWallBands && (
           <div
             className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sm text-slate-500"
             style={{ fontFamily: 'monospace' }}

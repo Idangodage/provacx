@@ -2,5 +2,13 @@
 export { prisma } from "./client";
 export type { PrismaClient } from "./client";
 
-// Re-export all Prisma types
-export * from "@prisma/client";
+// Re-export the Prisma types used inside this workspace.
+export type {
+  BOQCategory,
+  ComponentType,
+  ConnectionType,
+  OrganizationRole,
+  PlatformAdmin,
+  Prisma,
+  User,
+} from "@prisma/client";
