@@ -69,6 +69,7 @@ export interface UseCanvasEventBindingOptions {
     wallIdSet: Set<string>;
     perimeterWallIdsForRooms: (roomIds: string[]) => string[];
     roomBoundaryDistance: (point: Point2D, vertices: Point2D[]) => number;
+    selectWallSegmentAtPoint: (wallId: string, point: Point2D) => string;
     projectPointToSegment: (
         point: Point2D,
         segStart: Point2D,
@@ -605,6 +606,7 @@ export function useCanvasEventBinding(
                 roomById,
                 roomBoundaryDistance,
                 wallById,
+                selectWallSegmentAtPoint,
                 handleDimensionSelectMouseDown,
                 updateSelectionFromTarget,
                 handleSelectMouseDown,
@@ -885,16 +887,17 @@ export function useCanvasEventBinding(
                 }
             }
             if (clickedWallId) {
+                const selectedWallId = selectWallSegmentAtPoint(clickedWallId, wallPointMm);
                 suppressNextFabricSelectionSync();
                 setPersistentRoomControlId(null);
                 if (addToSelection) {
                     canvas.discardActiveObject();
-                    toggleSelectedId(clickedWallId);
+                    toggleSelectedId(selectedWallId);
                 } else {
-                    setSelectedIds([clickedWallId]);
+                    setSelectedIds([selectedWallId]);
                 }
-                wallRenderer?.setHoveredWall(clickedWallId);
-                setHoveredElement(clickedWallId);
+                wallRenderer?.setHoveredWall(selectedWallId);
+                setHoveredElement(selectedWallId);
                 return;
             }
             const dimensionHandled = handleDimensionSelectMouseDown(
@@ -929,6 +932,7 @@ export function useCanvasEventBinding(
                 setSectionLineContextMenu,
                 setObjectContextMenu,
                 resolveWallIdFromTarget,
+                selectWallSegmentAtPoint,
             } = latestOptionsRef.current;
             if (tool !== 'select') {
                 closeWallContextMenu();
@@ -948,11 +952,17 @@ export function useCanvasEventBinding(
                 : null;
             const targetSectionLineId = resolveSectionLineIdFromTarget(target ?? null);
             const targetObjectId = resolveObjectIdFromTarget(target ?? null);
-            const clickedWallId = wallPointMm ? wallRenderer?.getWallIdAtPoint(wallPointMm) ?? null : null;
+            const directWallId = resolveWallIdFromTarget(target ?? null);
+            const clickedWallId = wallPointMm
+                ? directWallId ?? wallRenderer?.getWallIdAtPoint(wallPointMm) ?? null
+                : directWallId;
             if (!targetSectionLineId && !targetObjectId && clickedWallId) {
                 event.preventDefault();
                 event.stopPropagation();
-                setSelectedIds([clickedWallId]);
+                const selectedWallId = wallPointMm
+                    ? selectWallSegmentAtPoint(clickedWallId, wallPointMm)
+                    : clickedWallId;
+                setSelectedIds([selectedWallId]);
                 closeDimensionContextMenu();
                 closeSectionLineContextMenu();
                 closeObjectContextMenu();
@@ -960,7 +970,7 @@ export function useCanvasEventBinding(
                 const outerRect = outerRef.current?.getBoundingClientRect();
                 const x = outerRect ? event.clientX - outerRect.left : event.clientX;
                 const y = outerRect ? event.clientY - outerRect.top : event.clientY;
-                setWallContextMenu({ wallId: clickedWallId, x, y });
+                setWallContextMenu({ wallId: selectedWallId, x, y });
                 return;
             }
             const dimensionId = resolveDimensionIdFromTarget(target ?? null);

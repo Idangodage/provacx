@@ -1017,6 +1017,309 @@ function pointLiesOnWall(point: Point2D, wall: Wall, tolerance: number = 2): boo
   return projection.distance <= tolerance;
 }
 
+const WALL_SEGMENT_SELECTION_TOLERANCE_MM = 2;
+const WALL_SEGMENT_SELECTION_OPENING_CLEARANCE_MM = 2;
+
+interface SplitWallDescriptor {
+  wall: Wall;
+  startDistance: number;
+  endDistance: number;
+}
+
+function projectPointParameter(point: Point2D, start: Point2D, end: Point2D): number {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lengthSq = dx * dx + dy * dy;
+  if (lengthSq < 0.000001) {
+    return 0;
+  }
+  return clampValue(
+    ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSq,
+    0,
+    1
+  );
+}
+
+function addUniqueSplitPoint(
+  points: Point2D[],
+  point: Point2D,
+  tolerance: number = WALL_SEGMENT_SELECTION_TOLERANCE_MM
+): void {
+  if (!points.some((existing) => pointsNear(existing, point, tolerance))) {
+    points.push({ ...point });
+  }
+}
+
+function splitPointConflictsWithOpening(point: Point2D, wall: Wall): boolean {
+  if (wall.openings.length === 0) {
+    return false;
+  }
+
+  const position = clampValue(
+    projectDistanceAlongWall(point, wall),
+    0,
+    wallLengthMm(wall.startPoint, wall.endPoint)
+  );
+
+  return wall.openings.some((opening) => (
+    Math.abs(position - opening.position)
+    <= opening.width / 2 + WALL_SEGMENT_SELECTION_OPENING_CLEARANCE_MM
+  ));
+}
+
+function collectWallSelectionSplitPoints(wall: Wall, walls: Wall[]): Point2D[] {
+  const splitPoints: Point2D[] = [
+    { ...wall.startPoint },
+    { ...wall.endPoint },
+  ];
+  const wallLength = wallLengthMm(wall.startPoint, wall.endPoint);
+
+  for (const otherWall of walls) {
+    if (otherWall.id === wall.id) {
+      continue;
+    }
+
+    [otherWall.startPoint, otherWall.endPoint].forEach((endpoint) => {
+      const projection = projectPointToSegment(endpoint, wall.startPoint, wall.endPoint);
+      if (projection.distance > WALL_SEGMENT_SELECTION_TOLERANCE_MM) {
+        return;
+      }
+      if (
+        pointsNear(projection.point, wall.startPoint, WALL_SEGMENT_SELECTION_TOLERANCE_MM) ||
+        pointsNear(projection.point, wall.endPoint, WALL_SEGMENT_SELECTION_TOLERANCE_MM)
+      ) {
+        return;
+      }
+      if (splitPointConflictsWithOpening(projection.point, wall)) {
+        return;
+      }
+      addUniqueSplitPoint(splitPoints, projection.point);
+    });
+
+    GeometryEngine.findIntersections(wall, otherWall).forEach((intersection) => {
+      const projection = projectPointToSegment(intersection, wall.startPoint, wall.endPoint);
+      if (projection.distance > WALL_SEGMENT_SELECTION_TOLERANCE_MM) {
+        return;
+      }
+      if (
+        pointsNear(projection.point, wall.startPoint, WALL_SEGMENT_SELECTION_TOLERANCE_MM) ||
+        pointsNear(projection.point, wall.endPoint, WALL_SEGMENT_SELECTION_TOLERANCE_MM)
+      ) {
+        return;
+      }
+      if (splitPointConflictsWithOpening(projection.point, wall)) {
+        return;
+      }
+      addUniqueSplitPoint(splitPoints, projection.point);
+    });
+  }
+
+  const ordered = splitPoints
+    .map((point) => ({
+      point,
+      distance: clampValue(projectDistanceAlongWall(point, wall), 0, wallLength),
+    }))
+    .sort((left, right) => left.distance - right.distance);
+
+  if (ordered.length <= 2) {
+    return ordered.map((entry) => entry.point);
+  }
+
+  const filtered = [ordered[0]];
+  for (let index = 1; index < ordered.length - 1; index += 1) {
+    const candidate = ordered[index];
+    const previous = filtered[filtered.length - 1];
+    if (candidate.distance - previous.distance < MIN_WALL_LENGTH) {
+      continue;
+    }
+    if (wallLength - candidate.distance < MIN_WALL_LENGTH) {
+      continue;
+    }
+    filtered.push(candidate);
+  }
+  filtered.push(ordered[ordered.length - 1]);
+
+  return filtered.map((entry) => entry.point);
+}
+
+function buildWallSplitDescriptors(
+  wall: Wall,
+  splitPoints: Point2D[],
+  selectedDistance: number
+): { descriptors: SplitWallDescriptor[]; selectedWallId: string } {
+  const wallLength = wallLengthMm(wall.startPoint, wall.endPoint);
+  const ordered = splitPoints
+    .map((point) => ({
+      point,
+      distance: clampValue(projectDistanceAlongWall(point, wall), 0, wallLength),
+    }))
+    .sort((left, right) => left.distance - right.distance);
+
+  const intervals = ordered
+    .slice(0, -1)
+    .map((entry, index) => ({
+      startPoint: entry.point,
+      endPoint: ordered[index + 1].point,
+      startDistance: entry.distance,
+      endDistance: ordered[index + 1].distance,
+    }))
+    .filter((entry) => entry.endDistance - entry.startDistance >= MIN_WALL_LENGTH);
+
+  if (intervals.length <= 1) {
+    return { descriptors: [], selectedWallId: wall.id };
+  }
+
+  const selectedIndex = intervals.findIndex((entry) => (
+    selectedDistance >= entry.startDistance - WALL_SEGMENT_SELECTION_TOLERANCE_MM &&
+    selectedDistance <= entry.endDistance + WALL_SEGMENT_SELECTION_TOLERANCE_MM
+  ));
+  const resolvedSelectedIndex = selectedIndex >= 0
+    ? selectedIndex
+    : intervals.reduce((bestIndex, entry, index) => {
+      const best = intervals[bestIndex];
+      const bestDistance = Math.min(
+        Math.abs(selectedDistance - best.startDistance),
+        Math.abs(selectedDistance - best.endDistance)
+      );
+      const entryDistance = Math.min(
+        Math.abs(selectedDistance - entry.startDistance),
+        Math.abs(selectedDistance - entry.endDistance)
+      );
+      return entryDistance < bestDistance ? index : bestIndex;
+    }, 0);
+
+  const descriptors = intervals.map((interval, index) => {
+    const length = interval.endDistance - interval.startDistance;
+    const baseWall = normalizeWallBevel({
+      ...wall,
+      id: index === resolvedSelectedIndex ? wall.id : generateId(),
+      startPoint: { ...interval.startPoint },
+      endPoint: { ...interval.endPoint },
+      startBevel: interval.startDistance <= WALL_SEGMENT_SELECTION_TOLERANCE_MM
+        ? { ...wall.startBevel }
+        : { ...DEFAULT_BEVEL_CONTROL },
+      endBevel: wallLength - interval.endDistance <= WALL_SEGMENT_SELECTION_TOLERANCE_MM
+        ? { ...wall.endBevel }
+        : { ...DEFAULT_BEVEL_CONTROL },
+      connectedWalls: [],
+      openings: wall.openings
+        .filter((opening) => (
+          opening.position >= interval.startDistance - WALL_SEGMENT_SELECTION_TOLERANCE_MM &&
+          opening.position <= interval.endDistance + WALL_SEGMENT_SELECTION_TOLERANCE_MM
+        ))
+        .map((opening) => ({
+          ...opening,
+          position: clampValue(opening.position - interval.startDistance, 0, length),
+        })),
+    });
+
+    return {
+      wall: bindWallAttributes(rebuildWallGeometry(baseWall), wall.properties3D),
+      startDistance: interval.startDistance,
+      endDistance: interval.endDistance,
+    };
+  });
+
+  return {
+    descriptors,
+    selectedWallId: descriptors[resolvedSelectedIndex]?.wall.id ?? wall.id,
+  };
+}
+
+function replaceWallIdsInSequence(
+  wallIds: string[],
+  replacedWallId: string,
+  replacementWallIds: string[]
+): string[] {
+  return dedupeWallIds(
+    wallIds.flatMap((wallId) => (wallId === replacedWallId ? replacementWallIds : [wallId]))
+  );
+}
+
+function remapDimensionForSplitWall(
+  dimension: Dimension2D,
+  sourceWall: Wall,
+  descriptors: SplitWallDescriptor[]
+): Dimension2D {
+  const replacementWallIds = descriptors.map((descriptor) => descriptor.wall.id);
+  const remapDistanceToWallId = (distance: number): string => {
+    const match = descriptors.find((descriptor) => (
+      distance >= descriptor.startDistance - WALL_SEGMENT_SELECTION_TOLERANCE_MM &&
+      distance <= descriptor.endDistance + WALL_SEGMENT_SELECTION_TOLERANCE_MM
+    ));
+    return match?.wall.id ?? replacementWallIds[0];
+  };
+
+  const sourceLength = wallLengthMm(sourceWall.startPoint, sourceWall.endPoint);
+  const sourceMidpointDistance = sourceLength / 2;
+  const sourceMidpoint = {
+    x: (sourceWall.startPoint.x + sourceWall.endPoint.x) / 2,
+    y: (sourceWall.startPoint.y + sourceWall.endPoint.y) / 2,
+  };
+
+  return {
+    ...dimension,
+    linkedWallIds: Array.isArray(dimension.linkedWallIds)
+      ? dedupeWallIds(
+        dimension.linkedWallIds.flatMap((wallId) => (
+          wallId === sourceWall.id ? replacementWallIds : [wallId]
+        ))
+      )
+      : dimension.linkedWallIds,
+    anchors: dimension.anchors?.map((anchor) => {
+      if (anchor.wallId !== sourceWall.id) {
+        return anchor;
+      }
+
+      if (anchor.kind === 'wall-endpoint') {
+        return {
+          ...anchor,
+          wallId: anchor.endpoint === 'end'
+            ? descriptors[descriptors.length - 1]?.wall.id ?? sourceWall.id
+            : descriptors[0]?.wall.id ?? sourceWall.id,
+        };
+      }
+
+      if (anchor.kind === 'wall-midpoint') {
+        return {
+          kind: 'point' as const,
+          point: { ...sourceMidpoint },
+        };
+      }
+
+      const projectedDistance = anchor.point
+        ? clampValue(projectDistanceAlongWall(anchor.point, sourceWall), 0, sourceLength)
+        : sourceMidpointDistance;
+      return {
+        ...anchor,
+        wallId: remapDistanceToWallId(projectedDistance),
+      };
+    }),
+  };
+}
+
+function wallsTouchForConnection(a: Wall, b: Wall): boolean {
+  if (
+    pointsNear(a.startPoint, b.startPoint, WALL_SEGMENT_SELECTION_TOLERANCE_MM) ||
+    pointsNear(a.startPoint, b.endPoint, WALL_SEGMENT_SELECTION_TOLERANCE_MM) ||
+    pointsNear(a.endPoint, b.startPoint, WALL_SEGMENT_SELECTION_TOLERANCE_MM) ||
+    pointsNear(a.endPoint, b.endPoint, WALL_SEGMENT_SELECTION_TOLERANCE_MM)
+  ) {
+    return true;
+  }
+
+  if (
+    pointLiesOnWall(a.startPoint, b, WALL_SEGMENT_SELECTION_TOLERANCE_MM) ||
+    pointLiesOnWall(a.endPoint, b, WALL_SEGMENT_SELECTION_TOLERANCE_MM) ||
+    pointLiesOnWall(b.startPoint, a, WALL_SEGMENT_SELECTION_TOLERANCE_MM) ||
+    pointLiesOnWall(b.endPoint, a, WALL_SEGMENT_SELECTION_TOLERANCE_MM)
+  ) {
+    return true;
+  }
+
+  return GeometryEngine.findIntersections(a, b).length > 0;
+}
+
 function findWallsTouchingPoint(
   point: Point2D,
   walls: Wall[],
@@ -1291,6 +1594,7 @@ export interface DrawingState {
   createRoomWalls: (config: RoomConfig, startCorner: Point2D) => string[];
   deleteWalls: (ids: string[]) => void;
   clearAllWalls: () => void;
+  selectWallSegmentAtPoint: (wallId: string, point: Point2D) => string;
 
   // Actions - Selection
   selectElement: (id: string, addToSelection?: boolean) => void;
@@ -3241,6 +3545,120 @@ export const useDrawingStore = create<DrawingState>()(
         lastRoomTopologyHash = '';
         get().regenerateElevations();
         get().saveToHistory('Clear all walls');
+      },
+
+      selectWallSegmentAtPoint: (wallId, point) => {
+        const currentState = get();
+        const sourceWall = currentState.walls.find((wall) => wall.id === wallId);
+        if (!sourceWall) {
+          return wallId;
+        }
+
+        const splitPoints = collectWallSelectionSplitPoints(sourceWall, currentState.walls);
+        if (splitPoints.length <= 2) {
+          return wallId;
+        }
+
+        const projected = projectPointToSegment(point, sourceWall.startPoint, sourceWall.endPoint);
+        const selectedDistance = clampValue(
+          projectDistanceAlongWall(projected.point, sourceWall),
+          0,
+          wallLengthMm(sourceWall.startPoint, sourceWall.endPoint)
+        );
+        const { descriptors, selectedWallId } = buildWallSplitDescriptors(
+          sourceWall,
+          splitPoints,
+          selectedDistance
+        );
+
+        if (descriptors.length === 0) {
+          return wallId;
+        }
+
+        const replacementWallIds = descriptors.map((descriptor) => descriptor.wall.id);
+
+        set((state) => {
+          const remainingWalls = state.walls.filter((wall) => wall.id !== sourceWall.id);
+          const nextDescriptors = descriptors.map((descriptor) => ({ ...descriptor, wall: { ...descriptor.wall } }));
+
+          nextDescriptors.forEach((descriptor) => {
+            const connectedWallIds: string[] = [];
+
+            remainingWalls.forEach((otherWall) => {
+              if (wallsTouchForConnection(descriptor.wall, otherWall)) {
+                connectedWallIds.push(otherWall.id);
+              }
+            });
+
+            nextDescriptors.forEach((otherDescriptor) => {
+              if (otherDescriptor.wall.id === descriptor.wall.id) {
+                return;
+              }
+              if (wallsTouchForConnection(descriptor.wall, otherDescriptor.wall)) {
+                connectedWallIds.push(otherDescriptor.wall.id);
+              }
+            });
+
+            descriptor.wall = {
+              ...descriptor.wall,
+              connectedWalls: dedupeWallIds(connectedWallIds).filter((id) => id !== descriptor.wall.id),
+            };
+          });
+
+          const nextWalls = [
+            ...remainingWalls.map((wall) => {
+              if (!wall.connectedWalls.includes(sourceWall.id) && !wallsTouchForConnection(wall, sourceWall)) {
+                return wall;
+              }
+
+              const nextConnectedWalls = dedupeWallIds([
+                ...wall.connectedWalls.filter((id) => id !== sourceWall.id),
+                ...nextDescriptors
+                  .filter((descriptor) => wallsTouchForConnection(wall, descriptor.wall))
+                  .map((descriptor) => descriptor.wall.id),
+              ]).filter((id) => id !== wall.id);
+
+              if (stringArraysEqual(nextConnectedWalls, wall.connectedWalls)) {
+                return wall;
+              }
+
+              return {
+                ...wall,
+                connectedWalls: nextConnectedWalls,
+              };
+            }),
+            ...nextDescriptors.map((descriptor) => descriptor.wall),
+          ];
+
+          const remapSelectedIds = (ids: string[]): string[] => dedupeWallIds(
+            ids.flatMap((id) => (id === sourceWall.id ? [selectedWallId] : [id]))
+          );
+
+          return {
+            walls: nextWalls,
+            rooms: state.rooms.map((room) => (
+              room.wallIds.includes(sourceWall.id)
+                ? {
+                  ...room,
+                  wallIds: replaceWallIdsInSequence(room.wallIds, sourceWall.id, replacementWallIds),
+                }
+                : room
+            )),
+            dimensions: state.dimensions.map((dimension) => (
+              Array.isArray(dimension.linkedWallIds) && dimension.linkedWallIds.includes(sourceWall.id)
+                ? remapDimensionForSplitWall(dimension, sourceWall, nextDescriptors)
+                : dimension.anchors?.some((anchor) => anchor.wallId === sourceWall.id)
+                  ? remapDimensionForSplitWall(dimension, sourceWall, nextDescriptors)
+                  : dimension
+            )),
+            selectedElementIds: remapSelectedIds(state.selectedElementIds),
+            selectedIds: remapSelectedIds(state.selectedIds),
+            hoveredElementId: state.hoveredElementId === sourceWall.id ? selectedWallId : state.hoveredElementId,
+          };
+        });
+
+        get().regenerateElevations({ debounce: true });
+        return selectedWallId;
       },
 
       // Selection Actions
