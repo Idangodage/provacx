@@ -6,7 +6,7 @@
  */
 
 import type { Canvas as FabricCanvas } from 'fabric';
-import { useRef, useCallback, useEffect } from 'react';
+import { useRef, useCallback, useEffect, useLayoutEffect } from 'react';
 
 import type { Point2D, Room, Wall, WallSettings, WallDrawingState } from '../../../types';
 import { MM_TO_PX } from '../scale'; // [SNAP WIRE]
@@ -171,7 +171,7 @@ export function useWallTool({
   }, [rooms, canvas]);
 
   // Update renderer when wall geometry changes.
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (wallRendererRef.current && canvas) {
       wallRendererRef.current.setDragOptimizedMode(false);
       if (isHandleDragging) {
@@ -179,6 +179,9 @@ export function useWallTool({
         return;
       }
       wallRendererRef.current.renderAllWalls(walls);
+      // Commit/delete wall updates should appear fully settled in the same UI turn
+      // instead of waiting for the next incidental interaction to flush Fabric.
+      canvas.renderAll();
     }
   }, [walls, canvas, isHandleDragging]);
 

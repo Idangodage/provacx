@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
+import { difference, featureCollection, polygon as turfPolygon } from '@turf/turf';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
 import type { ArchitecturalObjectDefinition } from '../../../data';
@@ -42,6 +43,7 @@ type WallBand = {
   name: string;
   showOutline?: boolean;
   showTopCap?: boolean;
+  topCapInsetMm?: number;
 };
 
 type LabelAnchor = {
@@ -131,6 +133,98 @@ function orientRing(points: Point2D[], clockwise: boolean): Point2D[] {
   return [...ring].reverse();
 }
 
+function closeRing(points: Point2D[]): number[][] {
+  const ring = sanitizeRing(points);
+  if (ring.length === 0) {
+    return [];
+  }
+
+  const closed = ring.map((point) => [point.x, point.y]);
+  const first = closed[0];
+  const last = closed[closed.length - 1];
+  if (!first || !last) {
+    return closed;
+  }
+
+  if (Math.hypot(first[0] - last[0], first[1] - last[1]) > EPSILON) {
+    closed.push([first[0], first[1]]);
+  }
+
+  return closed;
+}
+
+function openRing(ring: number[][]): Point2D[] {
+  if (ring.length === 0) {
+    return [];
+  }
+
+  const opened = ring.map(([x, y]) => ({ x, y }));
+  if (opened.length < 2) {
+    return opened;
+  }
+
+  const first = opened[0];
+  const last = opened[opened.length - 1];
+  if (Math.hypot(first.x - last.x, first.y - last.y) <= EPSILON) {
+    opened.pop();
+  }
+
+  return sanitizeRing(opened);
+}
+
+function extractPolygonRings(geometry: any): Point2D[][][] {
+  if (!geometry) {
+    return [];
+  }
+  if (geometry.type === 'Polygon') {
+    return [geometry.coordinates.map(openRing)];
+  }
+  if (geometry.type === 'MultiPolygon') {
+    return geometry.coordinates.map((polygon: number[][][]) => polygon.map(openRing));
+  }
+  return [];
+}
+
+function decomposePolygonForThree(rings: Point2D[][]): Point2D[][][] {
+  const [outerRing, ...holeRings] = rings;
+  const outer = sanitizeRing(outerRing ?? []);
+  if (outer.length < 3) {
+    return [];
+  }
+
+  const holes = holeRings
+    .map((ring) => sanitizeRing(ring))
+    .filter((ring) => ring.length >= 3);
+
+  if (holes.length === 0) {
+    return [[outer]];
+  }
+
+  try {
+    const outerFeature = turfPolygon([closeRing(outer)]);
+    const holeFeatures = holes
+      .map((hole) => closeRing(hole))
+      .filter((hole) => hole.length >= 4)
+      .map((hole) => turfPolygon([hole]));
+
+    if (holeFeatures.length === 0) {
+      return [[outer]];
+    }
+
+    const differenceResult = difference(
+      featureCollection([outerFeature, ...holeFeatures] as any) as any
+    ) as any;
+    const polygons = extractPolygonRings(differenceResult?.geometry);
+    if (polygons.length > 0) {
+      return polygons;
+    }
+  } catch {
+    // Fall through to the direct ring-based shape build.
+  }
+
+  return [[outer, ...holes]];
+}
+
 function buildShapeFromPolygon(polygon: Point2D[][]): THREE.Shape | null {
   const [outerRing, ...holeRings] = polygon;
   const outer = orientRing(outerRing ?? [], false);
@@ -181,6 +275,7 @@ function disposeMaterial(material: THREE.Material | THREE.Material[]): void {
     for (const [, mat] of cache) sharedSet.add(mat);
   }
   for (const [, mat] of _outlineMaterialCache) sharedSet.add(mat);
+  sharedSet.add(_wallCapMaskMaterial);
 
   if (Array.isArray(material)) {
     material.forEach((entry) => { if (!sharedSet.has(entry)) entry.dispose(); });
@@ -385,6 +480,14 @@ const _wallMaterialCache = new Map<string, THREE.MeshStandardMaterial>();
 const _wallTopMaterialCache = new Map<string, THREE.MeshStandardMaterial>();
 const _outlineMaterialCache = new Map<string, THREE.LineBasicMaterial>();
 const _boxMaterialCache = new Map<string, THREE.MeshStandardMaterial>();
+const _wallCapMaskMaterial = new THREE.MeshBasicMaterial({
+  transparent: true,
+  opacity: 0,
+  depthWrite: false,
+  depthTest: false,
+  colorWrite: false,
+  toneMapped: false,
+});
 
 function getSharedWallMaterial(color: string, roughness: number, metalness: number): THREE.MeshStandardMaterial {
   const key = `${color}|${roughness}|${metalness}`;
@@ -463,52 +566,61 @@ function createWallMesh(
   height: number,
   palette: WallPalette,
   showOutline = true,
-  showTopCap = true
+  showTopCap = true,
+  topCapInsetMm = 0
 ): THREE.Group | null {
-  const shape = buildShapeFromPolygon(polygon);
-  if (!shape || height <= EPSILON) {
+  const polygons = decomposePolygonForThree(polygon);
+  if (polygons.length === 0 || height <= EPSILON) {
     return null;
   }
 
   const group = new THREE.Group();
-  const geometry = new THREE.ExtrudeGeometry(shape, {
-    depth: height,
-    bevelEnabled: false,
-    curveSegments: 1,
-    steps: 1,
-  });
-  geometry.translate(0, 0, baseElevation);
-  geometry.computeVertexNormals();
-
-  // Use cached shared materials to avoid per-band material creation
   const sideMaterial = getSharedWallMaterial(palette.side, 0.98, 0);
-  const mesh = new THREE.Mesh(geometry, [sideMaterial, sideMaterial]);
-  group.add(mesh);
+  const topMaterial = getSharedWallTopMaterial(palette.top);
 
-  if (showTopCap) {
-    const topGeometry = new THREE.ShapeGeometry(shape);
-    const topMaterial = getSharedWallTopMaterial(palette.top);
-    const topCap = new THREE.Mesh(topGeometry, topMaterial);
-    topCap.position.z = baseElevation + height + 0.4;
-    group.add(topCap);
-  }
-
-  if (!showOutline) {
-    return group;
-  }
-
-  polygon.forEach((ring, ringIndex) => {
-    const points = sanitizeRing(ring);
-    if (points.length < 3) {
+  polygons.forEach((simplePolygon) => {
+    const shape = buildShapeFromPolygon(simplePolygon);
+    if (!shape) {
       return;
     }
 
-    const outlinePoints = points.map((point) => new THREE.Vector3(point.x, point.y, baseElevation + height + 4));
-    outlinePoints.push(outlinePoints[0].clone());
+    const geometry = new THREE.ExtrudeGeometry(shape, {
+      depth: height,
+      bevelEnabled: false,
+      curveSegments: 1,
+      steps: 1,
+    });
+    geometry.translate(0, 0, baseElevation);
+    geometry.computeVertexNormals();
 
-    const outlineGeometry = new THREE.BufferGeometry().setFromPoints(outlinePoints);
-    const outlineMaterial = getSharedOutlineMaterial(palette.outline, ringIndex === 0 ? 0.6 : 0.42);
-    group.add(new THREE.Line(outlineGeometry, outlineMaterial));
+    // Hide the extrusion cap faces so any visible horizontal surface comes
+    // only from the explicit top-cap mesh, which uses the safer polygon path.
+    group.add(new THREE.Mesh(geometry, [_wallCapMaskMaterial, sideMaterial]));
+
+    if (showTopCap) {
+      const topGeometry = new THREE.ShapeGeometry(shape);
+      const topCap = new THREE.Mesh(topGeometry, topMaterial);
+      topCap.position.z = baseElevation + height + 0.4 - topCapInsetMm;
+      group.add(topCap);
+    }
+
+    if (!showOutline) {
+      return;
+    }
+
+    simplePolygon.forEach((ring, ringIndex) => {
+      const points = sanitizeRing(ring);
+      if (points.length < 3) {
+        return;
+      }
+
+      const outlinePoints = points.map((point) => new THREE.Vector3(point.x, point.y, baseElevation + height + 4));
+      outlinePoints.push(outlinePoints[0].clone());
+
+      const outlineGeometry = new THREE.BufferGeometry().setFromPoints(outlinePoints);
+      const outlineMaterial = getSharedOutlineMaterial(palette.outline, ringIndex === 0 ? 0.6 : 0.42);
+      group.add(new THREE.Line(outlineGeometry, outlineMaterial));
+    });
   });
 
   return group;
@@ -535,17 +647,42 @@ function getSharedFloorMaterial(color: string): THREE.MeshStandardMaterial {
   return mat;
 }
 
-function createRoomFloor(room: Room): THREE.Mesh | null {
-  const shape = buildShapeFromPolygon([room.vertices, ...(room.holes ?? [])]);
-  if (!shape) {
+function createRoomFloor(room: Room): THREE.Object3D | null {
+  const polygons = decomposePolygonForThree([room.vertices, ...(room.holes ?? [])]);
+  if (polygons.length === 0) {
     return null;
   }
 
-  const geometry = new THREE.ShapeGeometry(shape);
   const material = getSharedFloorMaterial(room.fillColor || '#dbe6d9');
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.position.z = (room.properties3D.floorElevation ?? 0) + 2;
-  return mesh;
+  const floorElevation = (room.properties3D.floorElevation ?? 0) + 2;
+
+  if (polygons.length === 1) {
+    const shape = buildShapeFromPolygon(polygons[0]);
+    if (!shape) {
+      return null;
+    }
+
+    const geometry = new THREE.ShapeGeometry(shape);
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.position.z = floorElevation;
+    return mesh;
+  }
+
+  const group = new THREE.Group();
+  polygons.forEach((polygon, index) => {
+    const shape = buildShapeFromPolygon(polygon);
+    if (!shape) {
+      return;
+    }
+
+    const geometry = new THREE.ShapeGeometry(shape);
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.position.z = floorElevation;
+    mesh.name = `room-floor-part-${room.id}-${index}`;
+    group.add(mesh);
+  });
+
+  return group.children.length > 0 ? group : null;
 }
 
 function createBoxMesh(
@@ -1150,7 +1287,8 @@ export function IsometricViewCanvas({
         band.height,
         band.palette,
         band.showOutline ?? true,
-        band.showTopCap ?? true
+        band.showTopCap ?? true,
+        band.topCapInsetMm ?? 0
       );
       if (wallMesh) {
         wallMesh.name = band.name;

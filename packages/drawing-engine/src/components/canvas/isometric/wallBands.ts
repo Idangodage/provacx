@@ -6,8 +6,11 @@ import {
 } from '@turf/turf';
 
 import type { JoinData, Point2D, Wall } from '../../../types';
-import { computeWallJoinMap } from '../wall/WallJoinNetwork';
-import { computeWallUnionRenderData } from '../wall/WallUnionGeometry';
+import { computeWallJoinMapWithShadows } from '../wall/WallJoinNetwork';
+import {
+  computeJunctionPatchPolygons,
+  computeRenderableWallPolygon,
+} from '../wall/WallUnionGeometry';
 
 const EPSILON = 0.001;
 
@@ -25,6 +28,7 @@ export type IsometricWallBand = {
   name: string;
   showOutline?: boolean;
   showTopCap?: boolean;
+  topCapInsetMm?: number;
 };
 
 type OpeningSpan = {
@@ -191,11 +195,44 @@ function openingSpansForWall(wall: Wall): OpeningSpan[] {
     .sort((left, right) => left.start - right.start);
 }
 
+function pushBandPolygons(
+  bands: IsometricWallBand[],
+  polygons: Point2D[][][],
+  baseElevation: number,
+  height: number,
+  palette: IsometricWallPalette,
+  name: string,
+  showOutline: boolean,
+  showTopCap: boolean,
+  topCapInsetMm = 0,
+): void {
+  polygons.forEach((polygon, polygonIndex) => {
+    const outerRing = polygon[0];
+    if (!outerRing || outerRing.length < 3) {
+      return;
+    }
+
+    bands.push({
+      polygon,
+      baseElevation,
+      height,
+      palette,
+      name: polygonIndex === 0 ? name : `${name}-p${polygonIndex}`,
+      showOutline,
+      showTopCap,
+      topCapInsetMm,
+    });
+  });
+}
+
 export function buildUnifiedWallBands(
   walls: Wall[],
   precomputedJoinsMap?: Map<string, JoinData[]>
 ): IsometricWallBand[] {
-  const joinsMap = precomputedJoinsMap ?? computeWallJoinMap(walls);
+  const joinResult = precomputedJoinsMap
+    ? { joinsMap: precomputedJoinsMap, shadowedWallIds: new Set<string>() }
+    : computeWallJoinMapWithShadows(walls);
+  const { joinsMap, shadowedWallIds } = joinResult;
   const groups = new Map<string, Wall[]>();
   walls.forEach((wall) => {
     const key = wallStyleKey(wall);
@@ -211,87 +248,97 @@ export function buildUnifiedWallBands(
     }
 
     groupIndex += 1;
-    const renderData = computeWallUnionRenderData(groupWalls, joinsMap);
+    const visibleWalls = groupWalls.filter((wall) => !shadowedWallIds.has(wall.id));
+    if (visibleWalls.length === 0) {
+      return;
+    }
+
     const baseElevation = groupWalls[0].properties3D.baseElevation ?? 0;
     const wallHeight = Math.max(1, groupWalls[0].properties3D.height ?? 2700);
     const wallTop = baseElevation + wallHeight;
     const palette = wallPalette(groupWalls[0].material);
 
-    const allSpans: Array<{ wall: Wall; span: OpeningSpan }> = [];
-    groupWalls.forEach((wall) => {
-      openingSpansForWall(wall).forEach((span) => {
-        allSpans.push({ wall, span });
-      });
-    });
+    visibleWalls.forEach((wall, wallIndex) => {
+      const polygon: Point2D[][] = [computeRenderableWallPolygon(wall, joinsMap.get(wall.id))];
+      const spans = openingSpansForWall(wall);
+      const baseName = `wall-${groupIndex}-${wallIndex}`;
 
-    renderData.components.forEach((component, componentIndex) => {
-      if (component.polygons.length === 0) {
+      if (spans.length === 0) {
+        pushBandPolygons(
+          bands,
+          [polygon],
+          baseElevation,
+          wallHeight,
+          palette,
+          baseName,
+          false,
+          true,
+          0,
+        );
         return;
       }
 
-      component.polygons.forEach((polygon, polygonIndex) => {
-        const baseName = `wall-${groupIndex}-${componentIndex}-${polygonIndex}`;
-
-        if (allSpans.length === 0) {
-          bands.push({
-            polygon,
-            baseElevation,
-            height: wallHeight,
-            palette,
-            name: baseName,
-            showOutline: true,
-            showTopCap: true,
-          });
-          return;
-        }
-
-        const heightBreaks = new Set<number>([baseElevation, wallTop]);
-        allSpans.forEach(({ span }) => {
-          heightBreaks.add(Math.max(baseElevation, span.bottom));
-          heightBreaks.add(Math.min(wallTop, span.top));
-        });
-        const sortedBreaks = [...heightBreaks].filter(Number.isFinite).sort((left, right) => left - right);
-
-        for (let index = 0; index < sortedBreaks.length - 1; index += 1) {
-          const bandBottom = sortedBreaks[index];
-          const bandTop = sortedBreaks[index + 1];
-          const bandHeight = bandTop - bandBottom;
-          if (bandHeight <= EPSILON) {
-            continue;
-          }
-
-          const activeSpans = allSpans.filter(
-            ({ span }) => span.bottom < bandTop - EPSILON && span.top > bandBottom + EPSILON
-          );
-
-          if (activeSpans.length === 0) {
-            bands.push({
-              polygon,
-              baseElevation: bandBottom,
-              height: bandHeight,
-              palette,
-              name: `${baseName}-b${index}`,
-              showOutline: bandTop >= wallTop - EPSILON,
-              showTopCap: bandTop >= wallTop - EPSILON,
-            });
-            continue;
-          }
-
-          const holes = activeSpans.map(({ wall, span }) => openingHoleRectWorld(wall, span));
-          const resultPolygons = subtractOpeningHoles(polygon, holes);
-          resultPolygons.forEach((resultPolygon, resultIndex) => {
-            bands.push({
-              polygon: resultPolygon,
-              baseElevation: bandBottom,
-              height: bandHeight,
-              palette,
-              name: `${baseName}-b${index}-r${resultIndex}`,
-              showOutline: bandTop >= wallTop - EPSILON,
-              showTopCap: bandTop >= wallTop - EPSILON,
-            });
-          });
-        }
+      const heightBreaks = new Set<number>([baseElevation, wallTop]);
+      spans.forEach((span) => {
+        heightBreaks.add(Math.max(baseElevation, span.bottom));
+        heightBreaks.add(Math.min(wallTop, span.top));
       });
+      const sortedBreaks = [...heightBreaks].filter(Number.isFinite).sort((left, right) => left - right);
+
+      for (let index = 0; index < sortedBreaks.length - 1; index += 1) {
+        const bandBottom = sortedBreaks[index];
+        const bandTop = sortedBreaks[index + 1];
+        const bandHeight = bandTop - bandBottom;
+        if (bandHeight <= EPSILON) {
+          continue;
+        }
+
+        const activeSpans = spans.filter(
+          (span) => span.bottom < bandTop - EPSILON && span.top > bandBottom + EPSILON
+        );
+
+        if (activeSpans.length === 0) {
+          pushBandPolygons(
+            bands,
+            [polygon],
+            bandBottom,
+            bandHeight,
+            palette,
+            `${baseName}-b${index}`,
+            false,
+            bandTop >= wallTop - EPSILON,
+            0,
+          );
+          continue;
+        }
+
+        const holes = activeSpans.map((span) => openingHoleRectWorld(wall, span));
+        pushBandPolygons(
+          bands,
+          subtractOpeningHoles(polygon, holes),
+          bandBottom,
+          bandHeight,
+          palette,
+          `${baseName}-b${index}`,
+          false,
+          bandTop >= wallTop - EPSILON,
+          0,
+        );
+      }
+    });
+
+    computeJunctionPatchPolygons(visibleWalls, joinsMap).forEach((patch, patchIndex) => {
+      pushBandPolygons(
+        bands,
+        [[patch.polygon]],
+        baseElevation,
+        wallHeight,
+        palette,
+        `wall-${groupIndex}-patch-${patchIndex}`,
+        false,
+        true,
+        0.8,
+      );
     });
   });
 
