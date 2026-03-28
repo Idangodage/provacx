@@ -87,6 +87,7 @@ export interface UseSelectModeOptions {
   zoom: number;
   setSelectedIds: (ids: string[]) => void;
   setHoveredElement: (id: string | null) => void;
+  getWall: (id: string) => Wall | undefined;
   updateWall: (id: string, updates: Partial<Wall>, options?: WallUpdateOptions) => void;
   updateWalls: (
     updates: Array<{ id: string; updates: Partial<Wall> }>,
@@ -107,6 +108,7 @@ export interface UseSelectModeOptions {
   } | null;
   moveRoom: (id: string, delta: Point2D, options?: RoomMoveOptions) => void;
   connectWalls: (wallId: string, otherWallId: string) => void;
+  selectWallSegmentWithinInterval: (wallId: string, startPoint: Point2D, endPoint: Point2D) => string;
   detectRooms: (options?: { debounce?: boolean }) => void;
   regenerateElevations: (options?: { debounce?: boolean }) => void;
   saveToHistory: (action: string) => void;
@@ -126,6 +128,9 @@ interface TargetMeta {
   scaleDirection?: 'NW' | 'N' | 'NE' | 'E' | 'SE' | 'S' | 'SW' | 'W';
   isWallControl?: boolean;
   isRoomControl?: boolean;
+  roomBoundarySelectionKey?: string;
+  roomBoundaryStartPoint?: Point2D;
+  roomBoundaryEndPoint?: Point2D;
 }
 
 interface ConnectedEndpointRef {
@@ -603,6 +608,7 @@ export function useSelectMode({
   zoom,
   setSelectedIds,
   setHoveredElement,
+  getWall,
   updateWall,
   updateWalls,
   updateWallBevel,
@@ -610,6 +616,7 @@ export function useSelectMode({
   getCornerBevelDots,
   moveRoom,
   connectWalls,
+  selectWallSegmentWithinInterval,
   detectRooms,
   regenerateElevations,
   saveToHistory,
@@ -645,6 +652,7 @@ export function useSelectMode({
     zoom,
     setSelectedIds,
     setHoveredElement,
+    getWall,
     updateWall,
     updateWalls,
     updateWallBevel,
@@ -652,6 +660,7 @@ export function useSelectMode({
     getCornerBevelDots,
     moveRoom,
     connectWalls,
+    selectWallSegmentWithinInterval,
     detectRooms,
     regenerateElevations,
     saveToHistory,
@@ -677,6 +686,7 @@ export function useSelectMode({
       zoom,
       setSelectedIds,
       setHoveredElement,
+      getWall,
       updateWall,
       updateWalls,
       updateWallBevel,
@@ -684,6 +694,7 @@ export function useSelectMode({
       getCornerBevelDots,
       moveRoom,
       connectWalls,
+      selectWallSegmentWithinInterval,
       detectRooms,
       regenerateElevations,
       saveToHistory,
@@ -1168,7 +1179,7 @@ export function useSelectMode({
   }, []);
 
   const findWallById = useCallback((wallId: string): Wall | undefined => {
-    return optionsRef.current.walls.find((wall) => wall.id === wallId);
+    return optionsRef.current.getWall(wallId) ?? optionsRef.current.walls.find((wall) => wall.id === wallId);
   }, []);
 
   const findRoomById = useCallback((roomId: string): Room | undefined => {
@@ -1421,6 +1432,9 @@ export function useSelectMode({
     const controlType = typed?.controlType ?? group?.controlType;
     const cornerIndex = typed?.cornerIndex ?? group?.cornerIndex;
     const scaleDirection = typed?.scaleDirection ?? group?.scaleDirection;
+    const roomBoundarySelectionKey = typed?.roomBoundarySelectionKey ?? group?.roomBoundarySelectionKey;
+    const roomBoundaryStartPoint = typed?.roomBoundaryStartPoint ?? group?.roomBoundaryStartPoint;
+    const roomBoundaryEndPoint = typed?.roomBoundaryEndPoint ?? group?.roomBoundaryEndPoint;
     const isWallControl = Boolean(typed?.isWallControl && controlType);
     const isRoomControl = Boolean(typed?.isRoomControl && controlType);
 
@@ -1434,6 +1448,9 @@ export function useSelectMode({
       scaleDirection,
       isWallControl,
       isRoomControl,
+      roomBoundarySelectionKey,
+      roomBoundaryStartPoint,
+      roomBoundaryEndPoint,
     };
   }, []);
 
@@ -1756,6 +1773,18 @@ export function useSelectMode({
       };
       optionsRef.current.onRoomDragStateChange?.(room.id);
       return true;
+    }
+
+    if (
+      meta.wallId &&
+      meta.roomBoundaryStartPoint &&
+      meta.roomBoundaryEndPoint
+    ) {
+      meta.wallId = optionsRef.current.selectWallSegmentWithinInterval(
+        meta.wallId,
+        meta.roomBoundaryStartPoint,
+        meta.roomBoundaryEndPoint
+      );
     }
 
     if (!meta.wallId) return false;
@@ -2297,7 +2326,9 @@ export function useSelectMode({
       if (!room) return null;
 
       const nextVertices = state.baselineRoom.vertices.map((vertex) => ({ ...vertex }));
-      let nextCorner = { ...point };
+      const baselineCorner = state.baselineRoom.vertices[state.cornerIndex];
+      const translation = subtract(point, state.startPointer);
+      let nextCorner = add(baselineCorner, translation);
       if (optionsRef.current.wallSettings.snapToGrid && modifierKeysRef.current.shift) {
         nextCorner = snapToGrid(nextCorner, optionsRef.current.wallSettings.gridSize);
       }

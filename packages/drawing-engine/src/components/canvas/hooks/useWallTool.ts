@@ -13,6 +13,7 @@ import { MM_TO_PX } from '../scale'; // [SNAP WIRE]
 import { buildTemporaryWall } from '../wall/WallJoinNetwork';
 import { WallManager } from '../wall/WallManager';
 import { WallPreview } from '../wall/WallPreview';
+import { resolveRoomBoundarySelectionSegments } from '../wall/RoomBoundarySelection';
 import { WallRenderer } from '../wall/WallRenderer';
 import { WallSnapIndicatorRenderer } from '../wall/WallSnapIndicatorRenderer'; // [SNAP WIRE]
 import { snapWallPoint } from '../wall/WallSnapping';
@@ -99,7 +100,7 @@ export function useWallTool({
   const snapIndicatorRef = useRef<WallSnapIndicatorRenderer | null>(null); // [SNAP WIRE]
   const chainWallIdsRef = useRef<string[]>([]); // [SNAP WIRE] track wall chain for room close
   const panOffsetRef = useRef(panOffset); // keep current pan offset for snap indicator coordinate conversion
-  const selectedWallSignatureRef = useRef<string>('');
+  const selectionPresentationSignatureRef = useRef<string>('');
   const wallsRef = useRef(walls);
   panOffsetRef.current = panOffset; // always sync
   wallsRef.current = walls;
@@ -111,7 +112,7 @@ export function useWallTool({
     // Create instances if not already created
     if (!wallRendererRef.current) {
       wallRendererRef.current = new WallRenderer(canvas, pageHeight);
-      selectedWallSignatureRef.current = '';
+      selectionPresentationSignatureRef.current = '';
     }
     if (!wallPreviewRef.current) {
       wallPreviewRef.current = new WallPreview(canvas, pageHeight);
@@ -144,7 +145,7 @@ export function useWallTool({
       wallRendererRef.current = null;
       wallManagerRef.current = null;
       snapIndicatorRef.current = null; // [SNAP WIRE]
-      selectedWallSignatureRef.current = '';
+      selectionPresentationSignatureRef.current = '';
     };
   }, [canvas, pageHeight]);
 
@@ -190,31 +191,34 @@ export function useWallTool({
     if (!wallRendererRef.current) return;
     const wallIdSet = new Set(wallsRef.current.map((wall) => wall.id));
     const roomById = new Map(rooms.map((room) => [room.id, room]));
-    const selectedWallIds = new Set<string>();
+    const explicitSelectedWallIds = new Set<string>();
+    const selectedRoomIds: string[] = [];
 
     selectedIds.forEach((id) => {
       if (wallIdSet.has(id)) {
-        selectedWallIds.add(id);
+        explicitSelectedWallIds.add(id);
         return;
       }
       const room = roomById.get(id);
       if (room) {
-        room.wallIds.forEach((wallId) => {
-          if (wallIdSet.has(wallId)) {
-            selectedWallIds.add(wallId);
-          }
-        });
+        selectedRoomIds.push(room.id);
       }
     });
 
-    const nextSelectedWallIds = Array.from(selectedWallIds).sort();
-    const signature = nextSelectedWallIds.join('|');
-    if (selectedWallSignatureRef.current === signature) {
+    const nextSelectedWallIds = Array.from(explicitSelectedWallIds).sort();
+    const boundarySelections = nextSelectedWallIds.length === 0 && selectedRoomIds.length > 0
+      ? resolveRoomBoundarySelectionSegments(selectedRoomIds, rooms, wallsRef.current)
+      : [];
+    const signature = [
+      nextSelectedWallIds.join('|'),
+      boundarySelections.map((selection) => selection.key).sort().join('|'),
+    ].join('::');
+    if (selectionPresentationSignatureRef.current === signature) {
       return;
     }
-    selectedWallSignatureRef.current = signature;
-    wallRendererRef.current.setSelectedWalls(nextSelectedWallIds);
-  }, [rooms, selectedIds, canvas]);
+    selectionPresentationSignatureRef.current = signature;
+    wallRendererRef.current.setSelectionState(nextSelectedWallIds, boundarySelections);
+  }, [rooms, selectedIds, canvas, walls]);
 
   // Update center lines visibility
   useEffect(() => {

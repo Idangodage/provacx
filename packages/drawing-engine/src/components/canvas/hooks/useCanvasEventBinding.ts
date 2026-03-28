@@ -70,6 +70,7 @@ export interface UseCanvasEventBindingOptions {
     perimeterWallIdsForRooms: (roomIds: string[]) => string[];
     roomBoundaryDistance: (point: Point2D, vertices: Point2D[]) => number;
     selectWallSegmentAtPoint: (wallId: string, point: Point2D) => string;
+    resolveRoomPerimeterWallSegments: (roomIds: string[]) => string[];
     projectPointToSegment: (
         point: Point2D,
         segStart: Point2D,
@@ -441,7 +442,6 @@ export function useCanvasEventBinding(
                 applyMarqueeFilterRef,
                 resolveObjectIdFromTarget,
                 resolveRoomIdFromTarget,
-                perimeterWallIdsForRooms,
                 updateSelectionFromTargets,
             } = latestOptionsRef.current;
             if (tool !== 'select') return;
@@ -474,8 +474,7 @@ export function useCanvasEventBinding(
                 .map((target) => resolveRoomIdFromTarget(target))
                 .filter((id): id is string => Boolean(id));
             if (roomIds.length > 0) {
-                const perimeterWallIds = perimeterWallIdsForRooms(roomIds);
-                const roomSelectionIds = Array.from(new Set([...roomIds, ...perimeterWallIds]));
+                const roomSelectionIds = Array.from(new Set(roomIds));
                 if (roomSelectionIds.length > 0) {
                     setPersistentRoomControlId(roomIds[0] ?? null);
                     setSelectedIds(roomSelectionIds);
@@ -497,7 +496,6 @@ export function useCanvasEventBinding(
                 applyMarqueeFilterRef,
                 resolveObjectIdFromTarget,
                 resolveRoomIdFromTarget,
-                perimeterWallIdsForRooms,
                 updateSelectionFromTargets,
             } = latestOptionsRef.current;
             if (tool !== 'select') return;
@@ -530,8 +528,7 @@ export function useCanvasEventBinding(
                 .map((target) => resolveRoomIdFromTarget(target))
                 .filter((id): id is string => Boolean(id));
             if (roomIds.length > 0) {
-                const perimeterWallIds = perimeterWallIdsForRooms(roomIds);
-                const roomSelectionIds = Array.from(new Set([...roomIds, ...perimeterWallIds]));
+                const roomSelectionIds = Array.from(new Set(roomIds));
                 if (roomSelectionIds.length > 0) {
                     setPersistentRoomControlId(roomIds[0] ?? null);
                     setSelectedIds(roomSelectionIds);
@@ -612,7 +609,6 @@ export function useCanvasEventBinding(
                 handleSelectMouseDown,
                 resolveDimensionIdFromTarget,
                 wallIdSet,
-                perimeterWallIdsForRooms,
                 selectedIds,
             } = latestOptionsRef.current;
             closeWallContextMenu();
@@ -862,8 +858,7 @@ export function useCanvasEventBinding(
                 !targetMeta.isWallControl &&
                 !targetMeta.wallId
             ) {
-                const perimeterWallIdsList = perimeterWallIdsForRooms([clickedRoomId]);
-                const roomSelectionIds = [clickedRoomId, ...perimeterWallIdsList];
+                const roomSelectionIds = [clickedRoomId];
                 if (roomSelectionIds.length > 0) {
                     suppressNextFabricSelectionSync();
                     setPersistentRoomControlId(clickedRoomId);

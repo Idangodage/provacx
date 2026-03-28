@@ -239,6 +239,8 @@ export function DrawingCanvas({
         hvacElements,
         syncAutoDimensions,
         selectWallSegmentAtPoint,
+        selectWallSegmentWithinInterval,
+        resolveRoomPerimeterWallSegments,
     } = useSmartDrawingStore((state) => ({
         activeTool: state.activeTool,
         zoom: state.zoom,
@@ -302,6 +304,8 @@ export function DrawingCanvas({
         hvacElements: state.hvacElements,
         syncAutoDimensions: state.syncAutoDimensions,
         selectWallSegmentAtPoint: state.selectWallSegmentAtPoint,
+        selectWallSegmentWithinInterval: state.selectWallSegmentWithinInterval,
+        resolveRoomPerimeterWallSegments: state.resolveRoomPerimeterWallSegments,
     }), shallow);
     const {
         mousePosition,
@@ -634,6 +638,7 @@ export function DrawingCanvas({
         zoom: viewportZoom,
         setSelectedIds,
         setHoveredElement,
+        getWall,
         updateWall,
         updateWalls,
         updateWallBevel,
@@ -641,6 +646,7 @@ export function DrawingCanvas({
         getCornerBevelDots,
         moveRoom,
         connectWalls,
+        selectWallSegmentWithinInterval,
         detectRooms,
         regenerateElevations,
         saveToHistory,
@@ -1257,6 +1263,7 @@ export function DrawingCanvas({
         wallById, roomById, wallIdSet,
         perimeterWallIdsForRooms, roomBoundaryDistance, projectPointToSegment,
         selectWallSegmentAtPoint,
+        resolveRoomPerimeterWallSegments,
         // Canvas mouse handlers
         handleMouseDown, handleMouseMove, handleMouseUp, handleWheel,
         // Middle-pan handlers

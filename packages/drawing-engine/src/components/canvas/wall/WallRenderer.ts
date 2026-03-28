@@ -51,6 +51,7 @@ import {
   type WallSelectionComponent,
   type WallSelectionPlan,
 } from './WallSelectionGeometry';
+import type { RoomBoundarySelectionSegment } from './RoomBoundarySelection';
 import type { EnhancedSnapResult } from './WallSnapping';
 import { primeWallSelectionGeometryInBackground } from './wallSelectionWorkerClient';
 import { computeWallUnionRenderData, type WallUnionComponent, type WallUnionRenderData } from './WallUnionGeometry';
@@ -85,11 +86,18 @@ type WallControlType =
   | 'wall-endpoint-end'
   | 'wall-thickness-interior'
   | 'wall-thickness-exterior'
-  | 'wall-rotation-handle';
+  | 'wall-rotation-handle'
+  | 'room-corner-handle';
 type WallControlObject = NamedObject & {
   isWallControl?: boolean;
+  isRoomControl?: boolean;
   controlType?: WallControlType;
   isControlHitTarget?: boolean;
+  roomId?: string;
+  cornerIndex?: number;
+  roomBoundarySelectionKey?: string;
+  roomBoundaryStartPoint?: Point2D;
+  roomBoundaryEndPoint?: Point2D;
 };
 type SelectionComponentObject = NamedObject & {
   selectionRole?: 'fill' | 'outline';
@@ -217,7 +225,9 @@ export class WallRenderer {
   private pageHeight: number;
   private hatchPatterns: Map<WallMaterial, fabric.Pattern | null> = new Map();
   private selectedWallIds: Set<string> = new Set();
+  private selectedRoomBoundarySegments: RoomBoundarySelectionSegment[] = [];
   private controlPointObjects: Map<string, fabric.FabricObject[]> = new Map();
+  private boundaryControlPointObjects: Map<string, fabric.FabricObject[]> = new Map();
   private showHeightTags: boolean = false;
   private wallColorMode: WallColorMode = 'material';
   private showLayerCountIndicators: boolean = false;
@@ -481,7 +491,7 @@ export class WallRenderer {
 
   setRoomWallIds(wallIds: Iterable<string>): void {
     this.roomWallIds = new Set(wallIds);
-    if (this.selectedWallIds.size > 0) {
+    if (this.selectedWallIds.size > 0 || this.selectedRoomBoundarySegments.length > 0) {
       this.setSelectedWalls([...this.selectedWallIds]);
     } else if (this.hoveredWallId) {
       this.syncHoverPreview();
@@ -532,6 +542,7 @@ export class WallRenderer {
         controls.forEach((control) => this.canvas.remove(control));
       });
       this.controlPointObjects.clear();
+      this.clearBoundaryControlPoints();
       this.canvas.requestRenderAll();
       return;
     }
@@ -602,16 +613,10 @@ export class WallRenderer {
     });
     this.wallObjects.forEach((group) => group.set('dirty', true));
 
-    // Recreate control points at current zoom (only if there's a selection)
-    if (this.selectedWallIds.size > 0) {
-      for (const wallId of this.selectedWallIds) {
-        this.removeControlPoints(wallId);
-        if (this.wallObjects.has(wallId)) {
-          this.createControlPoints(wallId);
-        }
-      }
-      // Refresh dimension labels
-      this.renderDimensionLabels([...this.selectedWallIds]);
+    // Recreate control points at current zoom for both direct wall selection
+    // and room-boundary virtual selection.
+    if (this.selectedWallIds.size > 0 || this.selectedRoomBoundarySegments.length > 0) {
+      this.refreshSelectionPresentation();
     }
 
     this.canvas.requestRenderAll();
@@ -1425,10 +1430,39 @@ export class WallRenderer {
     this.controlPointObjects.delete(wallId);
   }
 
+  private removeBoundaryControlPoints(selectionKey: string): void {
+    const controls = this.boundaryControlPointObjects.get(selectionKey);
+    if (!controls) return;
+    controls.forEach((control) => this.canvas.remove(control));
+    this.boundaryControlPointObjects.delete(selectionKey);
+  }
+
+  private clearBoundaryControlPoints(): void {
+    this.boundaryControlPointObjects.forEach((controls) => {
+      controls.forEach((control) => this.canvas.remove(control));
+    });
+    this.boundaryControlPointObjects.clear();
+  }
+
+  private applyBoundarySelectionMetadata(
+    control: fabric.FabricObject,
+    boundarySelection?: RoomBoundarySelectionSegment
+  ): void {
+    if (!boundarySelection) {
+      return;
+    }
+
+    const typed = control as WallControlObject;
+    typed.roomBoundarySelectionKey = boundarySelection.key;
+    typed.roomBoundaryStartPoint = { ...boundarySelection.startPoint };
+    typed.roomBoundaryEndPoint = { ...boundarySelection.endPoint };
+  }
+
   private annotateControlTarget(
     control: fabric.FabricObject,
     wallId: string,
-    controlType: WallControlType
+    controlType: WallControlType,
+    boundarySelection?: RoomBoundarySelectionSegment
   ): void {
     const typed = control as WallControlObject;
     typed.name = controlType;
@@ -1440,12 +1474,14 @@ export class WallRenderer {
     typed.evented = true;
     typed.hasControls = false;
     typed.hasBorders = false;
+    this.applyBoundarySelectionMetadata(control, boundarySelection);
   }
 
   private annotateControlVisual(
     control: fabric.FabricObject,
     wallId: string,
-    controlType: WallControlType
+    controlType: WallControlType,
+    boundarySelection?: RoomBoundarySelectionSegment
   ): void {
     const typed = control as WallControlObject;
     typed.name = controlType;
@@ -1457,6 +1493,7 @@ export class WallRenderer {
     typed.evented = false;
     typed.hasControls = false;
     typed.hasBorders = false;
+    this.applyBoundarySelectionMetadata(control, boundarySelection);
   }
 
   private createControlHitTarget(
@@ -1464,7 +1501,8 @@ export class WallRenderer {
     wallId: string,
     controlType: WallControlType,
     cursor: string,
-    hitRadiusPx: number
+    hitRadiusPx: number,
+    boundarySelection?: RoomBoundarySelectionSegment
   ): fabric.Circle {
     const hitTarget = new fabric.Circle({
       left: point.x * MM_TO_PX,
@@ -1478,9 +1516,145 @@ export class WallRenderer {
       lockMovementX: true,
       lockMovementY: true,
     });
-    this.annotateControlTarget(hitTarget, wallId, controlType);
+    this.annotateControlTarget(hitTarget, wallId, controlType, boundarySelection);
     (hitTarget as WallControlObject).isControlHitTarget = true;
     return hitTarget;
+  }
+
+  private intersectInfiniteLines(
+    aStart: Point2D,
+    aEnd: Point2D,
+    bStart: Point2D,
+    bEnd: Point2D
+  ): Point2D | null {
+    const aDx = aEnd.x - aStart.x;
+    const aDy = aEnd.y - aStart.y;
+    const bDx = bEnd.x - bStart.x;
+    const bDy = bEnd.y - bStart.y;
+    const determinant = aDx * bDy - aDy * bDx;
+
+    if (Math.abs(determinant) < 0.0001) {
+      return null;
+    }
+
+    const offsetX = bStart.x - aStart.x;
+    const offsetY = bStart.y - aStart.y;
+    const t = (offsetX * bDy - offsetY * bDx) / determinant;
+
+    return {
+      x: aStart.x + aDx * t,
+      y: aStart.y + aDy * t,
+    };
+  }
+
+  private resolveBoundaryRoomCornerPoint(boundarySelection: RoomBoundarySelectionSegment): Point2D {
+    if (boundarySelection.startCornerIndex === null || boundarySelection.startCornerIndex === undefined) {
+      return boundarySelection.faceStartPoint;
+    }
+
+    const adjacentSelection = this.selectedRoomBoundarySegments.find((candidate) =>
+      candidate.key !== boundarySelection.key &&
+      candidate.roomId === boundarySelection.roomId &&
+      candidate.endCornerIndex === boundarySelection.startCornerIndex
+    );
+
+    if (!adjacentSelection) {
+      return boundarySelection.startPoint;
+    }
+
+    const intersection = this.intersectInfiniteLines(
+      adjacentSelection.virtualWall.startPoint,
+      adjacentSelection.virtualWall.endPoint,
+      boundarySelection.virtualWall.startPoint,
+      boundarySelection.virtualWall.endPoint
+    );
+
+    if (intersection) {
+      return intersection;
+    }
+
+    return {
+      x: (adjacentSelection.endPoint.x + boundarySelection.startPoint.x) / 2,
+      y: (adjacentSelection.endPoint.y + boundarySelection.startPoint.y) / 2,
+    };
+  }
+
+  private createBoundaryRoomCornerControls(
+    hostWallId: string,
+    boundarySelection: RoomBoundarySelectionSegment
+  ): fabric.FabricObject[] {
+    if (boundarySelection.startCornerIndex === null || boundarySelection.startCornerIndex === undefined) {
+      return [];
+    }
+
+    const point = this.resolveBoundaryRoomCornerPoint(boundarySelection);
+    const endpointRadius = this.toSceneSize(VISUAL_CONFIG.endpointRadius);
+    const endpointStroke = this.toSceneSize(VISUAL_CONFIG.endpointStroke);
+    const hitRadius = this.toSceneSize(VISUAL_CONFIG.endpointHitRadius);
+
+    const dot = new fabric.Circle({
+      left: point.x * MM_TO_PX,
+      top: this.toCanvasY(point.y),
+      radius: endpointRadius,
+      fill: VISUAL_CONFIG.endpointFill,
+      stroke: VISUAL_CONFIG.endpointStrokeColor,
+      strokeWidth: endpointStroke,
+      originX: 'center',
+      originY: 'center',
+      hoverCursor: 'move',
+      selectable: true,
+      evented: true,
+      hasControls: false,
+      hasBorders: false,
+      shadow: new fabric.Shadow({
+        color: VISUAL_CONFIG.endpointShadow,
+        blur: this.toSceneSize(6),
+        offsetX: 0,
+        offsetY: this.toSceneSize(1),
+      }),
+    });
+    const typedDot = dot as WallControlObject;
+    typedDot.name = 'room-corner-handle';
+    typedDot.id = boundarySelection.roomId;
+    typedDot.wallId = hostWallId;
+    typedDot.roomId = boundarySelection.roomId;
+    typedDot.cornerIndex = boundarySelection.startCornerIndex;
+    typedDot.controlType = 'room-corner-handle';
+    typedDot.isRoomControl = true;
+    typedDot.selectable = true;
+    typedDot.evented = true;
+    typedDot.hasControls = false;
+    typedDot.hasBorders = false;
+    this.applyBoundarySelectionMetadata(dot, boundarySelection);
+
+    const hit = new fabric.Circle({
+      left: point.x * MM_TO_PX,
+      top: this.toCanvasY(point.y),
+      radius: hitRadius,
+      fill: 'rgba(0,0,0,0.001)',
+      strokeWidth: 0,
+      originX: 'center',
+      originY: 'center',
+      hoverCursor: 'move',
+      lockMovementX: true,
+      lockMovementY: true,
+      selectable: true,
+      evented: true,
+      hasControls: false,
+      hasBorders: false,
+    });
+    const typedHit = hit as WallControlObject;
+    typedHit.name = 'room-corner-handle-hit';
+    typedHit.id = boundarySelection.roomId;
+    typedHit.wallId = hostWallId;
+    typedHit.roomId = boundarySelection.roomId;
+    typedHit.cornerIndex = boundarySelection.startCornerIndex;
+    typedHit.controlType = 'room-corner-handle';
+    typedHit.isRoomControl = true;
+    typedHit.isControlHitTarget = true;
+    this.applyBoundarySelectionMetadata(hit, boundarySelection);
+
+    return [hit, dot];
   }
 
   /**
@@ -1488,17 +1662,29 @@ export class WallRenderer {
    * (Abbreviated from original — full version has endpoint, bevel,
    *  thickness, center, and rotation controls.)
    */
-  private createControlPoints(wallId: string): void {
-    const wall = this.wallData.get(wallId);
-    if (!wall) return;
+  private createControlPointsForWall(
+    wall: Wall,
+    controlKey: string,
+    boundarySelection?: RoomBoundarySelectionSegment
+  ): void {
+    if (boundarySelection) {
+      this.removeBoundaryControlPoints(controlKey);
+    } else {
+      this.removeControlPoints(controlKey);
+    }
 
-    this.removeControlPoints(wallId);
+    const hostWallId = boundarySelection?.hostWallId ?? wall.id;
     const endpointRadius = this.toSceneSize(VISUAL_CONFIG.endpointRadius);
     const endpointStroke = this.toSceneSize(VISUAL_CONFIG.endpointStroke);
     const rotationRadius = this.toSceneSize(VISUAL_CONFIG.rotationRadius);
     const crossStroke = this.toSceneSize(VISUAL_CONFIG.crossStrokeWidth);
     const stemStroke = this.toSceneSize(VISUAL_CONFIG.rotationStemStroke);
-    const showAdvancedControls = this.selectedWallIds.size === 1;
+    const showAdvancedControls = this.selectedWallIds.size + this.selectedRoomBoundarySegments.length === 1;
+    const suppressStartEndpoint = boundarySelection?.startCornerIndex !== null && boundarySelection?.startCornerIndex !== undefined;
+    const suppressEndEndpoint = boundarySelection?.endCornerIndex !== null && boundarySelection?.endCornerIndex !== undefined;
+    const boundaryRoomCornerControls = boundarySelection
+      ? this.createBoundaryRoomCornerControls(hostWallId, boundarySelection)
+      : [];
 
     const mp = {
       x: (wall.startPoint.x + wall.endPoint.x) / 2,
@@ -1525,51 +1711,73 @@ export class WallRenderer {
 
     // Build control point handles (same visual approach as original,
     // but using VISUAL_CONFIG constants instead of magic numbers)
-    const startHandle = new fabric.Circle({
-      left: wall.startPoint.x * MM_TO_PX,
-      top: this.toCanvasY(wall.startPoint.y),
-      radius: endpointRadius,
-      fill: VISUAL_CONFIG.endpointFill,
-      stroke: VISUAL_CONFIG.endpointStrokeColor,
-      strokeWidth: endpointStroke,
-      originX: 'center', originY: 'center',
-      hoverCursor: 'crosshair',
-      lockMovementX: true, lockMovementY: true,
-      selectable: false, evented: false,
-      shadow: new fabric.Shadow({
-        color: VISUAL_CONFIG.endpointShadow,
-        blur: this.toSceneSize(6),
-        offsetX: 0, offsetY: this.toSceneSize(1),
-      }),
-    });
-    this.annotateControlTarget(startHandle, wallId, 'wall-endpoint-start');
+    const startControls: fabric.FabricObject[] = suppressStartEndpoint
+      ? []
+      : (() => {
+        const startHandle = new fabric.Circle({
+          left: wall.startPoint.x * MM_TO_PX,
+          top: this.toCanvasY(wall.startPoint.y),
+          radius: endpointRadius,
+          fill: VISUAL_CONFIG.endpointFill,
+          stroke: VISUAL_CONFIG.endpointStrokeColor,
+          strokeWidth: endpointStroke,
+          originX: 'center', originY: 'center',
+          hoverCursor: 'crosshair',
+          lockMovementX: true, lockMovementY: true,
+          selectable: false, evented: false,
+          shadow: new fabric.Shadow({
+            color: VISUAL_CONFIG.endpointShadow,
+            blur: this.toSceneSize(6),
+            offsetX: 0, offsetY: this.toSceneSize(1),
+          }),
+        });
+        this.annotateControlTarget(startHandle, hostWallId, 'wall-endpoint-start', boundarySelection);
 
-    const startHandleHit = this.createControlHitTarget(
-      wall.startPoint, wallId, 'wall-endpoint-start', 'crosshair', VISUAL_CONFIG.endpointHitRadius
-    );
+        const startHandleHit = this.createControlHitTarget(
+          wall.startPoint,
+          hostWallId,
+          'wall-endpoint-start',
+          'crosshair',
+          VISUAL_CONFIG.endpointHitRadius,
+          boundarySelection
+        );
 
-    const endHandle = new fabric.Circle({
-      left: wall.endPoint.x * MM_TO_PX,
-      top: this.toCanvasY(wall.endPoint.y),
-      radius: endpointRadius,
-      fill: VISUAL_CONFIG.endpointFill,
-      stroke: VISUAL_CONFIG.endpointStrokeColor,
-      strokeWidth: endpointStroke,
-      originX: 'center', originY: 'center',
-      hoverCursor: 'crosshair',
-      lockMovementX: true, lockMovementY: true,
-      selectable: false, evented: false,
-      shadow: new fabric.Shadow({
-        color: VISUAL_CONFIG.endpointShadow,
-        blur: this.toSceneSize(6),
-        offsetX: 0, offsetY: this.toSceneSize(1),
-      }),
-    });
-    this.annotateControlTarget(endHandle, wallId, 'wall-endpoint-end');
+        return [startHandleHit, startHandle];
+      })();
 
-    const endHandleHit = this.createControlHitTarget(
-      wall.endPoint, wallId, 'wall-endpoint-end', 'crosshair', VISUAL_CONFIG.endpointHitRadius
-    );
+    const endControls: fabric.FabricObject[] = suppressEndEndpoint
+      ? []
+      : (() => {
+        const endHandle = new fabric.Circle({
+          left: wall.endPoint.x * MM_TO_PX,
+          top: this.toCanvasY(wall.endPoint.y),
+          radius: endpointRadius,
+          fill: VISUAL_CONFIG.endpointFill,
+          stroke: VISUAL_CONFIG.endpointStrokeColor,
+          strokeWidth: endpointStroke,
+          originX: 'center', originY: 'center',
+          hoverCursor: 'crosshair',
+          lockMovementX: true, lockMovementY: true,
+          selectable: false, evented: false,
+          shadow: new fabric.Shadow({
+            color: VISUAL_CONFIG.endpointShadow,
+            blur: this.toSceneSize(6),
+            offsetX: 0, offsetY: this.toSceneSize(1),
+          }),
+        });
+        this.annotateControlTarget(endHandle, hostWallId, 'wall-endpoint-end', boundarySelection);
+
+        const endHandleHit = this.createControlHitTarget(
+          wall.endPoint,
+          hostWallId,
+          'wall-endpoint-end',
+          'crosshair',
+          VISUAL_CONFIG.endpointHitRadius,
+          boundarySelection
+        );
+
+        return [endHandleHit, endHandle];
+      })();
 
     // Thickness handles: small solid directional arrows for independent face resize.
     // Keep them pushed away from center at low zoom so they don't overlap the move handle.
@@ -1628,7 +1836,7 @@ export class WallRenderer {
           offsetY: this.toSceneSize(1),
         }),
       });
-      this.annotateControlTarget(badge, wallId, controlType);
+      this.annotateControlTarget(badge, hostWallId, controlType, boundarySelection);
       const badgeRing = new fabric.Circle({
         left: center.x,
         top: center.y,
@@ -1641,7 +1849,7 @@ export class WallRenderer {
         selectable: false,
         evented: false,
       });
-      this.annotateControlVisual(badgeRing, wallId, controlType);
+      this.annotateControlVisual(badgeRing, hostWallId, controlType, boundarySelection);
 
       const shaftOutline = new fabric.Line(
         [
@@ -1658,7 +1866,7 @@ export class WallRenderer {
           evented: false,
         }
       );
-      this.annotateControlVisual(shaftOutline, wallId, controlType);
+      this.annotateControlVisual(shaftOutline, hostWallId, controlType, boundarySelection);
 
       const shaft = new fabric.Line(
         [
@@ -1675,7 +1883,7 @@ export class WallRenderer {
           evented: false,
         }
       );
-      this.annotateControlVisual(shaft, wallId, controlType);
+      this.annotateControlVisual(shaft, hostWallId, controlType, boundarySelection);
 
       const createHead = (sign: 1 | -1): fabric.Polygon => {
         const headBase = {
@@ -1704,15 +1912,16 @@ export class WallRenderer {
       };
       const headForward = createHead(1);
       const headBackward = createHead(-1);
-      this.annotateControlVisual(headForward, wallId, controlType);
-      this.annotateControlVisual(headBackward, wallId, controlType);
+      this.annotateControlVisual(headForward, hostWallId, controlType, boundarySelection);
+      this.annotateControlVisual(headBackward, hostWallId, controlType, boundarySelection);
 
       const hit = this.createControlHitTarget(
         point,
-        wallId,
+        hostWallId,
         controlType,
         'ew-resize',
-        VISUAL_CONFIG.thicknessHitRadius
+        VISUAL_CONFIG.thicknessHitRadius,
+        boundarySelection
       );
       return { visuals: [badge, badgeRing, shaftOutline, shaft, headForward, headBackward], hit };
     };
@@ -1762,7 +1971,7 @@ export class WallRenderer {
         offsetY: this.toSceneSize(1),
       }),
     });
-    this.annotateControlTarget(centerHandle, wallId, 'wall-center-handle');
+    this.annotateControlTarget(centerHandle, hostWallId, 'wall-center-handle', boundarySelection);
     const centerHandleInner = new fabric.Rect({
       left: centerX,
       top: centerY,
@@ -1779,9 +1988,14 @@ export class WallRenderer {
       selectable: false,
       evented: false,
     });
-    this.annotateControlVisual(centerHandleInner, wallId, 'wall-center-handle');
+    this.annotateControlVisual(centerHandleInner, hostWallId, 'wall-center-handle', boundarySelection);
     const centerHandleHit = this.createControlHitTarget(
-      mp, wallId, 'wall-center-handle', 'move', VISUAL_CONFIG.centerHitRadius
+      mp,
+      hostWallId,
+      'wall-center-handle',
+      'move',
+      VISUAL_CONFIG.centerHitRadius,
+      boundarySelection
     );
     const moveAxisHalf = this.toSceneSize(VISUAL_CONFIG.moveArrowAxisHalf);
     const moveHeadLength = this.toSceneSize(VISUAL_CONFIG.moveArrowHeadLength);
@@ -1802,7 +2016,7 @@ export class WallRenderer {
         evented: false,
       }
     );
-    this.annotateControlVisual(moveGlyphH, wallId, 'wall-center-handle');
+    this.annotateControlVisual(moveGlyphH, hostWallId, 'wall-center-handle', boundarySelection);
     const moveGlyphV = new fabric.Line(
       [
         centerX - wallPerp.x * moveAxisHalf,
@@ -1817,7 +2031,7 @@ export class WallRenderer {
         evented: false,
       }
     );
-    this.annotateControlVisual(moveGlyphV, wallId, 'wall-center-handle');
+    this.annotateControlVisual(moveGlyphV, hostWallId, 'wall-center-handle', boundarySelection);
 
     const createMoveHead = (dir: Point2D): fabric.Polygon => {
       const tip = {
@@ -1853,10 +2067,10 @@ export class WallRenderer {
     const moveHeadLeft = moveHeadAgainst;
     const moveHeadDown = moveHeadPerp;
     const moveHeadUp = moveHeadPerpOpposite;
-    this.annotateControlVisual(moveHeadRight, wallId, 'wall-center-handle');
-    this.annotateControlVisual(moveHeadLeft, wallId, 'wall-center-handle');
-    this.annotateControlVisual(moveHeadDown, wallId, 'wall-center-handle');
-    this.annotateControlVisual(moveHeadUp, wallId, 'wall-center-handle');
+    this.annotateControlVisual(moveHeadRight, hostWallId, 'wall-center-handle', boundarySelection);
+    this.annotateControlVisual(moveHeadLeft, hostWallId, 'wall-center-handle', boundarySelection);
+    this.annotateControlVisual(moveHeadDown, hostWallId, 'wall-center-handle', boundarySelection);
+    this.annotateControlVisual(moveHeadUp, hostWallId, 'wall-center-handle', boundarySelection);
 
     // Rotation handle
     const rotationStem = new fabric.Line(
@@ -1869,7 +2083,7 @@ export class WallRenderer {
         selectable: false, evented: false,
       }
     );
-    this.annotateControlVisual(rotationStem, wallId, 'wall-rotation-handle');
+    this.annotateControlVisual(rotationStem, hostWallId, 'wall-rotation-handle', boundarySelection);
     const rotationHandle = new fabric.Circle({
       left: rotationPoint.x * MM_TO_PX, top: this.toCanvasY(rotationPoint.y),
       radius: rotationRadius,
@@ -1880,9 +2094,14 @@ export class WallRenderer {
       lockMovementX: true, lockMovementY: true,
       selectable: false, evented: false,
     });
-    this.annotateControlTarget(rotationHandle, wallId, 'wall-rotation-handle');
+    this.annotateControlTarget(rotationHandle, hostWallId, 'wall-rotation-handle', boundarySelection);
     const rotationHandleHit = this.createControlHitTarget(
-      rotationPoint, wallId, 'wall-rotation-handle', 'alias', VISUAL_CONFIG.rotationHitRadius
+      rotationPoint,
+      hostWallId,
+      'wall-rotation-handle',
+      'alias',
+      VISUAL_CONFIG.rotationHitRadius,
+      boundarySelection
     );
     const rotationLabel = new fabric.Text('R', {
       left: rotationPoint.x * MM_TO_PX, top: this.toCanvasY(rotationPoint.y),
@@ -1891,7 +2110,7 @@ export class WallRenderer {
       originX: 'center', originY: 'center',
       selectable: false, evented: false,
     });
-    this.annotateControlVisual(rotationLabel, wallId, 'wall-rotation-handle');
+    this.annotateControlVisual(rotationLabel, hostWallId, 'wall-rotation-handle', boundarySelection);
 
     const showRotation = showAdvancedControls && this.canRotateWall(wall);
 
@@ -1908,8 +2127,8 @@ export class WallRenderer {
     ];
 
     const controls: fabric.FabricObject[] = [
-      startHandleHit, startHandle,
-      endHandleHit, endHandle,
+      ...startControls,
+      ...endControls,
       ...(showAdvancedControls
         ? [
           interiorThicknessHit,
@@ -1920,10 +2139,26 @@ export class WallRenderer {
         : []),
       ...(showRotation ? [rotationStem, rotationHandleHit, rotationHandle, rotationLabel] : []),
       ...centerControls,
+      ...boundaryRoomCornerControls,
     ];
 
     controls.forEach((control) => this.canvas.add(control));
-    this.controlPointObjects.set(wallId, controls);
+    if (boundarySelection) {
+      this.boundaryControlPointObjects.set(controlKey, controls);
+      return;
+    }
+
+    this.controlPointObjects.set(controlKey, controls);
+  }
+
+  private createControlPoints(wallId: string): void {
+    const wall = this.wallData.get(wallId);
+    if (!wall) return;
+    this.createControlPointsForWall(wall, wall.id);
+  }
+
+  private createBoundaryControlPoints(selection: RoomBoundarySelectionSegment): void {
+    this.createControlPointsForWall(selection.virtualWall, selection.key, selection);
   }
 
   // ─── Selection & Hover ──────────────────────────────────────────────────
@@ -1932,21 +2167,40 @@ export class WallRenderer {
    * [FIX] Now diffs against previous selection instead of blindly
    * removing and recreating all controls.
    */
+  setSelectionState(
+    selectedWallIds: string[],
+    boundarySelections: RoomBoundarySelectionSegment[]
+  ): void {
+    this.selectedWallIds = new Set(selectedWallIds);
+    this.selectedRoomBoundarySegments = [...boundarySelections];
+    this.refreshSelectionPresentation();
+  }
+
   setSelectedWalls(selectedWallIds: string[]): void {
-    const newSelection = new Set(selectedWallIds);
-    const previousSelection = this.selectedWallIds;
-    this.selectedWallIds = newSelection;
+    this.selectedWallIds = new Set(selectedWallIds);
+    this.refreshSelectionPresentation();
+  }
 
+  setRoomBoundarySelections(boundarySelections: RoomBoundarySelectionSegment[]): void {
+    this.selectedRoomBoundarySegments = [...boundarySelections];
+    this.refreshSelectionPresentation();
+  }
+
+  private refreshSelectionPresentation(): void {
+    const selectedWallIds = Array.from(this.selectedWallIds).filter((wallId) => this.wallData.has(wallId));
     const selectionPlan = resolveWallSelectionPlan(
-      Array.from(this.wallData.values()), this.rooms, selectedWallIds
+      Array.from(this.wallData.values()),
+      this.rooms,
+      selectedWallIds
     );
-    const individuallyHighlightedWallIds = new Set(selectionPlan.individualWallIds);
+    const boundaryWalls = this.selectedRoomBoundarySegments.map((selection) => selection.virtualWall);
+    const boundarySelectionPlan = boundaryWalls.length > 0
+      ? resolveWallSelectionPlan(boundaryWalls, [], boundaryWalls.map((wall) => wall.id))
+      : { individualWallIds: [], mergedComponents: [] };
 
-    this.wallObjects.forEach((group, wallId) => {
+    this.wallObjects.forEach((group) => {
       const outline = group.getObjects().find((obj) => (obj as NamedObject).name === 'selectionOutline');
       if (!outline) return;
-      void wallId;
-      void individuallyHighlightedWallIds;
       outline.set({
         visible: false,
         stroke: VISUAL_CONFIG.selectionStroke,
@@ -1955,26 +2209,27 @@ export class WallRenderer {
       group.set('dirty', true);
     });
 
-    // Rebuild controls for all selected walls so multi-selection visuals
-    // appear immediately after click/shift-click.
-    for (const wallId of previousSelection) {
-      this.removeControlPoints(wallId);
-    }
+    this.controlPointObjects.forEach((controls, wallId) => {
+      controls.forEach((control) => this.canvas.remove(control));
+      void wallId;
+    });
+    this.controlPointObjects.clear();
+    this.clearBoundaryControlPoints();
 
     this.clearSelectionComponents();
     this.renderSelectionComponents(selectionPlan);
+    this.renderSelectionComponents(boundarySelectionPlan);
     this.syncHoverPreview();
 
-    for (const wallId of newSelection) {
-      if (!this.wallObjects.has(wallId)) continue;
-      if (!this.controlPointObjects.has(wallId)) {
-        this.createControlPoints(wallId);
-      }
-    }
+    selectedWallIds.forEach((wallId) => {
+      if (!this.wallObjects.has(wallId)) return;
+      this.createControlPoints(wallId);
+    });
+    this.selectedRoomBoundarySegments.forEach((selection) => {
+      this.createBoundaryControlPoints(selection);
+    });
 
-    // [NEW] Show dimension labels on selected walls
     this.renderDimensionLabels(selectedWallIds);
-
     this.canvas.requestRenderAll();
   }
 
@@ -2030,6 +2285,7 @@ export class WallRenderer {
         controls.forEach((control) => this.canvas.remove(control));
       });
       this.controlPointObjects.clear();
+      this.clearBoundaryControlPoints();
 
       walls.forEach((wall) => this.wallData.set(wall.id, wall));
       primeWallSelectionGeometryInBackground(walls);
@@ -2082,7 +2338,13 @@ export class WallRenderer {
       });
 
       const selectedWallIds = Array.from(this.selectedWallIds).filter((wallId) => this.wallData.has(wallId));
-      if (selectedWallIds.length > 0 || this.selectionComponentObjects.length > 0 || this.controlPointObjects.size > 0) {
+      if (
+        selectedWallIds.length > 0 ||
+        this.selectedRoomBoundarySegments.length > 0 ||
+        this.selectionComponentObjects.length > 0 ||
+        this.controlPointObjects.size > 0 ||
+        this.boundaryControlPointObjects.size > 0
+      ) {
         this.setSelectedWalls(selectedWallIds);
       } else {
         this.syncHoverPreview();
@@ -2175,7 +2437,13 @@ export class WallRenderer {
       primeWallSelectionGeometryInBackground(walls);
 
       this.selectedWallIds = new Set(selectedWallIds);
-      if (selectedWallIds.length > 0 || this.selectionComponentObjects.length > 0 || this.controlPointObjects.size > 0) {
+      if (
+        selectedWallIds.length > 0 ||
+        this.selectedRoomBoundarySegments.length > 0 ||
+        this.selectionComponentObjects.length > 0 ||
+        this.controlPointObjects.size > 0 ||
+        this.boundaryControlPointObjects.size > 0
+      ) {
         this.setSelectedWalls(selectedWallIds);
       } else {
         this.syncHoverPreview();
@@ -2352,11 +2620,13 @@ export class WallRenderer {
     this.wallData.clear();
     this.rooms = [];
     this.selectedWallIds.clear();
+    this.selectedRoomBoundarySegments = [];
     this.hoveredWallId = null;
     this.controlPointObjects.forEach((controls) => {
       controls.forEach((control) => this.canvas.remove(control));
     });
     this.controlPointObjects.clear();
+    this.clearBoundaryControlPoints();
     this.canvas.requestRenderAll();
   }
 
