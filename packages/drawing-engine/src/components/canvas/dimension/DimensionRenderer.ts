@@ -9,6 +9,12 @@ import * as fabric from 'fabric';
 import type { Dimension2D, DimensionSettings, Room, Wall } from '../../../types';
 import { DEFAULT_DIMENSION_SETTINGS } from '../../../types';
 import { MM_TO_PX } from '../scale';
+import {
+  getCanvasViewportBounds,
+  hasMeaningfulViewportZoomChange,
+  isViewportBoundsContained,
+  type ViewportBounds,
+} from '../viewportVisibility';
 
 import {
   getDimensionStyleProfile,
@@ -31,13 +37,6 @@ type DimensionGroup = fabric.Group & { id?: string; name?: string; dimensionId?:
 
 interface SyncDimensionsOptions {
   force?: boolean;
-}
-
-interface ViewportBounds {
-  left: number;
-  top: number;
-  right: number;
-  bottom: number;
 }
 
 function toCanvas(value: number): number {
@@ -94,6 +93,8 @@ export class DimensionRenderer {
   private settings: DimensionSettings = { ...DEFAULT_DIMENSION_SETTINGS };
   private viewportZoom: number = 1;
   private liveDimensionObjects: fabric.FabricObject[] = [];
+  private lastVisibilityBounds: ViewportBounds | null = null;
+  private lastVisibilityZoom: number | null = null;
 
   constructor(canvas: fabric.Canvas) {
     this.canvas = canvas;
@@ -217,23 +218,6 @@ export class DimensionRenderer {
     return contextChanged;
   }
 
-  private getViewportBounds(paddingPx: number = 120): ViewportBounds | null {
-    const zoom = Math.max(this.canvas.getZoom(), 0.01);
-    const viewportTransform = this.canvas.viewportTransform;
-    if (!viewportTransform) {
-      return null;
-    }
-    const padding = paddingPx / zoom;
-    const left = (-viewportTransform[4] / zoom) - padding;
-    const top = (-viewportTransform[5] / zoom) - padding;
-    return {
-      left,
-      top,
-      right: left + this.canvas.getWidth() / zoom + padding * 2,
-      bottom: top + this.canvas.getHeight() / zoom + padding * 2,
-    };
-  }
-
   private isObjectVisibleInViewport(object: fabric.FabricObject, bounds: ViewportBounds): boolean {
     const rect = object.getBoundingRect();
     return !(
@@ -244,13 +228,26 @@ export class DimensionRenderer {
     );
   }
 
-  refreshViewportVisibility(): void {
-    const bounds = this.getViewportBounds();
-    if (!bounds) {
+  refreshViewportVisibility(force: boolean = false): void {
+    const visibleBounds = getCanvasViewportBounds(this.canvas, 120);
+    const actualBounds = getCanvasViewportBounds(this.canvas, 0);
+    if (!visibleBounds || !actualBounds) {
       return;
     }
+    const zoom = Math.max(this.canvas.getZoom(), 0.01);
+    if (
+      !force &&
+      this.lastVisibilityBounds &&
+      !hasMeaningfulViewportZoomChange(this.lastVisibilityZoom, zoom) &&
+      isViewportBoundsContained(actualBounds, this.lastVisibilityBounds)
+    ) {
+      return;
+    }
+
+    this.lastVisibilityBounds = visibleBounds;
+    this.lastVisibilityZoom = zoom;
     this.dimensionGroups.forEach((group) => {
-      const visible = this.isObjectVisibleInViewport(group, bounds);
+      const visible = this.isObjectVisibleInViewport(group, visibleBounds);
       if (group.visible !== visible) {
         group.set('visible', visible);
         group.set('dirty', true);
@@ -879,7 +876,7 @@ export class DimensionRenderer {
       return;
     }
 
-    this.refreshViewportVisibility();
+    this.refreshViewportVisibility(true);
     this.syncDimensionVisualState();
     this.canvas.requestRenderAll();
   }

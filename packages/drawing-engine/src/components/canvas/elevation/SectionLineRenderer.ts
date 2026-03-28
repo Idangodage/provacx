@@ -7,6 +7,12 @@ import * as fabric from 'fabric';
 import type { Point2D, SectionLine } from '../../../types';
 import { DEFAULT_SECTION_LINE_COLOR } from '../../../types/wall';
 import { MM_TO_PX } from '../scale';
+import {
+  getCanvasViewportBounds,
+  hasMeaningfulViewportZoomChange,
+  isViewportBoundsContained,
+  type ViewportBounds,
+} from '../viewportVisibility';
 
 type NamedObject = fabric.Object & {
   id?: string;
@@ -22,13 +28,6 @@ type SectionGroup = fabric.Group & {
 
 interface SyncSectionLinesOptions {
   force?: boolean;
-}
-
-interface ViewportBounds {
-  left: number;
-  top: number;
-  right: number;
-  bottom: number;
 }
 
 function toCanvasPoint(point: Point2D): Point2D {
@@ -84,6 +83,8 @@ export class SectionLineRenderer {
   private showReferenceIndicators = true;
   private draggable = true;
   private onSectionLineMoved: ((id: string, deltaX: number, deltaY: number) => void) | null = null;
+  private lastVisibilityBounds: ViewportBounds | null = null;
+  private lastVisibilityZoom: number | null = null;
 
   constructor(canvas: fabric.Canvas) {
     this.canvas = canvas;
@@ -137,23 +138,6 @@ export class SectionLineRenderer {
     }
   }
 
-  private getViewportBounds(paddingPx: number = 96): ViewportBounds | null {
-    const zoom = Math.max(this.canvas.getZoom(), 0.01);
-    const viewportTransform = this.canvas.viewportTransform;
-    if (!viewportTransform) {
-      return null;
-    }
-    const padding = paddingPx / zoom;
-    const left = (-viewportTransform[4] / zoom) - padding;
-    const top = (-viewportTransform[5] / zoom) - padding;
-    return {
-      left,
-      top,
-      right: left + this.canvas.getWidth() / zoom + padding * 2,
-      bottom: top + this.canvas.getHeight() / zoom + padding * 2,
-    };
-  }
-
   private isObjectVisibleInViewport(object: fabric.FabricObject, bounds: ViewportBounds): boolean {
     const rect = object.getBoundingRect();
     return !(
@@ -164,13 +148,26 @@ export class SectionLineRenderer {
     );
   }
 
-  refreshViewportVisibility(): void {
-    const bounds = this.getViewportBounds();
-    if (!bounds) {
+  refreshViewportVisibility(force: boolean = false): void {
+    const visibleBounds = getCanvasViewportBounds(this.canvas, 96);
+    const actualBounds = getCanvasViewportBounds(this.canvas, 0);
+    if (!visibleBounds || !actualBounds) {
       return;
     }
+    const zoom = Math.max(this.canvas.getZoom(), 0.01);
+    if (
+      !force &&
+      this.lastVisibilityBounds &&
+      !hasMeaningfulViewportZoomChange(this.lastVisibilityZoom, zoom) &&
+      isViewportBoundsContained(actualBounds, this.lastVisibilityBounds)
+    ) {
+      return;
+    }
+
+    this.lastVisibilityBounds = visibleBounds;
+    this.lastVisibilityZoom = zoom;
     this.groups.forEach((group) => {
-      const visible = this.isObjectVisibleInViewport(group, bounds);
+      const visible = this.isObjectVisibleInViewport(group, visibleBounds);
       if (group.visible !== visible) {
         group.set('visible', visible);
         group.set('dirty', true);
@@ -374,7 +371,7 @@ export class SectionLineRenderer {
       return;
     }
 
-    this.refreshViewportVisibility();
+    this.refreshViewportVisibility(true);
     this.syncSectionLineVisualState();
     this.canvas.requestRenderAll();
   }

@@ -913,18 +913,14 @@ export function useCanvasMouseHandlers(
 
             // Apply immediately for low-latency feedback.
             applyViewportTransformImmediate(newVpZoom, nextPan);
-            roomRendererRef.current?.setViewportZoom(newVpZoom);
-            wallRenderer?.setViewportZoom(newVpZoom);
             dimensionRendererRef.current?.setViewportZoom(newVpZoom);
             scheduleViewTransformSync(newVpZoom, nextPan);
 
         },
         [
             safePaperPerRealRatio,
-            wallRenderer,
             panOffsetRef,
             zoomRef,
-            roomRendererRef,
             dimensionRendererRef,
             applyViewportTransformImmediate,
             scheduleViewTransformSync,

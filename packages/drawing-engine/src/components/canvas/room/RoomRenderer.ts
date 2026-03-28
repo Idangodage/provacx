@@ -13,6 +13,12 @@ import type { Point2D, Room, Wall } from '../../../types';
 import { distancePointToSegment } from '../../../utils/geometry';
 import { GeometryEngine } from '../../../utils/geometry-engine';
 import { MM_TO_PX } from '../scale';
+import {
+  getCanvasViewportBounds,
+  hasMeaningfulViewportZoomChange,
+  isViewportBoundsContained,
+  type ViewportBounds,
+} from '../viewportVisibility';
 
 import { isRoomIsolatedFromAttachments } from './roomIsolation';
 
@@ -52,13 +58,6 @@ const AREA_TAG_CANDIDATE_GRID = 7;
 
 interface SyncRoomsOptions {
   force?: boolean;
-}
-
-interface ViewportBounds {
-  left: number;
-  top: number;
-  right: number;
-  bottom: number;
 }
 
 function toCanvasPoint(point: Point2D): Point2D {
@@ -133,6 +132,8 @@ export class RoomRenderer {
   private showTemperatureIcons: boolean = true;
   private showVentilationBadges: boolean = true;
   private viewportZoom = 1;
+  private lastVisibilityBounds: ViewportBounds | null = null;
+  private lastVisibilityZoom: number | null = null;
 
   constructor(canvas: fabric.Canvas) {
     this.canvas = canvas;
@@ -171,11 +172,28 @@ export class RoomRenderer {
     this.syncRooms(Array.from(this.roomData.values()), { force: true });
   }
 
-  setViewportZoom(zoom: number, options: { requestRender?: boolean } = {}): void {
-    const { requestRender = true } = options;
-    this.viewportZoom = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
-    this.applyLabelZoomScaling();
-    this.refreshViewportVisibility();
+  setViewportZoom(
+    zoom: number,
+    options: { requestRender?: boolean; refreshVisibility?: boolean; applyLabelScaling?: boolean } = {}
+  ): void {
+    const {
+      requestRender = true,
+      refreshVisibility = true,
+      applyLabelScaling = true,
+    } = options;
+    const nextZoom = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+    const prevZoom = this.viewportZoom;
+    this.viewportZoom = nextZoom;
+
+    if (
+      applyLabelScaling &&
+      Math.abs(nextZoom - prevZoom) / Math.max(prevZoom, 0.01) >= 0.005
+    ) {
+      this.applyLabelZoomScaling();
+    }
+    if (refreshVisibility) {
+      this.refreshViewportVisibility();
+    }
     if (requestRender) {
       this.canvas.requestRenderAll();
     }
@@ -252,23 +270,6 @@ export class RoomRenderer {
     return previousRoom !== nextRoom;
   }
 
-  private getViewportBounds(paddingPx: number = 120): ViewportBounds | null {
-    const zoom = Math.max(this.canvas.getZoom(), 0.01);
-    const viewportTransform = this.canvas.viewportTransform;
-    if (!viewportTransform) {
-      return null;
-    }
-    const padding = paddingPx / zoom;
-    const left = (-viewportTransform[4] / zoom) - padding;
-    const top = (-viewportTransform[5] / zoom) - padding;
-    return {
-      left,
-      top,
-      right: left + this.canvas.getWidth() / zoom + padding * 2,
-      bottom: top + this.canvas.getHeight() / zoom + padding * 2,
-    };
-  }
-
   private isObjectVisibleInViewport(object: fabric.FabricObject, bounds: ViewportBounds): boolean {
     const rect = object.getBoundingRect();
     return !(
@@ -279,18 +280,31 @@ export class RoomRenderer {
     );
   }
 
-  refreshViewportVisibility(): void {
-    const bounds = this.getViewportBounds();
-    if (!bounds) {
+  refreshViewportVisibility(force: boolean = false): void {
+    const visibleBounds = getCanvasViewportBounds(this.canvas, 120);
+    const actualBounds = getCanvasViewportBounds(this.canvas, 0);
+    if (!visibleBounds || !actualBounds) {
       return;
     }
+    const zoom = Math.max(this.canvas.getZoom(), 0.01);
+    if (
+      !force &&
+      this.lastVisibilityBounds &&
+      !hasMeaningfulViewportZoomChange(this.lastVisibilityZoom, zoom) &&
+      isViewportBoundsContained(actualBounds, this.lastVisibilityBounds)
+    ) {
+      return;
+    }
+
+    this.lastVisibilityBounds = visibleBounds;
+    this.lastVisibilityZoom = zoom;
 
     this.roomData.forEach((_, roomId) => {
       const roomGroup = this.roomGroups.get(roomId);
       if (!roomGroup) {
         return;
       }
-      const visible = this.isObjectVisibleInViewport(roomGroup, bounds);
+      const visible = this.isObjectVisibleInViewport(roomGroup, visibleBounds);
       const controlGroup = this.roomControlGroups.get(roomId);
 
       if (roomGroup.visible !== visible) {
@@ -304,7 +318,7 @@ export class RoomRenderer {
     });
 
     this.areaTagGroups.forEach((group) => {
-      const visible = this.isObjectVisibleInViewport(group, bounds);
+      const visible = this.isObjectVisibleInViewport(group, visibleBounds);
       if (group.visible !== visible) {
         group.set('visible', visible);
         group.set('dirty', true);
@@ -606,7 +620,7 @@ export class RoomRenderer {
     });
 
     this.applyLabelZoomScaling();
-    this.refreshViewportVisibility();
+    this.refreshViewportVisibility(true);
   }
 
   private createRoomGroup(room: Room): RoomGroup {
@@ -1131,7 +1145,7 @@ export class RoomRenderer {
 
     this.syncAreaTagsFromRooms(Array.from(this.roomData.values()));
     this.applyLabelZoomScaling();
-    this.refreshViewportVisibility();
+    this.refreshViewportVisibility(true);
     this.syncRoomVisualState();
     this.canvas.requestRenderAll();
   }

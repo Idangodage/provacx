@@ -303,14 +303,15 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
             -panOffset.x * viewportZoom,
             -panOffset.y * viewportZoom,
         ];
-        const roomZoomChanged = Math.abs(zoomRef.current - viewportZoom) > 0.0001;
         canvas.setViewportTransform(viewportTransform);
         hideActiveSelectionChrome(canvas);
-        if (roomZoomChanged) {
-            roomRendererRef.current?.setViewportZoom(viewportZoom, { requestRender: false });
-        } else {
-            roomRendererRef.current?.refreshViewportVisibility();
-        }
+        roomRendererRef.current?.setViewportZoom(viewportZoom, {
+            requestRender: false,
+            refreshVisibility: false,
+            applyLabelScaling: false,
+        });
+        dimensionRendererRef.current?.setViewportZoom(viewportZoom);
+        roomRendererRef.current?.refreshViewportVisibility();
         dimensionRendererRef.current?.refreshViewportVisibility();
         sectionLineRendererRef.current?.refreshViewportVisibility();
         hvacRendererRef.current?.refreshViewportVisibility();
@@ -330,12 +331,12 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
             zoomSettleTimerRef.current = null;
             const currentZoom = zoomRef.current;
             wallRenderer?.setViewportZoom(currentZoom);
+            roomRendererRef.current?.setViewportZoom(currentZoom, { requestRender: false });
             const dimRenderer = dimensionRendererRef.current;
             if (dimRenderer) {
                 dimRenderer.setViewportZoom(currentZoom);
                 dimRenderer.updateZoomVisuals();
             }
-            roomRendererRef.current?.refreshViewportVisibility();
             dimensionRendererRef.current?.refreshViewportVisibility();
             sectionLineRendererRef.current?.refreshViewportVisibility();
             hvacRendererRef.current?.refreshViewportVisibility();
