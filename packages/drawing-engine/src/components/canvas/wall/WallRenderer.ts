@@ -261,20 +261,32 @@ export class WallRenderer {
 
   private createHatchPattern(strokeColor: string): fabric.Pattern | null {
     const patternSize = 10;
+    const devicePixelRatio =
+      typeof window !== 'undefined' && Number.isFinite(window.devicePixelRatio)
+        ? Math.max(1, window.devicePixelRatio)
+        : 1;
     const patternCanvas = document.createElement('canvas');
-    patternCanvas.width = patternSize;
-    patternCanvas.height = patternSize;
+    patternCanvas.width = patternSize * devicePixelRatio;
+    patternCanvas.height = patternSize * devicePixelRatio;
+    patternCanvas.style.width = `${patternSize}px`;
+    patternCanvas.style.height = `${patternSize}px`;
     const ctx = patternCanvas.getContext('2d');
 
     if (!ctx) return null;
 
+    ctx.scale(devicePixelRatio, devicePixelRatio);
+    ctx.imageSmoothingEnabled = false;
     ctx.fillStyle = '#B0B0B0';
     ctx.fillRect(0, 0, patternSize, patternSize);
     ctx.strokeStyle = strokeColor;
     ctx.lineWidth = 1;
+    ctx.lineCap = 'square';
+    ctx.lineJoin = 'miter';
     ctx.beginPath();
-    ctx.moveTo(0, patternSize);
-    ctx.lineTo(patternSize, 0);
+    for (let offset = -patternSize; offset <= patternSize; offset += patternSize) {
+      ctx.moveTo(offset, patternSize);
+      ctx.lineTo(offset + patternSize, 0);
+    }
     ctx.stroke();
 
     return new fabric.Pattern({
@@ -582,7 +594,7 @@ export class WallRenderer {
     // Keep merged wall outlines crisp at any zoom level.
     this.componentObjects.forEach((obj) => {
       const typed = obj as NamedObject;
-      if (typed.name === 'wall-component-outline') {
+      if (typed.name === 'wall-component-outline' || typed.name === 'wall-component-fill') {
         obj.set('strokeWidth', this.toSceneSize(VISUAL_CONFIG.wallStrokeWidth));
       } else {
         obj.set('dirty', true);
@@ -659,15 +671,20 @@ export class WallRenderer {
   private renderMergedComponent(component: WallUnionComponent, representativeWall: Wall): void {
     const pathData = this.wallComponentPathData(component);
     if (!pathData) return;
+    const visualFill = this.resolveWallVisualFill(representativeWall);
+    const componentStrokeWidth = this.toSceneSize(VISUAL_CONFIG.wallStrokeWidth);
+    const usesPatternFill = typeof visualFill !== 'string';
 
     const mergedFillPath = new fabric.Path(pathData, {
-      fill: this.resolveWallVisualFill(representativeWall),
+      fill: visualFill,
       fillRule: 'evenodd',
-      stroke: 'transparent',
-      strokeWidth: 0,
+      stroke: VISUAL_CONFIG.wallStroke,
+      strokeWidth: componentStrokeWidth,
+      strokeLineJoin: 'miter',
+      paintFirst: 'stroke',
       selectable: false,
       evented: false,
-      objectCaching: true,
+      objectCaching: !usesPatternFill,
     });
     (mergedFillPath as NamedObject).name = 'wall-component-fill';
 
@@ -684,13 +701,13 @@ export class WallRenderer {
       });
 
       const overlayPath = new fabric.Path(overlayPathData, {
-        fill: this.resolveWallVisualFill(representativeWall),
+        fill: visualFill,
         fillRule: 'evenodd',
         stroke: 'transparent',
         strokeWidth: 0,
         selectable: false,
         evented: false,
-        objectCaching: true,
+        objectCaching: !usesPatternFill,
         clipPath: overlayClip,
       });
       (overlayPath as NamedObject).name = 'wall-component-overlay';
@@ -1339,11 +1356,14 @@ export class WallRenderer {
 
       const preview = new fabric.Polygon(vertices, {
         fill: previewFill,
-        stroke: '#6B7280',
-        strokeWidth: this.toSceneSize(1),
+        stroke: VISUAL_CONFIG.wallStroke,
+        strokeWidth: this.toSceneSize(VISUAL_CONFIG.wallStrokeWidth),
+        strokeLineJoin: 'miter',
+        paintFirst: 'stroke',
         selectable: false,
         evented: false,
         opacity: 0.82,
+        objectCaching: false,
       });
 
       this.canvas.add(preview);

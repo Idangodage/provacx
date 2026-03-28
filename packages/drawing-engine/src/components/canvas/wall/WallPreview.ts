@@ -12,7 +12,7 @@ import { WALL_MATERIAL_COLORS } from '../../../types/wall';
 import { MM_TO_PX } from '../scale';
 
 import { buildTemporaryWall } from './WallJoinNetwork';
-import { computeWallUnionRenderData, type WallUnionComponent } from './WallUnionGeometry';
+import { computeWallBodyPolygon } from './WallGeometry';
 
 // =============================================================================
 // WallPreview Class
@@ -47,28 +47,6 @@ export class WallPreview {
       x: point.x * MM_TO_PX,
       y: this.toCanvasY(point.y),
     };
-  }
-
-  private componentPathData(component: WallUnionComponent): string {
-    return this.polygonsPathData(component.polygons);
-  }
-
-  private polygonsPathData(polygons: Point2D[][][]): string {
-    return polygons
-      .flatMap((polygon) =>
-        polygon
-          .filter((ring) => ring.length >= 3)
-          .map((ring) => {
-            const [first, ...rest] = ring.map((point) => this.toCanvasPoint(point));
-            const commands = [`M ${first.x} ${first.y}`];
-            rest.forEach((point) => {
-              commands.push(`L ${point.x} ${point.y}`);
-            });
-            commands.push('Z');
-            return commands.join(' ');
-          })
-      )
-      .join(' ');
   }
 
   /**
@@ -136,26 +114,15 @@ export class WallPreview {
       this.thickness,
       this.material
     );
-    const previewWalls = [
-      ...this.walls,
-      ...(this.preferredStartWall ? [this.preferredStartWall] : []),
-      previewWall,
-    ];
-    const renderData = computeWallUnionRenderData(previewWalls);
-    const previewComponent = renderData.components.find((component) =>
-      component.wallIds.includes(previewWall.id)
-    );
-
-    if (!previewComponent) {
-      return;
-    }
-
     const materialColors = WALL_MATERIAL_COLORS[this.material];
-    const previewPathData = this.componentPathData(previewComponent);
-    const mergedPreviewPath = new fabric.Path(previewPathData, {
+    // Live preview should preserve the wall's nominal thickness even when the
+    // eventual committed join may be mitered or beveled against nearby walls.
+    // Showing the raw body here keeps the preview stable and predictable.
+    const previewPolygon = computeWallBodyPolygon(previewWall);
+    const previewVertices = previewPolygon.map((point) => this.toCanvasPoint(point));
+    const mergedPreviewPath = new fabric.Polygon(previewVertices, {
       fill: materialColors.fill,
       opacity: 0.55,
-      fillRule: 'evenodd',
       stroke: '#000000',
       strokeWidth: 2,
       strokeLineJoin: 'miter',
@@ -163,25 +130,6 @@ export class WallPreview {
       evented: false,
       objectCaching: false,
     });
-    const overlayPreviewPathData = this.polygonsPathData(previewComponent.junctionOverlays);
-    const overlayPreviewPath = overlayPreviewPathData
-      ? new fabric.Path(overlayPreviewPathData, {
-        fill: materialColors.fill,
-        opacity: 0.55,
-        fillRule: 'evenodd',
-        stroke: 'transparent',
-        strokeWidth: 0,
-        selectable: false,
-        evented: false,
-        objectCaching: false,
-        // Clip overlay patches to the merged wall body so acute join
-        // patches cannot bleed outside the visible wall outline.
-        clipPath: new fabric.Path(previewPathData, {
-          fillRule: 'evenodd',
-          absolutePositioned: true,
-        }),
-      })
-      : null;
 
     const centerPreviewLine = new fabric.Line(
       [
@@ -202,7 +150,6 @@ export class WallPreview {
     this.previewGroup = new fabric.Group(
       [
         mergedPreviewPath,
-        ...(overlayPreviewPath ? [overlayPreviewPath] : []),
         centerPreviewLine,
       ],
       {

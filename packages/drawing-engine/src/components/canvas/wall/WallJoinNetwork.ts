@@ -69,6 +69,7 @@ const ACUTE_BEVEL_THRESHOLD_DEG = 30;
 const MIN_ENDPOINT_MITER_ANGLE_DEG = 15;
 const NODE_MITER_LIMIT = 2.5;
 const MAX_NODE_MITER_LENGTH_FRACTION = 0.35;
+const MAX_SAFE_MITER_REACH_LENGTH_FRACTION = 0.3;
 const MAX_FULL_JOIN_ENDPOINTS = 6;
 const DENSE_NODE_HUB_DEPTH_MULTIPLIER = 1.25;
 const MAX_DENSE_NODE_HUB_LENGTH_FRACTION = 0.25;
@@ -174,6 +175,16 @@ function clampSectorMiterPoint(
   );
 
   return clampPointToDistance(miterPoint, joinPoint, maxReach);
+}
+
+function sectorMiterReach(
+  prev: WallEndpointRef,
+  next: WallEndpointRef,
+  angleDeg: number
+): number {
+  const maxHalfThickness = Math.max(prev.wall.thickness, next.wall.thickness) / 2;
+  const halfAngleRad = Math.max(0.05, (angleDeg / 2) * (Math.PI / 180));
+  return maxHalfThickness / Math.sin(halfAngleRad);
 }
 
 function projectPointToSegment(
@@ -302,11 +313,21 @@ function solveSector(prev: WallEndpointRef, next: WallEndpointRef): SectorSoluti
   const angleDeg = ccwAngleDeg(prev.angleDeg, next.angleDeg);
   const effectiveCornerAngleDeg = Math.min(angleDeg, 360 - angleDeg);
   const isExteriorReflexSector = angleDeg > 180;
+  const shortestLen = Math.min(prev.length, next.length);
+  const geometricMiterReach = sectorMiterReach(prev, next, effectiveCornerAngleDeg);
+  const miterConsumesTooMuchWall =
+    Number.isFinite(geometricMiterReach) &&
+    geometricMiterReach > shortestLen * MAX_SAFE_MITER_REACH_LENGTH_FRACTION;
   const shouldFlatBevel =
     Number.isFinite(effectiveCornerAngleDeg) &&
-    effectiveCornerAngleDeg >= MIN_ENDPOINT_JOIN_ANGLE_DEG &&
-    effectiveCornerAngleDeg < ACUTE_BEVEL_THRESHOLD_DEG &&
-    isExteriorReflexSector;
+    (
+      (
+        isExteriorReflexSector &&
+        effectiveCornerAngleDeg >= MIN_ENDPOINT_JOIN_ANGLE_DEG &&
+        effectiveCornerAngleDeg < ACUTE_BEVEL_THRESHOLD_DEG
+      ) ||
+      miterConsumesTooMuchWall
+    );
 
   const miterPoint =
     lineIntersection(

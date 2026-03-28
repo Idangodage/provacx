@@ -10,6 +10,9 @@ const COORDINATE_TOLERANCE_MM = 0.001;
 const MIN_PATCH_AREA_MM2 = 0.1;
 const MIN_UNION_ENDPOINT_ANGLE_DEG = 1;
 const SEGMENT_INTERIOR_TOLERANCE = 0.001;
+// Acute joins wider than 30deg can still collapse one face enough to make the
+// wall visibly taper near the endpoint. Keep the uniformity guard active until
+// the join opens up into a clearly stable corner.
 const SPIKE_JOIN_ANGLE_THRESHOLD_DEG = 30;
 const WALL_UNIFORMITY_TOLERANCE_MM = 0.5;
 
@@ -391,6 +394,11 @@ function makePolygonFeature(vertices: Point2D[]): PolygonFeature | null {
 }
 
 function wallPolygonFeature(wall: Wall, joins?: JoinData[]): PolygonFeature | null {
+  const polygon = computeRenderableWallPolygon(wall, joins);
+  return makePolygonFeature(polygon) ?? makePolygonFeature(computeWallBodyPolygon(wall));
+}
+
+export function computeRenderableWallPolygon(wall: Wall, joins?: JoinData[]): Point2D[] {
   const startRef = buildEndpointRef(wall, 'start');
   const endRef = buildEndpointRef(wall, 'end');
   const startVertices = resolveRenderableCapVertices(
@@ -402,15 +410,14 @@ function wallPolygonFeature(wall: Wall, joins?: JoinData[]): PolygonFeature | nu
     joins?.find((join) => join.endpoint === 'end')
   );
 
-  return (
-    makePolygonFeature([
-      startVertices.interiorVertex,
-      endVertices.interiorVertex,
-      endVertices.exteriorVertex,
-      startVertices.exteriorVertex,
-    ]) ??
-    makePolygonFeature(computeWallBodyPolygon(wall))
-  );
+  const polygon = [
+    startVertices.interiorVertex,
+    endVertices.interiorVertex,
+    endVertices.exteriorVertex,
+    startVertices.exteriorVertex,
+  ];
+
+  return polygon.every(isFinitePoint) ? polygon : computeWallBodyPolygon(wall);
 }
 
 function patchPolygonFeature(vertices: Point2D[]): PolygonFeature | null {
@@ -706,14 +713,12 @@ function violatesWallThicknessUniformity(
   if (endpointHasManualBevel(endpointRef.wall, endpointRef.endpoint)) {
     return false;
   }
-  if (!Number.isFinite(join.angle) || join.angle >= SPIKE_JOIN_ANGLE_THRESHOLD_DEG) {
-    return false;
-  }
 
   const spanTolerance = Math.max(
     WALL_UNIFORMITY_TOLERANCE_MM,
     endpointRef.wall.thickness * 0.02
   );
+  const wallLengthMm = pointDistance(endpointRef.wall.startPoint, endpointRef.wall.endPoint);
   const resolvedSpan = pointDistance(resolved.interiorVertex, resolved.exteriorVertex);
   const interiorAdvance = dot(
     subtract(resolved.interiorVertex, raw.interiorVertex),
@@ -723,10 +728,25 @@ function violatesWallThicknessUniformity(
     subtract(resolved.exteriorVertex, raw.exteriorVertex),
     endpointRef.direction
   );
+  const advanceDelta = Math.abs(interiorAdvance - exteriorAdvance);
+
+  // Short walls are far less tolerant of skewed endpoint joins: a sheared cap
+  // can consume a large fraction of the wall body and makes the thickness look
+  // visibly non-uniform. Prefer a stable raw cap in that case.
+  if (
+    wallLengthMm <= endpointRef.wall.thickness * 2.5 &&
+    advanceDelta > spanTolerance
+  ) {
+    return true;
+  }
+
+  if (!Number.isFinite(join.angle) || join.angle >= SPIKE_JOIN_ANGLE_THRESHOLD_DEG) {
+    return false;
+  }
 
   return (
     Math.abs(resolvedSpan - endpointRef.wall.thickness) > spanTolerance ||
-    Math.abs(interiorAdvance - exteriorAdvance) > spanTolerance
+    advanceDelta > spanTolerance
   );
 }
 
@@ -932,6 +952,10 @@ function unionWallComponent(
     return { polygons: [], junctionOverlays: [] };
   }
 
+  // Use the resolved per-wall join polygons for the visible body so wide-angle
+  // corners keep their intended architectural shape. The endpoint overlay
+  // patches remain disabled below because those were the main source of the
+  // short-wall tapering artifact.
   const features = [
     ...walls.flatMap((wall) => {
       const feature = wallPolygonFeature(wall, joinsMap.get(wall.id));
@@ -939,14 +963,10 @@ function unionWallComponent(
     }),
     ...buildNodeCorePatchFeatures(walls, joinsMap),
   ];
-  const overlayFeatures = [
-    ...buildNodeCorePatchFeatures(walls, joinsMap),   // always include all nodes
-    ...buildEndpointJoinPatchFeatures(walls, joinsMap, (join) => join.joinType !== 'bevel'),
-  ];
 
   return {
     polygons: featureUnionPolygons(features),
-    junctionOverlays: featureUnionPolygons(overlayFeatures),
+    junctionOverlays: [],
   };
 }
 
