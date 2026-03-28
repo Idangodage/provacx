@@ -128,6 +128,10 @@ const AUTO_TRIM_TOLERANCE_MM = 120;
 const STRAIGHT_WALL_MERGE_NODE_TOLERANCE_MM = 4;
 const STRAIGHT_WALL_MERGE_ANGLE_TOLERANCE_DEG = 6;
 const STRAIGHT_WALL_MERGE_THICKNESS_TOLERANCE_MM = 1;
+const COINCIDENT_WALL_TOLERANCE_MM = 2;
+const COINCIDENT_WALL_THICKNESS_TOLERANCE_MM = 1;
+const COINCIDENT_WALL_ELEVATION_TOLERANCE_MM = 1;
+const COINCIDENT_OPENING_TOLERANCE_MM = 2;
 const ROOM_DETECTION_FRAME_FALLBACK_MS = 16;
 const ELEVATION_REGEN_DEBOUNCE_MS = 120;
 
@@ -664,6 +668,348 @@ function cleanupStraightWallRuns(walls: Wall[], retainedId: string): Wall[] {
   }
 
   return nextWalls;
+}
+
+function subtractPoints(a: Point2D, b: Point2D): Point2D {
+  return {
+    x: a.x - b.x,
+    y: a.y - b.y,
+  };
+}
+
+function dotPoints(a: Point2D, b: Point2D): number {
+  return a.x * b.x + a.y * b.y;
+}
+
+function crossPoints(a: Point2D, b: Point2D): number {
+  return a.x * b.y - a.y * b.x;
+}
+
+function normalizePointVector(vector: Point2D): Point2D {
+  const length = Math.hypot(vector.x, vector.y);
+  if (length < 0.000001) {
+    return { x: 0, y: 0 };
+  }
+
+  return {
+    x: vector.x / length,
+    y: vector.y / length,
+  };
+}
+
+function perpendicularPointVector(vector: Point2D): Point2D {
+  return {
+    x: -vector.y,
+    y: vector.x,
+  };
+}
+
+function projectDistanceAlongWall(point: Point2D, wall: Wall): number {
+  const direction = normalizePointVector(subtractPoints(wall.endPoint, wall.startPoint));
+  return dotPoints(subtractPoints(point, wall.startPoint), direction);
+}
+
+function areWallsCompatibleForOverlapCollapse(a: Wall, b: Wall): boolean {
+  if (a.material !== b.material) return false;
+  if (a.layer !== b.layer) return false;
+  if (Math.abs(a.thickness - b.thickness) > COINCIDENT_WALL_THICKNESS_TOLERANCE_MM) return false;
+
+  const aBase = a.properties3D.baseElevation ?? 0;
+  const bBase = b.properties3D.baseElevation ?? 0;
+  const aHeight = a.properties3D.height ?? DEFAULT_WALL_HEIGHT;
+  const bHeight = b.properties3D.height ?? DEFAULT_WALL_HEIGHT;
+  return (
+    Math.abs(aBase - bBase) <= COINCIDENT_WALL_ELEVATION_TOLERANCE_MM &&
+    Math.abs(aHeight - bHeight) <= COINCIDENT_WALL_ELEVATION_TOLERANCE_MM
+  );
+}
+
+function areWallsCoincidentForCollapse(a: Wall, b: Wall): boolean {
+  const sameDirection =
+    pointsNear(a.startPoint, b.startPoint, COINCIDENT_WALL_TOLERANCE_MM) &&
+    pointsNear(a.endPoint, b.endPoint, COINCIDENT_WALL_TOLERANCE_MM);
+  const reversedDirection =
+    pointsNear(a.startPoint, b.endPoint, COINCIDENT_WALL_TOLERANCE_MM) &&
+    pointsNear(a.endPoint, b.startPoint, COINCIDENT_WALL_TOLERANCE_MM);
+
+  if (sameDirection || reversedDirection) {
+    return true;
+  }
+
+  const dirA = subtractPoints(a.endPoint, a.startPoint);
+  const dirB = subtractPoints(b.endPoint, b.startPoint);
+  const lenA = Math.hypot(dirA.x, dirA.y);
+  const lenB = Math.hypot(dirB.x, dirB.y);
+  if (lenA < 0.001 || lenB < 0.001) {
+    return false;
+  }
+
+  const crossNormalized = Math.abs(crossPoints(dirA, dirB)) / (lenA * lenB);
+  if (crossNormalized > 0.02) {
+    return false;
+  }
+
+  const perpendicular = perpendicularPointVector(normalizePointVector(dirA));
+  const perpendicularDistance = Math.abs(dotPoints(subtractPoints(b.startPoint, a.startPoint), perpendicular));
+  if (perpendicularDistance > COINCIDENT_WALL_TOLERANCE_MM) {
+    return false;
+  }
+
+  const bStartOnA = projectPointToSegment(b.startPoint, a.startPoint, a.endPoint).distance <= COINCIDENT_WALL_TOLERANCE_MM;
+  const bEndOnA = projectPointToSegment(b.endPoint, a.startPoint, a.endPoint).distance <= COINCIDENT_WALL_TOLERANCE_MM;
+  const aStartOnB = projectPointToSegment(a.startPoint, b.startPoint, b.endPoint).distance <= COINCIDENT_WALL_TOLERANCE_MM;
+  const aEndOnB = projectPointToSegment(a.endPoint, b.startPoint, b.endPoint).distance <= COINCIDENT_WALL_TOLERANCE_MM;
+
+  return (bStartOnA && bEndOnA) || (aStartOnB && aEndOnB);
+}
+
+function chooseCoincidentWallRepresentative(
+  walls: Wall[],
+  preferredRetainedIds: Set<string>,
+  wallIndexById: Map<string, number>
+): Wall {
+  return walls.reduce((best, candidate) => {
+    const bestPreferred = preferredRetainedIds.has(best.id);
+    const candidatePreferred = preferredRetainedIds.has(candidate.id);
+    if (bestPreferred !== candidatePreferred) {
+      return candidatePreferred ? candidate : best;
+    }
+
+    if (best.openings.length !== candidate.openings.length) {
+      return candidate.openings.length > best.openings.length ? candidate : best;
+    }
+
+    const bestLength = wallLengthMm(best.startPoint, best.endPoint);
+    const candidateLength = wallLengthMm(candidate.startPoint, candidate.endPoint);
+    if (Math.abs(bestLength - candidateLength) > COINCIDENT_WALL_TOLERANCE_MM) {
+      return candidateLength > bestLength ? candidate : best;
+    }
+
+    if (best.connectedWalls.length !== candidate.connectedWalls.length) {
+      return candidate.connectedWalls.length > best.connectedWalls.length ? candidate : best;
+    }
+
+    if (Math.abs(best.thickness - candidate.thickness) > COINCIDENT_WALL_THICKNESS_TOLERANCE_MM) {
+      return candidate.thickness > best.thickness ? candidate : best;
+    }
+
+    return (wallIndexById.get(candidate.id) ?? Number.MAX_SAFE_INTEGER)
+      < (wallIndexById.get(best.id) ?? Number.MAX_SAFE_INTEGER)
+      ? candidate
+      : best;
+  });
+}
+
+function mapOpeningToWall(opening: Wall['openings'][number], sourceWall: Wall, targetWall: Wall): Wall['openings'][number] {
+  const sourceLength = Math.max(wallLengthMm(sourceWall.startPoint, sourceWall.endPoint), 0.001);
+  const t = clampValue(opening.position / sourceLength, 0, 1);
+  const worldPoint = {
+    x: sourceWall.startPoint.x + (sourceWall.endPoint.x - sourceWall.startPoint.x) * t,
+    y: sourceWall.startPoint.y + (sourceWall.endPoint.y - sourceWall.startPoint.y) * t,
+  };
+  const targetLength = Math.max(wallLengthMm(targetWall.startPoint, targetWall.endPoint), 0.001);
+  const mappedPosition = clampValue(projectDistanceAlongWall(worldPoint, targetWall), 0, targetLength);
+
+  return {
+    ...opening,
+    position: mappedPosition,
+  };
+}
+
+function openingsEquivalent(a: Wall['openings'][number], b: Wall['openings'][number]): boolean {
+  return (
+    a.type === b.type &&
+    Math.abs(a.position - b.position) <= COINCIDENT_OPENING_TOLERANCE_MM &&
+    Math.abs(a.width - b.width) <= COINCIDENT_OPENING_TOLERANCE_MM &&
+    Math.abs(a.height - b.height) <= COINCIDENT_OPENING_TOLERANCE_MM &&
+    Math.abs((a.sillHeight ?? 0) - (b.sillHeight ?? 0)) <= COINCIDENT_OPENING_TOLERANCE_MM
+  );
+}
+
+function mergeCoincidentWallOpenings(targetWall: Wall, sourceWalls: Wall[]): Wall['openings'] {
+  const merged: Wall['openings'] = [];
+
+  sourceWalls.forEach((sourceWall) => {
+    sourceWall.openings.forEach((opening) => {
+      const mappedOpening = mapOpeningToWall(opening, sourceWall, targetWall);
+      if (!merged.some((existing) => existing.id === mappedOpening.id || openingsEquivalent(existing, mappedOpening))) {
+        merged.push(mappedOpening);
+      }
+    });
+  });
+
+  return merged.sort((left, right) => left.position - right.position);
+}
+
+function mergeCoincidentWallGroup(retained: Wall, group: Wall[]): Wall {
+  const endpoints = group.flatMap((wall) => ([
+    {
+      projection: projectDistanceAlongWall(wall.startPoint, retained),
+      point: wall.startPoint,
+      bevel: bevelForEndpoint(wall, 'start'),
+    },
+    {
+      projection: projectDistanceAlongWall(wall.endPoint, retained),
+      point: wall.endPoint,
+      bevel: bevelForEndpoint(wall, 'end'),
+    },
+  ]));
+
+  const startEndpoint = endpoints.reduce(
+    (best, candidate) => (candidate.projection < best.projection ? candidate : best),
+    endpoints[0]
+  );
+  const endEndpoint = endpoints.reduce(
+    (best, candidate) => (candidate.projection > best.projection ? candidate : best),
+    endpoints[0]
+  );
+  const groupIds = new Set(group.map((wall) => wall.id));
+
+  const mergedBase = normalizeWallBevel({
+    ...retained,
+    startPoint: { ...startEndpoint.point },
+    endPoint: { ...endEndpoint.point },
+    startBevel: startEndpoint.bevel,
+    endBevel: endEndpoint.bevel,
+    connectedWalls: dedupeWallIds(
+      group.flatMap((wall) => wall.connectedWalls).filter((wallId) => !groupIds.has(wallId))
+    ),
+  });
+  const reboundWall = bindWallAttributes(rebuildWallGeometry(mergedBase), retained.properties3D);
+  return {
+    ...reboundWall,
+    openings: mergeCoincidentWallOpenings(reboundWall, group),
+  };
+}
+
+function resolveWallReplacementId(id: string, replacementMap: Map<string, string>): string {
+  let resolved = id;
+  const visited = new Set<string>();
+
+  while (replacementMap.has(resolved) && !visited.has(resolved)) {
+    visited.add(resolved);
+    resolved = replacementMap.get(resolved) ?? resolved;
+  }
+
+  return resolved;
+}
+
+function collapseCoincidentWallOverlaps(params: {
+  walls: Wall[];
+  rooms: Room[];
+  dimensions: Dimension2D[];
+  selectedElementIds: string[];
+  selectedIds: string[];
+  hoveredElementId: string | null;
+  preferredRetainedIds?: Set<string>;
+}): {
+  walls: Wall[];
+  rooms: Room[];
+  dimensions: Dimension2D[];
+  selectedElementIds: string[];
+  selectedIds: string[];
+  hoveredElementId: string | null;
+  replacementMap: Map<string, string>;
+} {
+  const preferredRetainedIds = params.preferredRetainedIds ?? new Set<string>();
+  const wallIndexById = new Map(params.walls.map((wall, index) => [wall.id, index]));
+  const consumedIds = new Set<string>();
+  const replacementMap = new Map<string, string>();
+  const mergedWalls: Wall[] = [];
+
+  for (let index = 0; index < params.walls.length; index += 1) {
+    const wall = params.walls[index];
+    if (consumedIds.has(wall.id)) {
+      continue;
+    }
+
+    const group = [wall];
+    for (let otherIndex = index + 1; otherIndex < params.walls.length; otherIndex += 1) {
+      const candidate = params.walls[otherIndex];
+      if (consumedIds.has(candidate.id)) {
+        continue;
+      }
+      if (!areWallsCompatibleForOverlapCollapse(wall, candidate)) {
+        continue;
+      }
+      if (areWallsCoincidentForCollapse(wall, candidate)) {
+        group.push(candidate);
+      }
+    }
+
+    if (group.length === 1) {
+      mergedWalls.push(group[0]);
+      consumedIds.add(group[0].id);
+      continue;
+    }
+
+    const retained = chooseCoincidentWallRepresentative(group, preferredRetainedIds, wallIndexById);
+    const mergedWall = mergeCoincidentWallGroup(retained, group);
+    mergedWalls.push(mergedWall);
+
+    group.forEach((candidate) => {
+      consumedIds.add(candidate.id);
+      if (candidate.id !== retained.id) {
+        replacementMap.set(candidate.id, retained.id);
+      }
+    });
+  }
+
+  if (replacementMap.size === 0) {
+    return {
+      walls: params.walls,
+      rooms: params.rooms,
+      dimensions: params.dimensions,
+      selectedElementIds: params.selectedElementIds,
+      selectedIds: params.selectedIds,
+      hoveredElementId: params.hoveredElementId,
+      replacementMap,
+    };
+  }
+
+  const survivingWallIds = new Set(mergedWalls.map((wall) => wall.id));
+  const normalizeWallIds = (ids: string[]): string[] =>
+    dedupeWallIds(
+      ids
+        .map((id) => resolveWallReplacementId(id, replacementMap))
+        .filter((id) => survivingWallIds.has(id))
+    );
+  const remapOptionalWallId = (id: string | null): string | null => {
+    if (!id || !replacementMap.has(id)) {
+      return id;
+    }
+    const resolved = resolveWallReplacementId(id, replacementMap);
+    return survivingWallIds.has(resolved) ? resolved : null;
+  };
+
+  return {
+    walls: mergedWalls.map((wall) => ({
+      ...wall,
+      connectedWalls: normalizeWallIds(wall.connectedWalls).filter((wallId) => wallId !== wall.id),
+    })),
+    rooms: params.rooms.map((room) => ({
+      ...room,
+      wallIds: normalizeWallIds(room.wallIds),
+    })),
+    dimensions: params.dimensions.map((dimension) => ({
+      ...dimension,
+      linkedWallIds: Array.isArray(dimension.linkedWallIds)
+        ? dedupeWallIds(
+          dimension.linkedWallIds
+            .map((wallId) => resolveWallReplacementId(wallId, replacementMap))
+            .filter((wallId) => survivingWallIds.has(wallId))
+        )
+        : dimension.linkedWallIds,
+    })),
+    selectedElementIds: dedupeWallIds(
+      params.selectedElementIds.map((id) => resolveWallReplacementId(id, replacementMap))
+    ),
+    selectedIds: dedupeWallIds(
+      params.selectedIds.map((id) => resolveWallReplacementId(id, replacementMap))
+    ),
+    hoveredElementId: remapOptionalWallId(params.hoveredElementId),
+    replacementMap,
+  };
 }
 
 function pointLiesOnWall(point: Point2D, wall: Wall, tolerance: number = 2): boolean {
@@ -1984,6 +2330,7 @@ export const useDrawingStore = create<DrawingState>()(
           layerCount: get().wallSettings.defaultLayerCount ?? DEFAULT_WALL_LAYER_COUNT,
           thermalResistance: getArchitecturalMaterial(materialId)?.thermalResistance ?? DEFAULT_WALL_3D.thermalResistance,
         });
+        let effectiveWallId = id;
 
         set((state) => {
           const nextWalls = [
@@ -2001,23 +2348,39 @@ export const useDrawingStore = create<DrawingState>()(
             }),
             boundWall,
           ];
+          const collapsed = collapseCoincidentWallOverlaps({
+            walls: cleanupStraightWallRuns(nextWalls, id),
+            rooms: state.rooms,
+            dimensions: state.dimensions,
+            selectedElementIds: state.selectedElementIds,
+            selectedIds: state.selectedIds,
+            hoveredElementId: state.hoveredElementId,
+          });
+          effectiveWallId = resolveWallReplacementId(id, collapsed.replacementMap);
 
           return {
-            walls: cleanupStraightWallRuns(nextWalls, id),
+            walls: collapsed.walls,
+            rooms: collapsed.rooms,
+            dimensions: collapsed.dimensions,
+            selectedElementIds: collapsed.selectedElementIds,
+            selectedIds: collapsed.selectedIds,
+            hoveredElementId: collapsed.hoveredElementId,
           };
         });
-        attributeChangeObserver.notify({
-          entity: 'wall',
-          entityId: boundWall.id,
-          previousValue: null,
-          nextValue: boundWall.properties3D,
-          source: 'binding',
-          timestamp: Date.now(),
-        });
+        if (effectiveWallId === boundWall.id) {
+          attributeChangeObserver.notify({
+            entity: 'wall',
+            entityId: boundWall.id,
+            previousValue: null,
+            nextValue: boundWall.properties3D,
+            source: 'binding',
+            timestamp: Date.now(),
+          });
+        }
         get().detectRooms();
         get().regenerateElevations();
         get().saveToHistory('Add wall');
-        return id;
+        return effectiveWallId;
       },
 
       updateWall: (id, updates, options) => {
@@ -2026,6 +2389,7 @@ export const useDrawingStore = create<DrawingState>()(
           : updates;
         let previousValue: Wall3D | null = null;
         let nextValue: Wall3D | null = null;
+        let effectiveWallId = id;
         const geometryChanged = Boolean(
           safeUpdates.startPoint ||
           safeUpdates.endPoint ||
@@ -2075,17 +2439,45 @@ export const useDrawingStore = create<DrawingState>()(
           const cleanedWalls = geometryChanged
             ? cleanupStraightWallRuns(nextWalls, id)
             : nextWalls;
-          const cleanedTarget = cleanedWalls.find((wall) => wall.id === id);
+          const collapsed = geometryChanged
+            ? collapseCoincidentWallOverlaps({
+              walls: cleanedWalls,
+              rooms: state.rooms,
+              dimensions: state.dimensions,
+              selectedElementIds: state.selectedElementIds,
+              selectedIds: state.selectedIds,
+              hoveredElementId: state.hoveredElementId,
+              preferredRetainedIds: new Set<string>([id]),
+            })
+            : {
+              walls: cleanedWalls,
+              rooms: state.rooms,
+              dimensions: state.dimensions,
+              selectedElementIds: state.selectedElementIds,
+              selectedIds: state.selectedIds,
+              hoveredElementId: state.hoveredElementId,
+              replacementMap: new Map<string, string>(),
+            };
+
+          effectiveWallId = resolveWallReplacementId(id, collapsed.replacementMap);
+          const cleanedTarget = collapsed.walls.find((wall) => wall.id === effectiveWallId);
           if (cleanedTarget) {
             nextValue = cleanedTarget.properties3D;
           }
 
-          return { walls: cleanedWalls };
+          return {
+            walls: collapsed.walls,
+            rooms: collapsed.rooms,
+            dimensions: collapsed.dimensions,
+            selectedElementIds: collapsed.selectedElementIds,
+            selectedIds: collapsed.selectedIds,
+            hoveredElementId: collapsed.hoveredElementId,
+          };
         });
-        if (nextValue && options?.source !== 'drag') {
+        if (nextValue && options?.source !== 'drag' && effectiveWallId === id) {
           attributeChangeObserver.notify({
             entity: 'wall',
-            entityId: id,
+            entityId: effectiveWallId,
             previousValue,
             nextValue,
             source: options?.source ?? 'ui',
@@ -2109,11 +2501,13 @@ export const useDrawingStore = create<DrawingState>()(
         }
 
         const mergedUpdates = new Map<string, Partial<Wall>>();
+        const preferredRetainedIds = new Set<string>();
         updates.forEach(({ id, updates: nextUpdates }) => {
           const existing = mergedUpdates.get(id) ?? {};
           const safeUpdates = nextUpdates.thickness !== undefined
             ? { ...nextUpdates, thickness: clampThickness(nextUpdates.thickness) }
             : nextUpdates;
+          preferredRetainedIds.add(id);
           mergedUpdates.set(id, {
             ...existing,
             ...safeUpdates,
@@ -2169,7 +2563,34 @@ export const useDrawingStore = create<DrawingState>()(
             });
           }
 
-          return { walls: nextWalls };
+          const collapsed = geometryChanged
+            ? collapseCoincidentWallOverlaps({
+              walls: nextWalls,
+              rooms: state.rooms,
+              dimensions: state.dimensions,
+              selectedElementIds: state.selectedElementIds,
+              selectedIds: state.selectedIds,
+              hoveredElementId: state.hoveredElementId,
+              preferredRetainedIds,
+            })
+            : {
+              walls: nextWalls,
+              rooms: state.rooms,
+              dimensions: state.dimensions,
+              selectedElementIds: state.selectedElementIds,
+              selectedIds: state.selectedIds,
+              hoveredElementId: state.hoveredElementId,
+              replacementMap: new Map<string, string>(),
+            };
+
+          return {
+            walls: collapsed.walls,
+            rooms: collapsed.rooms,
+            dimensions: collapsed.dimensions,
+            selectedElementIds: collapsed.selectedElementIds,
+            selectedIds: collapsed.selectedIds,
+            hoveredElementId: collapsed.hoveredElementId,
+          };
         });
 
         if (options?.source !== 'drag') {
