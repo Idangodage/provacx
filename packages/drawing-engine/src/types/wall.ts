@@ -41,8 +41,26 @@ export type ElevationViewKind = 'north' | 'south' | 'east' | 'west' | 'custom';
 export type ElevationRenderMode = 'simplified' | 'realistic';
 export type SectionLineDirection = 1 | -1;
 export type EditorViewMode = 'plan' | 'split' | 'front-elevation' | 'end-elevation' | 'isometric';
-export type HvacElementType = 'ducted-ac' | 'split-ac' | 'diffuser' | 'return-grille';
+export type HvacElementType =
+  | 'ducted-ac'
+  | 'split-ac'
+  | 'wall-mounted-ac'
+  | 'ceiling-cassette-ac'
+  | 'ceiling-suspended-ac'
+  | 'outdoor-unit'
+  | 'filter'
+  | 'remote-controller'
+  | 'control-panel'
+  | 'accessory'
+  | 'diffuser'
+  | 'return-grille';
 export type HvacMountType = 'ceiling' | 'floor' | 'wall';
+export type HvacElementCategory =
+  | 'indoor-unit'
+  | 'outdoor-unit'
+  | 'control'
+  | 'accessory'
+  | 'air-terminal';
 
 export interface ElevationOpeningProjection {
   id: string;
@@ -63,12 +81,16 @@ export interface ElevationOpeningProjection {
 
 /**
  * HvacElement - HVAC equipment placed in the drawing.
- * Coordinates are in mm. Position is the SW corner in plan view.
+ * Coordinates are in mm. Position is the unrotated top-left in plan view.
  */
 export interface HvacElement {
   id: string;
   type: HvacElementType;
-  position: Point2D;        // plan XY in mm (SW corner of bounding box)
+  category?: HvacElementCategory;
+  subtype?: string;
+  modelLabel?: string;
+  position: Point2D;        // plan XY in mm (top-left of unrotated bounding box)
+  rotation: number;         // plan rotation in degrees
   width: number;            // mm — extent along X axis in plan
   depth: number;            // mm — extent along Y axis in plan
   height: number;           // mm — unit thickness in Z
@@ -76,6 +98,7 @@ export interface HvacElement {
   mountType: HvacMountType;
   label: string;
   roomId?: string;
+  wallId?: string;
   supplyZoneRatio: number;  // 0–1, portion of width that is supply (rest is return)
   properties: Record<string, unknown>;
 }
@@ -615,7 +638,11 @@ export const DEFAULT_HVAC_DESIGN_CONDITIONS: HvacDesignConditions = {
 
 export const DEFAULT_DUCTED_AC: Omit<HvacElement, 'id'> = {
   type: 'ducted-ac',
+  category: 'indoor-unit',
+  subtype: 'standard',
+  modelLabel: 'Ducted A/C',
   position: { x: 0, y: 0 },
+  rotation: 0,
   width: 2200,
   depth: 1000,
   height: 280,

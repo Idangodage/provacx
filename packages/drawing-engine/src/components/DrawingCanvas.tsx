@@ -14,7 +14,7 @@ import { shallow } from 'zustand/shallow';
 import type { ArchitecturalObjectDefinition } from '../data';
 import { useSmartDrawingStore } from '../store';
 import { useDrawingInteractionStore } from '../store/interactionStore';
-import type { DisplayUnit, Point2D, SymbolInstance2D, Wall } from '../types';
+import type { Point2D, SymbolInstance2D, Wall } from '../types';
 import { generateId } from '../utils/geometry';
 
 import {
@@ -24,12 +24,7 @@ import type {
     DrawingCanvasProps,
     CanvasState,
     MarqueeSelectionState,
-    WallContextMenuState,
-    DimensionContextMenuState,
-    SectionLineContextMenuState,
-    ObjectContextMenuState,
     OpeningPointerInteraction,
-    OpeningResizeHandleHit,
 } from './DrawingCanvas.types';
 export type { DrawingCanvasProps } from './DrawingCanvas.types';
 
@@ -40,7 +35,6 @@ import {
     snapWallPoint,
     MM_TO_PX,
     toMillimeters,
-    type PaperUnit,
     // Hooks
     useCanvasKeyboard,
     useSelectMode,
@@ -55,6 +49,7 @@ import {
     useContextMenuHandlers,
     type UseContextMenuHandlersOptions,
     useGeometryHelpers,
+    useHvacPlacement,
     useOpeningPlacement,
     useOpeningInteraction,
     useRendererSync,
@@ -92,9 +87,13 @@ export function DrawingCanvas({
     backgroundColor = 'transparent',
     onCanvasReady,
     objectDefinitions = [],
+    equipmentDefinitions = [],
     pendingPlacementObjectId = null,
+    pendingPlacementEquipmentId = null,
     onObjectPlaced,
     onCancelObjectPlacement,
+    onEquipmentPlaced,
+    onCancelEquipmentPlacement,
 }: DrawingCanvasProps) {
     // Core refs
     const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -237,6 +236,8 @@ export function DrawingCanvas({
         createRoomWalls,
         moveRoom,
         hvacElements,
+        addHvacElement,
+        updateHvacElement,
         syncAutoDimensions,
         selectWallSegmentAtPoint,
         selectWallSegmentWithinInterval,
@@ -302,6 +303,8 @@ export function DrawingCanvas({
         createRoomWalls: state.createRoomWalls,
         moveRoom: state.moveRoom,
         hvacElements: state.hvacElements,
+        addHvacElement: state.addHvacElement,
+        updateHvacElement: state.updateHvacElement,
         syncAutoDimensions: state.syncAutoDimensions,
         selectWallSegmentAtPoint: state.selectWallSegmentAtPoint,
         selectWallSegmentWithinInterval: state.selectWallSegmentWithinInterval,
@@ -376,6 +379,10 @@ export function DrawingCanvas({
         () => new Map(objectDefinitions.map((definition) => [definition.id, definition])),
         [objectDefinitions]
     );
+    const equipmentDefinitionsById = useMemo(
+        () => new Map(equipmentDefinitions.map((definition) => [definition.id, definition])),
+        [equipmentDefinitions]
+    );
     const wallIdSet = useMemo(() => new Set(walls.map((wall) => wall.id)), [walls]);
     const wallById = useMemo(() => new Map(walls.map((wall) => [wall.id, wall])), [walls]);
     const roomById = useMemo(() => new Map(rooms.map((room) => [room.id, room])), [rooms]);
@@ -384,7 +391,6 @@ export function DrawingCanvas({
         wallContextMenu, dimensionContextMenu, sectionLineContextMenu, objectContextMenu,
         setWallContextMenu, setDimensionContextMenu, setSectionLineContextMenu, setObjectContextMenu,
         closeWallContextMenu, closeDimensionContextMenu, closeSectionLineContextMenu, closeObjectContextMenu,
-        closeAllContextMenus,
         handleEditWallProperties, handleDeleteWallFromContext, handleConvertWallToDoorOpening,
         handleEditDimensionProperties, handleDeleteDimensionFromContext, handleToggleDimensionVisibility,
         handleFlipSectionLineDirection, handleToggleSectionLineLock,
@@ -402,6 +408,9 @@ export function DrawingCanvas({
 
     const pendingPlacementDefinition = pendingPlacementObjectId
         ? objectDefinitionsById.get(pendingPlacementObjectId) ?? null
+        : null;
+    const pendingPlacementEquipmentDefinition = pendingPlacementEquipmentId
+        ? equipmentDefinitionsById.get(pendingPlacementEquipmentId) ?? null
         : null;
     const contextObjectInstance = objectContextMenu
         ? symbols.find((entry) => entry.id === objectContextMenu.objectId) ?? null
@@ -596,6 +605,21 @@ export function DrawingCanvas({
         setPlacementValid,
     });
 
+    const {
+        computeHvacPlacement,
+        placePendingHvacElement,
+    } = useHvacPlacement({
+        rooms,
+        equipmentDefinitions,
+        pendingPlacementEquipmentDefinition,
+        placementRotationDeg,
+        findWallPlacementSnap,
+        addHvacElement,
+        setSelectedIds,
+        setProcessingStatus,
+        onEquipmentPlaced,
+    });
+
 
     const {
         resolveWallIdFromTarget,
@@ -603,13 +627,13 @@ export function DrawingCanvas({
         resolveDimensionIdFromTarget,
         resolveSectionLineIdFromTarget,
         resolveObjectIdFromTarget,
+        resolveHvacIdFromTarget,
         resolveOpeningIdFromTarget,
         resolveOpeningResizeHandleFromTarget,
     } = useTargetResolvers();
 
     const {
         clearOpeningResizeHandles,
-        applyOpeningSymbolPlacement,
         updateOpeningPointerInteraction,
         beginOpeningPointerInteraction,
         finishOpeningPointerInteraction,
@@ -624,6 +648,45 @@ export function DrawingCanvas({
         updateWall, updateSymbol, saveToHistory, setProcessingStatus,
         setOpeningInteractionActive,
     });
+
+    const nudgeSelectedEntities = useCallback((dxMm: number, dyMm: number) => {
+        const movedObjects = nudgeSelectedObjects(dxMm, dyMm);
+        const selectedSet = new Set(selectedIds);
+        const selectedEquipment = hvacElements.filter((element) => selectedSet.has(element.id));
+        let movedEquipment = false;
+
+        for (const element of selectedEquipment) {
+            const candidateCenter = {
+                x: element.position.x + element.width / 2 + dxMm,
+                y: element.position.y + element.depth / 2 + dyMm,
+            };
+            const placement = computeHvacPlacement(candidateCenter, element);
+            if (!placement.valid) {
+                setProcessingStatus(
+                    placement.invalidReason ?? 'Movement blocked: AC equipment cannot be placed there.',
+                    false,
+                );
+                continue;
+            }
+
+            updateHvacElement(element.id, {
+                position: placement.point,
+                rotation: placement.rotationDeg,
+                roomId: placement.roomId ?? undefined,
+                wallId: placement.wallId ?? undefined,
+            });
+            movedEquipment = true;
+        }
+
+        return movedObjects || movedEquipment;
+    }, [
+        computeHvacPlacement,
+        hvacElements,
+        nudgeSelectedObjects,
+        selectedIds,
+        setProcessingStatus,
+        updateHvacElement,
+    ]);
 
 
     // Global close effect is inside useContextMenuHandlers hook.
@@ -966,7 +1029,7 @@ export function DrawingCanvas({
     ]);
 
     const handleEscapeShortcut = useCallback(() => {
-        if (pendingPlacementDefinition) return true;
+        if (pendingPlacementDefinition || pendingPlacementEquipmentDefinition) return true;
         if (tool === 'wall' && isWallDrawing) return true;
         if (tool === 'room' && isRoomDrawing) {
             cancelRoomCreation();
@@ -995,6 +1058,7 @@ export function DrawingCanvas({
         return false;
     }, [
         pendingPlacementDefinition,
+        pendingPlacementEquipmentDefinition,
         tool,
         isWallDrawing,
         isRoomDrawing,
@@ -1186,7 +1250,7 @@ export function DrawingCanvas({
     // Renderer Synchronisation
     // ---------------------------------------------------------------------------
 
-    const { refreshDimensionLayer, scheduleDimensionLayerRefresh } = useRendererSync({
+    const { scheduleDimensionLayerRefresh } = useRendererSync({
         fabricRef, roomRendererRef, dimensionRendererRef, objectRendererRef,
         sectionLineRendererRef, hvacRendererRef, wallsRef, symbolsRef,
         dimensionRefreshFrameRef, autoDimensionSyncFrameRef, wheelRafId, zoomRef, panOffsetRef,
@@ -1200,13 +1264,13 @@ export function DrawingCanvas({
         wallIdSet, objectDefinitions, objectDefinitionsById: objectDefinitionsById as Map<string, ArchitecturalObjectDefinition>,
         doorWindowSymbolsSignature, isSpacePressed, canvasState, isHandleDragging,
         activeRoomDragId, persistentRoomControlId, openingInteractionActive,
-        pendingPlacementDefinition, placementRotationDeg,
+        pendingPlacementDefinition, pendingPlacementEquipmentDefinition, placementRotationDeg,
         setPlacementRotationDeg, setPlacementValid, setOpeningInteractionActive,
         setActiveRoomDragId, setPersistentRoomControlId,
         restackInteractiveOverlays, cancelDimensionPlacement, syncAutoDimensions,
         updateWall, updateSymbol, clearOpeningResizeHandles,
         buildHostedOpeningSymbolProperties, fitOpeningToWall,
-        resolveOpeningSillHeightMm, computePlacement, buildOpeningPreviewProperties,
+        resolveOpeningSillHeightMm, computePlacement, buildOpeningPreviewProperties, computeHvacPlacement,
         offsetTool, trimTool, extendTool,
     });
 
@@ -1220,25 +1284,25 @@ export function DrawingCanvas({
         lastMarqueeSelectionRef, applyMarqueeFilterRef, isDraggingObjectRef,
         isWallHandleDraggingRef, openingPointerInteractionRef,
         wheelPendingZoom, wheelPendingPan, wheelRafId,
-        roomRendererRef, dimensionRendererRef, objectRendererRef,
+        roomRendererRef, dimensionRendererRef, objectRendererRef, hvacRendererRef,
         tool, resolvedSnapToGrid, effectiveSnapGridSize, isSpacePressed,
-        pendingPlacementDefinition, isWallDrawing, isRoomDrawing,
+        pendingPlacementDefinition, pendingPlacementEquipmentDefinition, isWallDrawing, isRoomDrawing,
         roomStartCorner, viewportZoom, safePaperPerRealRatio,
         walls, wallSettings, sectionLineDrawingState,
         queueMousePositionUpdate, closeWallContextMenu, closeDimensionContextMenu,
         closeSectionLineContextMenu, closeObjectContextMenu,
-        placePendingObject, handleWallMouseDown, handleWallMouseMove,
+        placePendingObject, placePendingHvacElement, handleWallMouseDown, handleWallMouseMove,
         handleRoomMouseDown, handleRoomMouseMove,
         handleDimensionPlacementMouseDown, handleDimensionPlacementMouseMove,
         handleDimensionSelectMouseMove, isDimensionSelectDragActive,
         handleDimensionSelectMouseUp,
         handleSelectMouseMove, handleSelectMouseUp,
         findOpeningAtPoint, updateOpeningPointerInteraction,
-        finishOpeningPointerInteraction, computePlacement,
+        finishOpeningPointerInteraction, computePlacement, computeHvacPlacement,
         buildOpeningPreviewProperties, scheduleDimensionLayerRefresh,
         setViewTransform, setInteractionViewTransform, setCanvasState, setPlacementValid,
         setHoveredElement, setMarqueeSelectionMode, addSketch, getSelectionRect,
-        getTargetMeta, resolveObjectIdFromTarget, resolveRoomIdFromTarget,
+        getTargetMeta, resolveObjectIdFromTarget, resolveHvacIdFromTarget, resolveRoomIdFromTarget,
         resolveSectionLineIdFromTarget, startSectionLineDrawing,
         updateSectionLinePreview, commitSectionLine,
         wallRenderer, offsetTool, trimTool, extendTool,
@@ -1254,12 +1318,12 @@ export function DrawingCanvas({
         lastMarqueeSelectionRef, applyMarqueeFilterRef,
         openingPointerInteractionRef, suppressFabricSelectionSyncRef,
         isWallHandleDraggingRef, isDraggingObjectRef, placementCursorRef,
-        objectRendererRef, roomRendererRef,
+        objectRendererRef, hvacRendererRef, roomRendererRef,
         // State values
-        tool, selectedIds, symbols, walls,
+        tool, selectedIds, symbols, hvacElements, walls,
         objectDefinitionsById: objectDefinitionsById as Map<string, ArchitecturalObjectDefinition>,
         resolvedSnapToGrid, effectiveSnapGridSize,
-        pendingPlacementDefinition, sectionLineDrawingState,
+        pendingPlacementDefinition, pendingPlacementEquipmentDefinition, sectionLineDrawingState,
         wallById, roomById, wallIdSet,
         perimeterWallIdsForRooms, roomBoundaryDistance, projectPointToSegment,
         selectWallSegmentAtPoint,
@@ -1272,7 +1336,7 @@ export function DrawingCanvas({
         // Select-mode handlers
         handleSelectDoubleClick: handleSelectDoubleClick,
         updateSelectionFromTarget, updateSelectionFromTargets,
-        handleSelectMouseDown: (target: fabric.Object | null | undefined, wallPointMm: Point2D, addToSelection: boolean) => {
+        handleSelectMouseDown: (target: fabric.Object | null | undefined, wallPointMm: Point2D, _addToSelection: boolean) => {
             // Adapter: the original event binding calls handleSelectMouseDown from useSelectMode
             // which has a different signature than our mouse handlers version
             handleSelectMouseDown(target as fabric.Object | null, wallPointMm);
@@ -1286,6 +1350,7 @@ export function DrawingCanvas({
         resolveSectionLineIdFromTarget,
         resolveRoomIdFromTarget,
         resolveObjectIdFromTarget,
+        resolveHvacIdFromTarget,
         resolveOpeningIdFromTarget,
         resolveOpeningResizeHandleFromTarget,
         findOpeningAtPoint, filterMarqueeSelectionTargets, getTargetMeta,
@@ -1299,6 +1364,7 @@ export function DrawingCanvas({
         // Opening placement
         computePlacement, syncOpeningForSymbol,
         buildHostedOpeningSymbolProperties,
+        computeHvacPlacement,
         resolveOpeningWidthMm, resolveOpeningHeightMm, resolveOpeningSillHeightMm,
         hasFurnitureCollision,
         // Opening interaction
@@ -1308,8 +1374,9 @@ export function DrawingCanvas({
         closeSectionLineContextMenu, closeObjectContextMenu,
         // Store actions
         setSelectedIds, setHoveredElement, setProcessingStatus,
-        updateSymbol, placePendingObject,
+        updateSymbol, updateHvacElement, placePendingObject, placePendingHvacElement,
         onCancelObjectPlacement,
+        onCancelEquipmentPlacement,
         // Local state setters
         setOpeningInteractionActive, setMarqueeSelectionMode,
         setPersistentRoomControlId, setPlacementRotationDeg,
@@ -1318,7 +1385,7 @@ export function DrawingCanvas({
         // Section-line actions
         cancelSectionLineDrawing, commitSectionLine, setSectionLineDirection,
         // Nudge
-        nudgeSelectedObjects,
+        nudgeSelectedObjects: nudgeSelectedEntities,
         // Wall renderer
         wallRenderer,
     });
@@ -1491,11 +1558,17 @@ export function DrawingCanvas({
                 </div>
             )}
 
-            {pendingPlacementDefinition && !placementValid && (
+            {(pendingPlacementDefinition || pendingPlacementEquipmentDefinition) && !placementValid && (
                 <div className="absolute left-4 top-4 z-[25] rounded border border-rose-200 bg-rose-50 px-3 py-1 text-xs text-rose-700">
-                    {pendingPlacementDefinition.category === 'doors' || pendingPlacementDefinition.category === 'windows'
-                        ? 'Placement blocked: opening does not fit or overlaps an existing opening.'
-                        : 'Placement blocked: furniture overlap detected.'}
+                    {pendingPlacementEquipmentDefinition
+                        ? pendingPlacementEquipmentDefinition.placementMode === 'outdoor'
+                            ? 'Placement blocked: outdoor equipment must stay outside enclosed rooms.'
+                            : pendingPlacementEquipmentDefinition.placementMode === 'wall'
+                                ? 'Placement blocked: equipment must align to a valid room wall.'
+                                : 'Placement blocked: equipment must be placed inside a valid room.'
+                        : pendingPlacementDefinition && (pendingPlacementDefinition.category === 'doors' || pendingPlacementDefinition.category === 'windows')
+                            ? 'Placement blocked: opening does not fit or overlaps an existing opening.'
+                            : 'Placement blocked: furniture overlap detected.'}
                 </div>
             )}
 

@@ -2,9 +2,9 @@
  * Types, interfaces, and constants for DrawingCanvas.
  */
 
-import * as fabric from 'fabric';
+import type * as fabric from 'fabric';
 
-import type { ArchitecturalObjectDefinition } from '../data';
+import type { AcEquipmentDefinition, ArchitecturalObjectDefinition } from '../data';
 import type { DisplayUnit, Point2D, SymbolInstance2D } from '../types';
 
 import type { PaperUnit } from './canvas';
@@ -33,9 +33,13 @@ export interface DrawingCanvasProps {
     backgroundColor?: string;
     onCanvasReady?: (canvas: fabric.Canvas) => void;
     objectDefinitions?: ArchitecturalObjectDefinition[];
+    equipmentDefinitions?: AcEquipmentDefinition[];
     pendingPlacementObjectId?: string | null;
+    pendingPlacementEquipmentId?: string | null;
     onObjectPlaced?: (definitionId: string, instance: SymbolInstance2D) => void;
     onCancelObjectPlacement?: () => void;
+    onEquipmentPlaced?: (definitionId: string) => void;
+    onCancelEquipmentPlacement?: () => void;
 }
 
 // =============================================================================

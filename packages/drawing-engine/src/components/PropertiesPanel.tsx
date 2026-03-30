@@ -1061,6 +1061,122 @@ function ObjectSection({ propertyUnit }: { propertyUnit: PropertyUnit }) {
   );
 }
 
+function AcEquipmentSection({ propertyUnit }: { propertyUnit: PropertyUnit }) {
+  const {
+    selectedElementIds,
+    hvacElements,
+    rooms,
+    updateHvacElement,
+  } = useSmartDrawingStore((state) => ({
+    selectedElementIds: state.selectedElementIds,
+    hvacElements: state.hvacElements,
+    rooms: state.rooms,
+    updateHvacElement: state.updateHvacElement,
+  }), shallow);
+
+  const selectedEquipment = useMemo(() => {
+    return hvacElements.find((element) => selectedElementIds.includes(element.id)) ?? null;
+  }, [hvacElements, selectedElementIds]);
+
+  if (!selectedEquipment) {
+    return <p className="text-sm text-slate-400">No AC equipment selected</p>;
+  }
+
+  const roomName = selectedEquipment.roomId
+    ? rooms.find((room) => room.id === selectedEquipment.roomId)?.name ?? selectedEquipment.roomId
+    : 'Unassigned';
+  const capacityKw = propertyAsNumber(selectedEquipment.properties, 'capacityKw');
+  const airflowLps = propertyAsNumber(selectedEquipment.properties, 'airflowLps');
+
+  const updateProperties = (properties: Record<string, unknown>) => {
+    updateHvacElement(selectedEquipment.id, { properties });
+  };
+
+  return (
+    <div className="space-y-1">
+      <PropertyRow label="Label">
+        <input
+          type="text"
+          value={selectedEquipment.label}
+          onChange={(e) => updateHvacElement(selectedEquipment.id, { label: e.target.value })}
+          className="w-36 rounded border border-amber-200/80 bg-white px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-amber-400"
+        />
+      </PropertyRow>
+      <PropertyRow label="Type">
+        <span className="text-sm text-slate-700">{selectedEquipment.modelLabel ?? selectedEquipment.type}</span>
+      </PropertyRow>
+      <PropertyRow label="Room">
+        <span className="text-sm text-slate-700">{roomName}</span>
+      </PropertyRow>
+      <PropertyRow label="Wall Ref">
+        <span className="text-xs text-slate-500">{selectedEquipment.wallId ?? 'Free placement'}</span>
+      </PropertyRow>
+      <PropertyRow label="Rotation">
+        <input
+          type="number"
+          min={-360}
+          max={360}
+          step={5}
+          value={selectedEquipment.rotation.toFixed(1)}
+          onChange={(e) => {
+            const parsed = Number.parseFloat(e.target.value);
+            if (!Number.isFinite(parsed)) return;
+            updateHvacElement(selectedEquipment.id, { rotation: parsed });
+          }}
+          className="w-24 rounded border border-amber-200/80 bg-white px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-amber-400"
+        />
+      </PropertyRow>
+      <PropertyRow label="Elevation">
+        <input
+          type="number"
+          step={propertyUnit === 'mm' ? 1 : 0.01}
+          value={fromMm(selectedEquipment.elevation, propertyUnit).toFixed(2)}
+          onChange={(e) => {
+            const parsed = Number.parseFloat(e.target.value);
+            if (!Number.isFinite(parsed)) return;
+            updateHvacElement(selectedEquipment.id, { elevation: Math.max(0, toMm(parsed, propertyUnit)) });
+          }}
+          className="w-24 rounded border border-amber-200/80 bg-white px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-amber-400"
+        />
+        <span className="text-xs text-slate-500">{formatUnit(propertyUnit)}</span>
+      </PropertyRow>
+      <PropertyRow label="Plan Size">
+        <span className="text-sm text-slate-700">
+          {fromMm(selectedEquipment.width, propertyUnit).toFixed(2)} x {fromMm(selectedEquipment.depth, propertyUnit).toFixed(2)} {formatUnit(propertyUnit)}
+        </span>
+      </PropertyRow>
+      <PropertyRow label="Capacity">
+        <input
+          type="number"
+          step={0.1}
+          value={capacityKw.toFixed(1)}
+          onChange={(e) => {
+            const parsed = Number.parseFloat(e.target.value);
+            if (!Number.isFinite(parsed)) return;
+            updateProperties({ capacityKw: parsed });
+          }}
+          className="w-24 rounded border border-amber-200/80 bg-white px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-amber-400"
+        />
+        <span className="text-xs text-slate-500">kW</span>
+      </PropertyRow>
+      <PropertyRow label="Airflow">
+        <input
+          type="number"
+          step={1}
+          value={airflowLps.toFixed(0)}
+          onChange={(e) => {
+            const parsed = Number.parseFloat(e.target.value);
+            if (!Number.isFinite(parsed)) return;
+            updateProperties({ airflowLps: parsed });
+          }}
+          className="w-24 rounded border border-amber-200/80 bg-white px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-amber-400"
+        />
+        <span className="text-xs text-slate-500">L/s</span>
+      </PropertyRow>
+    </div>
+  );
+}
+
 function RoomSection({ propertyUnit }: { propertyUnit: PropertyUnit }) {
   const {
     rooms,
@@ -2459,6 +2575,7 @@ export function PropertiesPanel({ className = '', onClose }: PropertiesPanelProp
     walls,
     rooms,
     symbols,
+    hvacElements,
     dimensions,
     activeTool,
   } = useSmartDrawingStore((state) => ({
@@ -2467,6 +2584,7 @@ export function PropertiesPanel({ className = '', onClose }: PropertiesPanelProp
     walls: state.walls,
     rooms: state.rooms,
     symbols: state.symbols,
+    hvacElements: state.hvacElements,
     dimensions: state.dimensions,
     activeTool: state.activeTool,
   }), shallow);
@@ -2483,6 +2601,10 @@ export function PropertiesPanel({ className = '', onClose }: PropertiesPanelProp
   const hasSelectedObject = useMemo(
     () => symbols.some((symbol) => selectedLookup.has(symbol.id)),
     [symbols, selectedLookup]
+  );
+  const hasSelectedHvac = useMemo(
+    () => hvacElements.some((element) => selectedLookup.has(element.id)),
+    [hvacElements, selectedLookup]
   );
   const hasSelectedDimension = useMemo(
     () => dimensions.some((dimension) => selectedLookup.has(dimension.id)),
@@ -2523,6 +2645,10 @@ export function PropertiesPanel({ className = '', onClose }: PropertiesPanelProp
 
         <CollapsibleSection title="Object Properties" defaultOpen={hasSelectedObject}>
           <ObjectSection propertyUnit={propertyUnit} />
+        </CollapsibleSection>
+
+        <CollapsibleSection title="AC Equipment" defaultOpen={hasSelectedHvac}>
+          <AcEquipmentSection propertyUnit={propertyUnit} />
         </CollapsibleSection>
 
         <CollapsibleSection title="Room Properties" defaultOpen={hasSelectedRoom}>

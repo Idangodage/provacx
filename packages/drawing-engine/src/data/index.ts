@@ -23,3 +23,12 @@ export {
   type ArchitecturalObjectCategory,
   type ObjectSortMode,
 } from './architectural-object-library';
+
+export {
+  AC_EQUIPMENT_CATEGORY_LABELS,
+  DEFAULT_AC_EQUIPMENT_LIBRARY,
+  groupAcEquipmentByCategory,
+  type AcEquipmentDefinition,
+  type AcEquipmentLibraryCategory,
+  type AcEquipmentPlacementMode,
+} from './ac-equipment-library';

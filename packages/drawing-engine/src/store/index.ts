@@ -282,13 +282,18 @@ function elevationGenerationSignature(params: {
     hvacElements: params.hvacElements.map((element) => ({
       id: element.id,
       type: element.type,
+      category: element.category,
+      subtype: element.subtype,
+      modelLabel: element.modelLabel,
       label: element.label,
       position: element.position,
+      rotation: element.rotation,
       width: element.width,
       depth: element.depth,
       elevation: element.elevation,
       height: element.height,
       mountType: element.mountType,
+      wallId: element.wallId,
       supplyZoneRatio: element.supplyZoneRatio,
       properties: element.properties,
     })),
@@ -395,6 +400,79 @@ function clampThickness(thickness: number): number {
 
 function clampHeight(height: number): number {
   return clampValue(height, MIN_WALL_HEIGHT, MAX_WALL_HEIGHT);
+}
+
+function inferHvacElementCategory(type: HvacElement['type']): HvacElement['category'] {
+  switch (type) {
+    case 'outdoor-unit':
+      return 'outdoor-unit';
+    case 'remote-controller':
+    case 'control-panel':
+      return 'control';
+    case 'filter':
+    case 'accessory':
+      return 'accessory';
+    case 'diffuser':
+    case 'return-grille':
+      return 'air-terminal';
+    case 'ducted-ac':
+    case 'split-ac':
+    case 'wall-mounted-ac':
+    case 'ceiling-cassette-ac':
+    case 'ceiling-suspended-ac':
+    default:
+      return 'indoor-unit';
+  }
+}
+
+function normalizeHvacElement(
+  element: Partial<HvacElement> & Pick<HvacElement, 'type' | 'position' | 'width' | 'depth' | 'height' | 'elevation' | 'mountType' | 'label'>
+): HvacElement {
+  const rotation = typeof element.rotation === 'number' && Number.isFinite(element.rotation)
+    ? element.rotation
+    : 0;
+  const width = typeof element.width === 'number' && Number.isFinite(element.width)
+    ? element.width
+    : 1;
+  const depth = typeof element.depth === 'number' && Number.isFinite(element.depth)
+    ? element.depth
+    : 1;
+  const height = typeof element.height === 'number' && Number.isFinite(element.height)
+    ? element.height
+    : 1;
+  const elevation = typeof element.elevation === 'number' && Number.isFinite(element.elevation)
+    ? element.elevation
+    : 0;
+  const supplyZoneRatio = typeof element.supplyZoneRatio === 'number' && Number.isFinite(element.supplyZoneRatio)
+    ? element.supplyZoneRatio
+    : 0.5;
+
+  return {
+    id: element.id ?? generateId(),
+    type: element.type,
+    category: element.category ?? inferHvacElementCategory(element.type),
+    subtype: element.subtype,
+    modelLabel: element.modelLabel ?? element.label,
+    position: {
+      x: Number.isFinite(element.position.x) ? element.position.x : 0,
+      y: Number.isFinite(element.position.y) ? element.position.y : 0,
+    },
+    rotation,
+    width: Math.max(1, width),
+    depth: Math.max(1, depth),
+    height: Math.max(1, height),
+    elevation,
+    mountType: element.mountType,
+    label: element.label,
+    roomId: element.roomId,
+    wallId: element.wallId,
+    supplyZoneRatio: clampValue(
+      supplyZoneRatio,
+      0,
+      1,
+    ),
+    properties: element.properties ? { ...element.properties } : {},
+  };
 }
 
 function normalizeBevelControl(bevel?: Partial<BevelControl> | null): BevelControl {
@@ -1823,6 +1901,10 @@ export interface DrawingState {
   createRoomWalls: (config: RoomConfig, startCorner: Point2D) => string[];
   deleteWalls: (ids: string[]) => void;
   clearAllWalls: () => void;
+  addHvacElement: (element: Omit<Partial<HvacElement>, 'id'> & Pick<HvacElement, 'type' | 'position' | 'width' | 'depth' | 'height' | 'elevation' | 'mountType' | 'label'>) => string;
+  updateHvacElement: (id: string, updates: Partial<HvacElement>, options?: { skipHistory?: boolean }) => void;
+  deleteHvacElement: (id: string, options?: { skipHistory?: boolean }) => void;
+  duplicateHvacElement: (id: string) => string | null;
   selectWallSegmentAtPoint: (wallId: string, point: Point2D) => string;
   selectWallSegmentWithinInterval: (wallId: string, startPoint: Point2D, endPoint: Point2D) => string;
   resolveRoomPerimeterWallSegments: (roomIds: string[]) => string[];
@@ -3778,6 +3860,95 @@ export const useDrawingStore = create<DrawingState>()(
         get().saveToHistory('Clear all walls');
       },
 
+      addHvacElement: (element) => {
+        const nextElement = normalizeHvacElement(element);
+        set((state) => ({
+          hvacElements: [...state.hvacElements, nextElement],
+        }));
+        get().regenerateElevations({ debounce: true });
+        get().saveToHistory('Add AC equipment');
+        return nextElement.id;
+      },
+
+      updateHvacElement: (id, updates, options) => {
+        let changed = false;
+        set((state) => ({
+          hvacElements: state.hvacElements.map((element) => {
+            if (element.id !== id) {
+              return element;
+            }
+            const nextElement = normalizeHvacElement({
+              ...element,
+              ...updates,
+              id: element.id,
+              type: updates.type ?? element.type,
+              position: updates.position ?? element.position,
+              width: updates.width ?? element.width,
+              depth: updates.depth ?? element.depth,
+              height: updates.height ?? element.height,
+              elevation: updates.elevation ?? element.elevation,
+              mountType: updates.mountType ?? element.mountType,
+              label: updates.label ?? element.label,
+              properties: updates.properties
+                ? { ...element.properties, ...updates.properties }
+                : element.properties,
+            });
+            changed =
+              changed ||
+              JSON.stringify(nextElement) !== JSON.stringify(element);
+            return nextElement;
+          }),
+        }));
+        if (!changed) {
+          return;
+        }
+        get().regenerateElevations({ debounce: true });
+        if (!options?.skipHistory) {
+          get().saveToHistory('Update AC equipment');
+        }
+      },
+
+      deleteHvacElement: (id, options) => {
+        const exists = get().hvacElements.some((element) => element.id === id);
+        if (!exists) {
+          return;
+        }
+        set((state) => ({
+          hvacElements: state.hvacElements.filter((element) => element.id !== id),
+          selectedElementIds: state.selectedElementIds.filter((selectedId) => selectedId !== id),
+          selectedIds: state.selectedIds.filter((selectedId) => selectedId !== id),
+          hoveredElementId: state.hoveredElementId === id ? null : state.hoveredElementId,
+        }));
+        get().regenerateElevations({ debounce: true });
+        if (!options?.skipHistory) {
+          get().saveToHistory('Delete AC equipment');
+        }
+      },
+
+      duplicateHvacElement: (id) => {
+        const existing = get().hvacElements.find((element) => element.id === id);
+        if (!existing) {
+          return null;
+        }
+        const clone = normalizeHvacElement({
+          ...existing,
+          id: generateId(),
+          label: `${existing.label} Copy`,
+          position: {
+            x: existing.position.x + 200,
+            y: existing.position.y + 200,
+          },
+        });
+        set((state) => ({
+          hvacElements: [...state.hvacElements, clone],
+          selectedElementIds: [clone.id],
+          selectedIds: [clone.id],
+        }));
+        get().regenerateElevations({ debounce: true });
+        get().saveToHistory('Duplicate AC equipment');
+        return clone.id;
+      },
+
       selectWallSegmentAtPoint: (wallId, point) => {
         const currentState = get();
         const sourceWall = currentState.walls.find((wall) => wall.id === wallId);
@@ -3947,6 +4118,7 @@ export const useDrawingStore = create<DrawingState>()(
           ...state.annotations.map((a) => a.id),
           ...state.sketches.map((s) => s.id),
           ...state.symbols.map((s) => s.id),
+          ...state.hvacElements.map((element) => element.id),
           ...state.walls.map((w) => w.id),
           ...state.rooms.map((room) => room.id),
           ...state.sectionLines.map((line) => line.id),
@@ -3956,6 +4128,7 @@ export const useDrawingStore = create<DrawingState>()(
           ...state.annotations.map((a) => a.id),
           ...state.sketches.map((s) => s.id),
           ...state.symbols.map((s) => s.id),
+          ...state.hvacElements.map((element) => element.id),
           ...state.walls.map((w) => w.id),
           ...state.rooms.map((room) => room.id),
           ...state.sectionLines.map((line) => line.id),
@@ -3975,6 +4148,7 @@ export const useDrawingStore = create<DrawingState>()(
           annotations,
           sketches,
           symbols,
+          hvacElements,
           walls,
           rooms,
           sectionLines,
@@ -4027,6 +4201,7 @@ export const useDrawingStore = create<DrawingState>()(
           annotations: annotations.filter((a) => !selectedSet.has(a.id)),
           sketches: sketches.filter((s) => !selectedSet.has(s.id)),
           symbols: symbols.filter((s) => !selectedSet.has(s.id)),
+          hvacElements: hvacElements.filter((element) => !selectedSet.has(element.id)),
           walls: nextWalls,
           rooms: rooms
             .filter((room) => !selectedSet.has(room.id))
@@ -4254,6 +4429,7 @@ export const useDrawingStore = create<DrawingState>()(
           annotations: prevEntry.snapshot.annotations,
           sketches: prevEntry.snapshot.sketches,
           symbols: prevEntry.snapshot.symbols,
+          hvacElements: prevEntry.snapshot.hvacElements ?? [],
           walls: prevEntry.snapshot.walls ?? [],
           rooms: prevEntry.snapshot.rooms ?? [],
           sectionLines: prevEntry.snapshot.sectionLines ?? [],
@@ -4276,6 +4452,7 @@ export const useDrawingStore = create<DrawingState>()(
           annotations: nextEntry.snapshot.annotations,
           sketches: nextEntry.snapshot.sketches,
           symbols: nextEntry.snapshot.symbols,
+          hvacElements: nextEntry.snapshot.hvacElements ?? [],
           walls: nextEntry.snapshot.walls ?? [],
           rooms: nextEntry.snapshot.rooms ?? [],
           sectionLines: nextEntry.snapshot.sectionLines ?? [],
@@ -4303,6 +4480,7 @@ export const useDrawingStore = create<DrawingState>()(
           sketches,
           symbols,
           guides,
+          hvacElements,
           walls,
           rooms,
           sectionLines,
@@ -4324,6 +4502,7 @@ export const useDrawingStore = create<DrawingState>()(
           sketches,
           guides,
           symbols,
+          hvacElements,
           walls,
           rooms,
           sectionLines,
@@ -4480,6 +4659,19 @@ export const useDrawingStore = create<DrawingState>()(
             typeof data.activeElevationViewId === 'string'
               ? data.activeElevationViewId
               : null;
+          const importedHvacElements = Array.isArray(data.hvacElements)
+            ? data.hvacElements.map((rawElement: Partial<HvacElement>) => normalizeHvacElement({
+              type: rawElement.type ?? 'ducted-ac',
+              position: rawElement.position ?? { x: 0, y: 0 },
+              width: typeof rawElement.width === 'number' && Number.isFinite(rawElement.width) ? rawElement.width : 1000,
+              depth: typeof rawElement.depth === 'number' && Number.isFinite(rawElement.depth) ? rawElement.depth : 600,
+              height: typeof rawElement.height === 'number' && Number.isFinite(rawElement.height) ? rawElement.height : 300,
+              elevation: typeof rawElement.elevation === 'number' && Number.isFinite(rawElement.elevation) ? rawElement.elevation : 0,
+              mountType: rawElement.mountType ?? 'ceiling',
+              label: rawElement.label ?? rawElement.modelLabel ?? rawElement.type ?? 'AC equipment',
+              ...rawElement,
+            }))
+            : [];
 
           set({
             dimensions: Array.isArray(data.dimensions)
@@ -4493,6 +4685,7 @@ export const useDrawingStore = create<DrawingState>()(
             sketches: data.sketches || [],
             guides: data.guides || [],
             symbols: data.symbols || [],
+            hvacElements: importedHvacElements,
             walls: attributeHydration.walls,
             rooms: attributeHydration.rooms,
             sectionLines: importedSectionLines,

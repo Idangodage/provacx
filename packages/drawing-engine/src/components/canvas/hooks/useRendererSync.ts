@@ -11,7 +11,7 @@
 import * as fabric from 'fabric';
 import { useEffect, useCallback, useRef } from 'react';
 
-import type { ArchitecturalObjectDefinition } from '../../../data';
+import type { AcEquipmentDefinition, ArchitecturalObjectDefinition } from '../../../data';
 import type {
     Point2D,
     Wall,
@@ -110,6 +110,7 @@ export interface UseRendererSyncOptions {
     persistentRoomControlId: string | null;
     openingInteractionActive: boolean;
     pendingPlacementDefinition: ArchitecturalObjectDefinition | null;
+    pendingPlacementEquipmentDefinition: AcEquipmentDefinition | null;
     placementRotationDeg: number;
 
     // State setters
@@ -166,6 +167,14 @@ export interface UseRendererSyncOptions {
         definition: ArchitecturalObjectDefinition,
         snappedWall?: { wall: Wall; positionAlongWall: number } | null
     ) => Record<string, unknown> | undefined;
+    computeHvacPlacement: (
+        point: Point2D,
+        source: AcEquipmentDefinition | HvacElement,
+    ) => {
+        point: Point2D;
+        rotationDeg: number;
+        valid: boolean;
+    };
 
     // Tool hooks that need cleanup
     offsetTool: { cleanup: () => void };
@@ -237,6 +246,7 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
         persistentRoomControlId,
         openingInteractionActive,
         pendingPlacementDefinition,
+        pendingPlacementEquipmentDefinition,
         placementRotationDeg,
 
         setPlacementRotationDeg,
@@ -256,6 +266,7 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
         resolveOpeningSillHeightMm,
         computePlacement,
         buildOpeningPreviewProperties,
+        computeHvacPlacement,
 
         offsetTool,
         trimTool,
@@ -1040,10 +1051,13 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
     useEffect(() => {
         if (!pendingPlacementDefinition) {
             objectRendererRef.current?.clearPlacementPreview();
-            placementCursorRef.current = null;
-            setPlacementValid(true);
+            if (!pendingPlacementEquipmentDefinition) {
+                placementCursorRef.current = null;
+                setPlacementValid(true);
+            }
             return;
         }
+        hvacRendererRef.current?.clearPlacementPreview();
         setPlacementRotationDeg(pendingPlacementDefinition.defaultRotationDeg ?? 0);
         if (!placementCursorRef.current) {
             const seedPoint = {
@@ -1071,7 +1085,7 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
                 ),
             );
         }
-    }, [pendingPlacementDefinition, buildOpeningPreviewProperties, computePlacement, objectRendererRef, placementCursorRef, mousePositionRef, setPlacementValid, setPlacementRotationDeg]);
+    }, [pendingPlacementDefinition, pendingPlacementEquipmentDefinition, buildOpeningPreviewProperties, computePlacement, hvacRendererRef, objectRendererRef, placementCursorRef, mousePositionRef, setPlacementValid, setPlacementRotationDeg]);
 
     useEffect(() => {
         if (!pendingPlacementDefinition || !placementCursorRef.current) return;
@@ -1096,6 +1110,46 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
         );
     }, [pendingPlacementDefinition, placementRotationDeg, buildOpeningPreviewProperties, computePlacement, objectRendererRef, placementCursorRef, setPlacementValid]);
 
+    useEffect(() => {
+        if (!pendingPlacementEquipmentDefinition) {
+            hvacRendererRef.current?.clearPlacementPreview();
+            if (!pendingPlacementDefinition) {
+                placementCursorRef.current = null;
+                setPlacementValid(true);
+            }
+            return;
+        }
+        objectRendererRef.current?.clearPlacementPreview();
+        setPlacementRotationDeg(pendingPlacementEquipmentDefinition.defaultRotationDeg ?? 0);
+        if (!placementCursorRef.current) {
+            const seedPoint = {
+                x: mousePositionRef.current.x / MM_TO_PX,
+                y: mousePositionRef.current.y / MM_TO_PX,
+            };
+            placementCursorRef.current = seedPoint;
+            const placement = computeHvacPlacement(seedPoint, pendingPlacementEquipmentDefinition);
+            setPlacementValid(placement.valid);
+            hvacRendererRef.current?.renderPlacementPreview(
+                pendingPlacementEquipmentDefinition,
+                placement.point,
+                placement.rotationDeg,
+                placement.valid,
+            );
+        }
+    }, [pendingPlacementDefinition, pendingPlacementEquipmentDefinition, computeHvacPlacement, hvacRendererRef, mousePositionRef, objectRendererRef, placementCursorRef, setPlacementValid, setPlacementRotationDeg]);
+
+    useEffect(() => {
+        if (!pendingPlacementEquipmentDefinition || !placementCursorRef.current) return;
+        const placement = computeHvacPlacement(placementCursorRef.current, pendingPlacementEquipmentDefinition);
+        setPlacementValid(placement.valid);
+        hvacRendererRef.current?.renderPlacementPreview(
+            pendingPlacementEquipmentDefinition,
+            placement.point,
+            placement.rotationDeg,
+            placement.valid,
+        );
+    }, [pendingPlacementEquipmentDefinition, placementRotationDeg, computeHvacPlacement, hvacRendererRef, placementCursorRef, setPlacementValid]);
+
     useEffect(() => { canvasStateRef.current = canvasState; }, [canvasState, canvasStateRef]);
 
     // ── Tool Change Handler ──────────────────────────────────────────────
@@ -1107,10 +1161,11 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
         const allowSelection =
             effectiveTool === 'select' &&
             !pendingPlacementDefinition &&
+            !pendingPlacementEquipmentDefinition &&
             !openingInteractionActive;
         const pointerCursor = canvasState.isPanning
             ? 'grabbing'
-            : pendingPlacementDefinition
+            : (pendingPlacementDefinition || pendingPlacementEquipmentDefinition)
                 ? 'crosshair'
                 : getToolCursor(effectiveTool);
 
@@ -1182,7 +1237,7 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
             hideActiveSelectionChrome(canvas);
         }
         canvas.renderAll();
-    }, [tool, isSpacePressed, canvasState.isPanning, pendingPlacementDefinition, openingInteractionActive, fabricRef, marqueeSelectionRef, lastMarqueeSelectionRef, applyMarqueeFilterRef]);
+    }, [tool, isSpacePressed, canvasState.isPanning, pendingPlacementDefinition, pendingPlacementEquipmentDefinition, openingInteractionActive, fabricRef, marqueeSelectionRef, lastMarqueeSelectionRef, applyMarqueeFilterRef]);
 
     return {
         refreshDimensionLayer,

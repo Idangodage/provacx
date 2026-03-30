@@ -9,12 +9,12 @@
  * "Event Binding" useEffect block.
  */
 
-import * as fabric from 'fabric';
+import type * as fabric from 'fabric';
 import { useEffect, useRef, type Dispatch, type MutableRefObject, type RefObject, type SetStateAction } from 'react';
 
-import type { ArchitecturalObjectDefinition } from '../../../data';
+import type { AcEquipmentDefinition, ArchitecturalObjectDefinition } from '../../../data';
 import { useSmartDrawingStore } from '../../../store';
-import type { Point2D, Room, SectionLineDirection, SymbolInstance2D, Wall } from '../../../types';
+import type { HvacElement, Point2D, Room, SectionLineDirection, SymbolInstance2D, Wall } from '../../../types';
 
 import type {
     MarqueeSelectionState,
@@ -30,6 +30,7 @@ import { MM_TO_PX } from '../scale';
 import { snapPointToGrid } from '../snapping';
 import type { WallRenderer } from '../wall/WallRenderer';
 import type { ObjectRenderer } from '../object/ObjectRenderer';
+import type { HvacPlanRenderer } from '../hvac/HvacPlanRenderer';
 import type { UseOffsetToolResult } from './useOffsetTool';
 import type { UseTrimToolResult } from './useTrimTool';
 import type { UseExtendToolResult } from './useExtendTool';
@@ -52,17 +53,20 @@ export interface UseCanvasEventBindingOptions {
     isDraggingObjectRef: MutableRefObject<boolean>;
     placementCursorRef: MutableRefObject<Point2D | null>;
     objectRendererRef: RefObject<ObjectRenderer | null>;
+    hvacRendererRef: RefObject<HvacPlanRenderer | null>;
     roomRendererRef: RefObject<{ getRoomIdAtPoint: (point: Point2D) => string | null } | null>;
 
     // State values
     tool: string;
     selectedIds: string[];
     symbols: SymbolInstance2D[];
+    hvacElements: HvacElement[];
     walls: Wall[];
     objectDefinitionsById: Map<string, ArchitecturalObjectDefinition>;
     resolvedSnapToGrid: boolean;
     effectiveSnapGridSize: number;
     pendingPlacementDefinition: ArchitecturalObjectDefinition | null;
+    pendingPlacementEquipmentDefinition: AcEquipmentDefinition | null;
     sectionLineDrawingState: { isDrawing: boolean; direction: SectionLineDirection };
     wallById: Map<string, Wall>;
     roomById: Map<string, Room>;
@@ -109,6 +113,7 @@ export interface UseCanvasEventBindingOptions {
     resolveSectionLineIdFromTarget: (target: fabric.Object | null | undefined) => string | null;
     resolveRoomIdFromTarget: (target: fabric.Object | null | undefined) => string | null;
     resolveObjectIdFromTarget: (target: fabric.Object | null | undefined) => string | null;
+    resolveHvacIdFromTarget: (target: fabric.Object | null | undefined) => string | null;
     resolveOpeningIdFromTarget: (target: fabric.Object | null | undefined) => string | null;
     resolveOpeningResizeHandleFromTarget: (
         target: fabric.Object | null | undefined,
@@ -175,6 +180,18 @@ export interface UseCanvasEventBindingOptions {
         openingHeightMm: number,
         sillHeightMm: number,
     ) => Record<string, unknown>;
+    computeHvacPlacement: (
+        position: Point2D,
+        source: AcEquipmentDefinition | HvacElement,
+    ) => {
+        center: Point2D;
+        point: Point2D;
+        rotationDeg: number;
+        valid: boolean;
+        roomId: string | null;
+        wallId: string | null;
+        invalidReason: string | null;
+    };
     resolveOpeningWidthMm: (
         definition: ArchitecturalObjectDefinition,
         properties?: Record<string, unknown>,
@@ -208,8 +225,11 @@ export interface UseCanvasEventBindingOptions {
     setHoveredElement: (id: string | null) => void;
     setProcessingStatus: (message: string, loading: boolean) => void;
     updateSymbol: (id: string, updates: Partial<SymbolInstance2D>) => void;
+    updateHvacElement: (id: string, updates: Partial<HvacElement>, options?: { skipHistory?: boolean }) => void;
     placePendingObject: (cursor: Point2D) => boolean;
+    placePendingHvacElement: (cursor: Point2D) => boolean;
     onCancelObjectPlacement?: (() => void) | null;
+    onCancelEquipmentPlacement?: (() => void) | null;
 
     // Local state setters
     setOpeningInteractionActive: (active: boolean) => void;
@@ -319,10 +339,14 @@ export function useCanvasEventBinding(
         const handleWallKeyDown = (e: KeyboardEvent) => {
             const {
                 pendingPlacementDefinition,
+                pendingPlacementEquipmentDefinition,
                 onCancelObjectPlacement,
+                onCancelEquipmentPlacement,
                 objectRendererRef,
+                hvacRendererRef,
                 placementCursorRef,
                 placePendingObject,
+                placePendingHvacElement,
                 setPlacementRotationDeg,
                 tool,
                 handleWallToolKeyDown,
@@ -336,10 +360,12 @@ export function useCanvasEventBinding(
                 trimTool,
                 extendTool,
             } = latestOptionsRef.current;
-            if (pendingPlacementDefinition) {
+            if (pendingPlacementDefinition || pendingPlacementEquipmentDefinition) {
                 if (e.key === 'Escape') {
                     onCancelObjectPlacement?.();
+                    onCancelEquipmentPlacement?.();
                     objectRendererRef.current?.clearPlacementPreview();
+                    hvacRendererRef.current?.clearPlacementPreview();
                     e.preventDefault();
                     return;
                 }
@@ -350,7 +376,9 @@ export function useCanvasEventBinding(
                     return;
                 }
                 if (e.key === 'Enter' && placementCursorRef.current) {
-                    const handled = placePendingObject(placementCursorRef.current);
+                    const handled = pendingPlacementEquipmentDefinition
+                        ? placePendingHvacElement(placementCursorRef.current)
+                        : placePendingObject(placementCursorRef.current);
                     if (handled) {
                         e.preventDefault();
                         return;
@@ -441,6 +469,7 @@ export function useCanvasEventBinding(
                 filterMarqueeSelectionTargets,
                 applyMarqueeFilterRef,
                 resolveObjectIdFromTarget,
+                resolveHvacIdFromTarget,
                 resolveRoomIdFromTarget,
                 updateSelectionFromTargets,
             } = latestOptionsRef.current;
@@ -465,9 +494,13 @@ export function useCanvasEventBinding(
             const objectIds = targets
                 .map((target) => resolveObjectIdFromTarget(target))
                 .filter((id): id is string => Boolean(id));
-            if (objectIds.length > 0) {
+            const hvacIds = targets
+                .map((target) => resolveHvacIdFromTarget(target))
+                .filter((id): id is string => Boolean(id));
+            const directlySelectableIds = Array.from(new Set([...objectIds, ...hvacIds]));
+            if (directlySelectableIds.length > 0) {
                 setPersistentRoomControlId(null);
-                setSelectedIds(Array.from(new Set(objectIds)));
+                setSelectedIds(directlySelectableIds);
                 return;
             }
             const roomIds = targets
@@ -495,6 +528,7 @@ export function useCanvasEventBinding(
                 filterMarqueeSelectionTargets,
                 applyMarqueeFilterRef,
                 resolveObjectIdFromTarget,
+                resolveHvacIdFromTarget,
                 resolveRoomIdFromTarget,
                 updateSelectionFromTargets,
             } = latestOptionsRef.current;
@@ -519,9 +553,13 @@ export function useCanvasEventBinding(
             const objectIds = targets
                 .map((target) => resolveObjectIdFromTarget(target))
                 .filter((id): id is string => Boolean(id));
-            if (objectIds.length > 0) {
+            const hvacIds = targets
+                .map((target) => resolveHvacIdFromTarget(target))
+                .filter((id): id is string => Boolean(id));
+            const directlySelectableIds = Array.from(new Set([...objectIds, ...hvacIds]));
+            if (directlySelectableIds.length > 0) {
                 setPersistentRoomControlId(null);
-                setSelectedIds(Array.from(new Set(objectIds)));
+                setSelectedIds(directlySelectableIds);
                 return;
             }
             const roomIds = targets
@@ -576,6 +614,7 @@ export function useCanvasEventBinding(
                 closeSectionLineContextMenu,
                 closeObjectContextMenu,
                 pendingPlacementDefinition,
+                pendingPlacementEquipmentDefinition,
                 tool,
                 suppressFabricSelectionSyncRef,
                 openingPointerInteractionRef,
@@ -594,6 +633,7 @@ export function useCanvasEventBinding(
                 resolveOpeningIdFromTarget,
                 projectPointToSegment,
                 resolveSectionLineIdFromTarget,
+                resolveHvacIdFromTarget,
                 resolveObjectIdFromTarget,
                 getTargetMeta,
                 resolveWallIdFromTarget,
@@ -607,15 +647,13 @@ export function useCanvasEventBinding(
                 handleDimensionSelectMouseDown,
                 updateSelectionFromTarget,
                 handleSelectMouseDown,
-                resolveDimensionIdFromTarget,
-                wallIdSet,
                 selectedIds,
             } = latestOptionsRef.current;
             closeWallContextMenu();
             closeDimensionContextMenu();
             closeSectionLineContextMenu();
             closeObjectContextMenu();
-            if (pendingPlacementDefinition) return;
+            if (pendingPlacementDefinition || pendingPlacementEquipmentDefinition) return;
             if (tool !== 'select') return;
             suppressFabricSelectionSyncRef.current = 0;
             const suppressNextFabricSelectionSync = (count: number = 3) => {
@@ -794,6 +832,23 @@ export function useCanvasEventBinding(
                     setSelectedIds([objectId]);
                 }
                 setHoveredElement(objectId);
+                return;
+            }
+
+            const hvacId =
+                candidateTargets
+                    .map((target) => resolveHvacIdFromTarget(target))
+                    .find((entry): entry is string => Boolean(entry)) ??
+                resolveHvacIdFromTarget(hitTarget);
+            if (hvacId) {
+                suppressNextFabricSelectionSync();
+                setPersistentRoomControlId(null);
+                if (addToSelection) {
+                    toggleSelectedId(hvacId);
+                } else {
+                    setSelectedIds([hvacId]);
+                }
+                setHoveredElement(hvacId);
                 return;
             }
 
@@ -1042,13 +1097,16 @@ export function useCanvasEventBinding(
             const {
                 tool,
                 resolveObjectIdFromTarget,
+                resolveHvacIdFromTarget,
                 isDraggingObjectRef,
                 symbols,
+                hvacElements,
                 objectDefinitionsById,
                 resolvedSnapToGrid,
                 effectiveSnapGridSize,
                 resolveOpeningWidthMm,
                 computePlacement,
+                computeHvacPlacement,
                 handleSelectObjectMoving,
             } = latestOptionsRef.current;
             if (!event.target || tool !== 'select') return;
@@ -1118,6 +1176,36 @@ export function useCanvasEventBinding(
                 return;
             }
 
+            const hvacId = resolveHvacIdFromTarget(event.target);
+            if (hvacId) {
+                const target = event.target as fabric.Object;
+
+                if (!isDraggingObjectRef.current) {
+                    isDraggingObjectRef.current = true;
+                    if (canvas) canvas.skipTargetFind = true;
+                }
+
+                const existing = hvacElements.find((entry) => entry.id === hvacId);
+                if (!existing) {
+                    return;
+                }
+
+                const movedCenter = target.getCenterPoint();
+                const movedPositionMm = {
+                    x: movedCenter.x / MM_TO_PX,
+                    y: movedCenter.y / MM_TO_PX,
+                };
+                const placement = computeHvacPlacement(movedPositionMm, existing);
+                if (placement.valid) {
+                    target.set({
+                        left: placement.center.x * MM_TO_PX,
+                        top: placement.center.y * MM_TO_PX,
+                        angle: placement.rotationDeg,
+                    });
+                }
+                return;
+            }
+
             handleSelectObjectMoving(event.target);
         };
 
@@ -1125,17 +1213,21 @@ export function useCanvasEventBinding(
             const {
                 isDraggingObjectRef,
                 resolveObjectIdFromTarget,
+                resolveHvacIdFromTarget,
                 symbols,
+                hvacElements,
                 objectDefinitionsById,
                 resolveOpeningWidthMm,
                 resolveOpeningHeightMm,
                 resolveOpeningSillHeightMm,
                 computePlacement,
+                computeHvacPlacement,
                 fabricRef,
                 setProcessingStatus,
                 buildHostedOpeningSymbolProperties,
                 syncOpeningForSymbol,
                 updateSymbol,
+                updateHvacElement,
                 hasFurnitureCollision,
                 finalizeHandleDrag,
             } = latestOptionsRef.current;
@@ -1264,6 +1356,63 @@ export function useCanvasEventBinding(
                 ) {
                     updateSymbol(objectId, { position, rotation });
                 }
+                return;
+            }
+
+            const hvacId = resolveHvacIdFromTarget(event.target);
+            if (hvacId) {
+                const target = event.target as fabric.Object;
+                const center = target.getCenterPoint();
+                const position = {
+                    x: center.x / MM_TO_PX,
+                    y: center.y / MM_TO_PX,
+                };
+                const existing = hvacElements.find((entry) => entry.id === hvacId);
+                if (!existing) {
+                    return;
+                }
+
+                const placement = computeHvacPlacement(position, existing);
+                if (!placement.valid) {
+                    target.set({
+                        left: (existing.position.x + existing.width / 2) * MM_TO_PX,
+                        top: (existing.position.y + existing.depth / 2) * MM_TO_PX,
+                        angle: existing.rotation,
+                    });
+                    fabricRef.current?.requestRenderAll();
+                    setProcessingStatus(
+                        placement.invalidReason ?? 'Move blocked: AC equipment cannot be placed there.',
+                        false
+                    );
+                    return;
+                }
+
+                const nextPosition = placement.point;
+                const nextRotation = placement.rotationDeg;
+                const nextRoomId = placement.roomId ?? undefined;
+                const nextWallId = placement.wallId ?? undefined;
+                const changed =
+                    Math.abs(existing.position.x - nextPosition.x) > 0.01 ||
+                    Math.abs(existing.position.y - nextPosition.y) > 0.01 ||
+                    Math.abs(existing.rotation - nextRotation) > 0.01 ||
+                    existing.roomId !== nextRoomId ||
+                    existing.wallId !== nextWallId;
+
+                if (changed) {
+                    updateHvacElement(hvacId, {
+                        position: nextPosition,
+                        rotation: nextRotation,
+                        roomId: nextRoomId,
+                        wallId: nextWallId,
+                    });
+                }
+
+                target.set({
+                    left: placement.center.x * MM_TO_PX,
+                    top: placement.center.y * MM_TO_PX,
+                    angle: nextRotation,
+                });
+                fabricRef.current?.requestRenderAll();
                 return;
             }
             finalizeHandleDrag();

@@ -53,6 +53,9 @@ export { useGeometryHelpers, type UseGeometryHelpersOptions, type UseGeometryHel
 // Opening placement
 export { useOpeningPlacement, type UseOpeningPlacementOptions, type UseOpeningPlacementResult } from './useOpeningPlacement';
 
+// HVAC placement
+export { useHvacPlacement, type UseHvacPlacementOptions, type UseHvacPlacementResult, type HvacPlacementResult } from './useHvacPlacement';
+
 // Opening interaction
 export { useOpeningInteraction, type UseOpeningInteractionOptions, type UseOpeningInteractionResult } from './useOpeningInteraction';
 

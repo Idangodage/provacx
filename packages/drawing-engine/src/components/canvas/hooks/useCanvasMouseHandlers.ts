@@ -11,7 +11,7 @@
 import type * as fabric from 'fabric';
 import { useCallback } from 'react';
 
-import type { ArchitecturalObjectDefinition } from '../../../data';
+import type { AcEquipmentDefinition, ArchitecturalObjectDefinition } from '../../../data';
 import type {
     DrawingTool,
     Point2D,
@@ -23,6 +23,7 @@ import type { CanvasState, MarqueeSelectionState } from '../../DrawingCanvas.typ
 import type { DimensionRenderer } from '../dimension/DimensionRenderer';
 import type { ObjectRenderer } from '../object/ObjectRenderer';
 import type { RoomRenderer } from '../room/RoomRenderer';
+import type { HvacPlanRenderer } from '../hvac/HvacPlanRenderer';
 import type { WallRenderer } from '../wall/WallRenderer';
 import type { UseExtendToolResult } from './useExtendTool';
 import type { UseOffsetToolResult } from './useOffsetTool';
@@ -67,6 +68,7 @@ export interface UseCanvasMouseHandlersOptions {
     roomRendererRef: React.MutableRefObject<RoomRenderer | null>;
     dimensionRendererRef: React.MutableRefObject<DimensionRenderer | null>;
     objectRendererRef: React.MutableRefObject<ObjectRenderer | null>;
+    hvacRendererRef: React.MutableRefObject<HvacPlanRenderer | null>;
 
     // ── State values ──
     tool: DrawingTool;
@@ -74,6 +76,7 @@ export interface UseCanvasMouseHandlersOptions {
     effectiveSnapGridSize: number;
     isSpacePressed: boolean;
     pendingPlacementDefinition: ArchitecturalObjectDefinition | null;
+    pendingPlacementEquipmentDefinition: AcEquipmentDefinition | null;
     isWallDrawing: boolean;
     isRoomDrawing: boolean;
     roomStartCorner: Point2D | null;
@@ -90,6 +93,7 @@ export interface UseCanvasMouseHandlersOptions {
     closeSectionLineContextMenu: () => void;
     closeObjectContextMenu: () => void;
     placePendingObject: (point: Point2D) => boolean;
+    placePendingHvacElement: (point: Point2D) => boolean;
     handleWallMouseDown: (point: Point2D) => void;
     handleWallMouseMove: (point: Point2D) => void;
     handleRoomMouseDown: (point: Point2D) => void;
@@ -134,6 +138,14 @@ export interface UseCanvasMouseHandlersOptions {
         definition: ArchitecturalObjectDefinition,
         snappedWall?: { wall: Wall; positionAlongWall: number } | null
     ) => Record<string, unknown> | undefined;
+    computeHvacPlacement: (
+        point: Point2D,
+        source: AcEquipmentDefinition,
+    ) => {
+        point: Point2D;
+        rotationDeg: number;
+        valid: boolean;
+    };
     scheduleDimensionLayerRefresh: () => void;
     setViewTransform: (zoom: number, pan: Point2D) => void;
     setInteractionViewTransform: (zoom: number, pan: Point2D) => void;
@@ -153,6 +165,9 @@ export interface UseCanvasMouseHandlersOptions {
         wallId?: string;
     };
     resolveObjectIdFromTarget: (
+        target: fabric.Object | null | undefined
+    ) => string | null | undefined;
+    resolveHvacIdFromTarget: (
         target: fabric.Object | null | undefined
     ) => string | null | undefined;
     resolveRoomIdFromTarget: (
@@ -204,6 +219,7 @@ export function useCanvasMouseHandlers(
         roomRendererRef,
         dimensionRendererRef,
         objectRendererRef,
+        hvacRendererRef,
 
         // State
         tool,
@@ -211,6 +227,7 @@ export function useCanvasMouseHandlers(
         effectiveSnapGridSize,
         isSpacePressed,
         pendingPlacementDefinition,
+        pendingPlacementEquipmentDefinition,
         isWallDrawing,
         isRoomDrawing,
         roomStartCorner,
@@ -227,6 +244,7 @@ export function useCanvasMouseHandlers(
         closeSectionLineContextMenu,
         closeObjectContextMenu,
         placePendingObject,
+        placePendingHvacElement,
         handleWallMouseDown,
         handleWallMouseMove,
         handleRoomMouseDown,
@@ -243,6 +261,7 @@ export function useCanvasMouseHandlers(
         finishOpeningPointerInteraction,
         computePlacement,
         buildOpeningPreviewProperties,
+        computeHvacPlacement,
         scheduleDimensionLayerRefresh,
         setViewTransform,
         setInteractionViewTransform,
@@ -254,6 +273,7 @@ export function useCanvasMouseHandlers(
         getSelectionRect,
         getTargetMeta,
         resolveObjectIdFromTarget,
+        resolveHvacIdFromTarget,
         resolveRoomIdFromTarget,
         resolveSectionLineIdFromTarget,
         startSectionLineDrawing,
@@ -377,6 +397,15 @@ export function useCanvasMouseHandlers(
                 return;
             }
 
+            if (pendingPlacementEquipmentDefinition) {
+                const placementPoint = {
+                    x: rawPoint.x / MM_TO_PX,
+                    y: rawPoint.y / MM_TO_PX,
+                };
+                placePendingHvacElement(placementPoint);
+                return;
+            }
+
             // Handle wall tool - convert from pixels to mm
             if (tool === 'wall') {
                 const wallPoint = {
@@ -453,12 +482,14 @@ export function useCanvasMouseHandlers(
             effectiveSnapGridSize,
             isSpacePressed,
             pendingPlacementDefinition,
+            pendingPlacementEquipmentDefinition,
             queueMousePositionUpdate,
             closeWallContextMenu,
             closeDimensionContextMenu,
             closeSectionLineContextMenu,
             closeObjectContextMenu,
             placePendingObject,
+            placePendingHvacElement,
             handleWallMouseDown,
             isRoomDrawing,
             handleRoomMouseDown,
@@ -573,6 +604,26 @@ export function useCanvasMouseHandlers(
                             positionAlongWall: placement.snappedWall.positionAlongWall,
                         } : null
                     ),
+                );
+                return;
+            }
+
+            if (pendingPlacementEquipmentDefinition) {
+                const placementPoint = {
+                    x: rawPoint.x / MM_TO_PX,
+                    y: rawPoint.y / MM_TO_PX,
+                };
+                placementCursorRef.current = placementPoint;
+                const placement = computeHvacPlacement(
+                    placementPoint,
+                    pendingPlacementEquipmentDefinition
+                );
+                setPlacementValid(placement.valid);
+                hvacRendererRef.current?.renderPlacementPreview(
+                    pendingPlacementEquipmentDefinition,
+                    placement.point,
+                    placement.rotationDeg,
+                    placement.valid,
                 );
                 return;
             }
@@ -700,6 +751,16 @@ export function useCanvasMouseHandlers(
                     setHoveredElement(openingHoverId);
                     return;
                 }
+                const hoveredHvacId =
+                    candidateTargets
+                        .map((target) => resolveHvacIdFromTarget(target))
+                        .find((entry): entry is string => Boolean(entry)) ??
+                    resolveHvacIdFromTarget(hitTarget);
+                if (hoveredHvacId) {
+                    wallRenderer?.setHoveredWall(null);
+                    setHoveredElement(hoveredHvacId);
+                    return;
+                }
                 const hoveredSectionLineId =
                     candidateTargets
                         .map((target) => resolveSectionLineIdFromTarget(target))
@@ -769,7 +830,9 @@ export function useCanvasMouseHandlers(
             queueMousePositionUpdate,
             middlePanRef,
             pendingPlacementDefinition,
+            pendingPlacementEquipmentDefinition,
             computePlacement,
+            computeHvacPlacement,
             isWallDrawing,
             isRoomDrawing,
             roomStartCorner,
@@ -783,12 +846,14 @@ export function useCanvasMouseHandlers(
             updateSectionLinePreview,
             getTargetMeta,
             resolveObjectIdFromTarget,
+            resolveHvacIdFromTarget,
             resolveRoomIdFromTarget,
             resolveSectionLineIdFromTarget,
             findOpeningAtPoint,
             walls,
             viewportZoom,
             wallRenderer,
+            hvacRendererRef,
             offsetTool,
             trimTool,
             extendTool,

@@ -1,12 +1,12 @@
 /**
  * HvacPlanRenderer
  *
- * Renders HVAC elements (ducted AC units, etc.) on the Fabric.js plan canvas.
- * Ceiling-mounted items are shown with dashed outlines per architectural convention.
+ * Renders AC/HVAC equipment on the Fabric.js plan canvas.
  */
 
 import * as fabric from 'fabric';
 
+import type { AcEquipmentDefinition } from '../../../data';
 import type { HvacElement, Point2D } from '../../../types';
 import { MM_TO_PX } from '../scale';
 import {
@@ -32,8 +32,27 @@ interface SyncHvacElementsOptions {
   force?: boolean;
 }
 
+interface VisualPalette {
+  stroke: string;
+  fill: string;
+  detail: string;
+  halo: string;
+  hover: string;
+}
+
 function toCanvas(point: Point2D): Point2D {
   return { x: point.x * MM_TO_PX, y: point.y * MM_TO_PX };
+}
+
+function elementCenter(element: Pick<HvacElement, 'position' | 'width' | 'depth'>): Point2D {
+  return {
+    x: element.position.x + element.width / 2,
+    y: element.position.y + element.depth / 2,
+  };
+}
+
+function clampFontSize(widthPx: number): number {
+  return Math.max(8, Math.min(11, widthPx * 0.08));
 }
 
 export class HvacPlanRenderer {
@@ -42,6 +61,7 @@ export class HvacPlanRenderer {
   private hvacData = new Map<string, HvacElement>();
   private selectedIds = new Set<string>();
   private hoveredId: string | null = null;
+  private placementPreview: HvacGroup | null = null;
   private lastVisibilityBounds: ViewportBounds | null = null;
   private lastVisibilityZoom: number | null = null;
 
@@ -55,6 +75,55 @@ export class HvacPlanRenderer {
     typed.id = hvacElementId;
     if (name) {
       typed.name = name;
+    }
+  }
+
+  private getPalette(element: Pick<HvacElement, 'type' | 'category'>, valid: boolean): VisualPalette {
+    if (!valid) {
+      return {
+        stroke: '#B91C1C',
+        fill: 'rgba(185,28,28,0.08)',
+        detail: 'rgba(185,28,28,0.75)',
+        halo: '#DC2626',
+        hover: '#F97316',
+      };
+    }
+
+    switch (element.type) {
+      case 'outdoor-unit':
+        return {
+          stroke: '#0F766E',
+          fill: 'rgba(15,118,110,0.10)',
+          detail: 'rgba(15,118,110,0.85)',
+          halo: '#0F766E',
+          hover: '#14B8A6',
+        };
+      case 'remote-controller':
+      case 'control-panel':
+        return {
+          stroke: '#B45309',
+          fill: 'rgba(180,83,9,0.10)',
+          detail: 'rgba(146,64,14,0.85)',
+          halo: '#D97706',
+          hover: '#F59E0B',
+        };
+      case 'filter':
+      case 'accessory':
+        return {
+          stroke: '#475569',
+          fill: 'rgba(71,85,105,0.08)',
+          detail: 'rgba(71,85,105,0.78)',
+          halo: '#475569',
+          hover: '#0EA5E9',
+        };
+      default:
+        return {
+          stroke: '#1D4ED8',
+          fill: 'rgba(37,99,235,0.08)',
+          detail: 'rgba(37,99,235,0.80)',
+          halo: '#1D4ED8',
+          hover: '#059669',
+        };
     }
   }
 
@@ -130,161 +199,257 @@ export class HvacPlanRenderer {
     });
   }
 
-  renderElement(element: HvacElement): void {
-    this.removeElement(element.id);
-    this.hvacData.set(element.id, element);
-
-    const pos = toCanvas(element.position);
-    const w = element.width * MM_TO_PX;
-    const d = element.depth * MM_TO_PX;
-
+  private createBaseObjects(
+    element: Pick<HvacElement, 'id' | 'type' | 'label' | 'width' | 'depth' | 'category'>,
+    options: { valid: boolean; includeInteractionHalos: boolean },
+  ): fabric.FabricObject[] {
+    const palette = this.getPalette(element, options.valid);
+    const widthPx = Math.max(20, element.width * MM_TO_PX);
+    const depthPx = Math.max(12, element.depth * MM_TO_PX);
+    const halfW = widthPx / 2;
+    const halfD = depthPx / 2;
     const objects: fabric.FabricObject[] = [];
 
-    // Background fill (subtle blue tint for ceiling items)
-    const bgRect = new fabric.Rect({
-      left: pos.x,
-      top: pos.y,
-      width: w,
-      height: d,
-      fill: 'rgba(42,127,255,0.06)',
-      stroke: 'transparent',
-      strokeWidth: 0,
+    const background = new fabric.Rect({
+      left: 0,
+      top: 0,
+      width: widthPx,
+      height: depthPx,
+      rx: Math.min(8, depthPx * 0.18),
+      ry: Math.min(8, depthPx * 0.18),
+      originX: 'center',
+      originY: 'center',
+      fill: palette.fill,
+      stroke: palette.stroke,
+      strokeWidth: 1.4,
       selectable: false,
       evented: false,
     });
-    this.annotate(bgRect, element.id, 'hvac-bg');
-    objects.push(bgRect);
 
-    // Dashed outline (ceiling convention)
-    const outline = new fabric.Rect({
-      left: pos.x,
-      top: pos.y,
-      width: w,
-      height: d,
-      fill: 'transparent',
-      stroke: 'rgba(42,127,255,0.7)',
-      strokeWidth: 1.5,
-      strokeDashArray: [5, 3],
-      selectable: false,
-      evented: false,
-    });
-    this.annotate(outline, element.id, 'hvac-outline');
-    objects.push(outline);
-
-    // Supply/return divider line (vertical center)
-    const dividerX = pos.x + w * element.supplyZoneRatio;
-    const dividerLine = new fabric.Line(
-      [dividerX, pos.y, dividerX, pos.y + d],
-      {
-        stroke: 'rgba(42,127,255,0.5)',
-        strokeWidth: 1,
-        selectable: false,
-        evented: false,
-      }
-    );
-    this.annotate(dividerLine, element.id, 'hvac-divider');
-    objects.push(dividerLine);
-
-    // Grille lines (vertical louver pattern)
-    const grillCount = Math.max(2, Math.round(element.width / 400));
-    for (let i = 1; i < grillCount; i++) {
-      const gx = pos.x + w * (i / grillCount);
-      if (Math.abs(gx - dividerX) < 2) continue; // skip if overlaps divider
-      const grillLine = new fabric.Line(
-        [gx, pos.y, gx, pos.y + d],
-        {
-          stroke: 'rgba(42,127,255,0.25)',
-          strokeWidth: 0.8,
-          selectable: false,
-          evented: false,
-        }
-      );
-      this.annotate(grillLine, element.id, 'hvac-grill');
-      objects.push(grillLine);
+    if (element.type === 'ceiling-cassette-ac' || element.type === 'filter') {
+      background.set('strokeDashArray', [6, 4]);
     }
 
-    // Supply / Return labels
-    const fontSize = Math.max(7, Math.min(11, w * 0.06));
-    const supplyLabel = new fabric.Text('S', {
-      left: pos.x + (dividerX - pos.x) / 2,
-      top: pos.y + d / 2,
-      fontSize,
-      fill: 'rgba(42,127,255,0.8)',
-      fontFamily: 'monospace',
-      fontWeight: 'bold',
-      originX: 'center',
-      originY: 'center',
-      selectable: false,
-      evented: false,
-    });
-    this.annotate(supplyLabel, element.id, 'hvac-supply-label');
-    objects.push(supplyLabel);
+    this.annotate(background, element.id, 'hvac-body');
+    objects.push(background);
 
-    const returnLabel = new fabric.Text('R', {
-      left: dividerX + (pos.x + w - dividerX) / 2,
-      top: pos.y + d / 2,
-      fontSize,
-      fill: 'rgba(42,127,255,0.8)',
-      fontFamily: 'monospace',
-      fontWeight: 'bold',
-      originX: 'center',
-      originY: 'center',
-      selectable: false,
-      evented: false,
-    });
-    this.annotate(returnLabel, element.id, 'hvac-return-label');
-    objects.push(returnLabel);
+    switch (element.type) {
+      case 'ceiling-cassette-ac': {
+        const horizontal = new fabric.Line(
+          [-halfW * 0.82, 0, halfW * 0.82, 0],
+          {
+            stroke: palette.detail,
+            strokeWidth: 1,
+            selectable: false,
+            evented: false,
+          },
+        );
+        const vertical = new fabric.Line(
+          [0, -halfD * 0.82, 0, halfD * 0.82],
+          {
+            stroke: palette.detail,
+            strokeWidth: 1,
+            selectable: false,
+            evented: false,
+          },
+        );
+        const centerDot = new fabric.Circle({
+          left: 0,
+          top: 0,
+          radius: Math.max(2.5, Math.min(widthPx, depthPx) * 0.045),
+          originX: 'center',
+          originY: 'center',
+          fill: palette.detail,
+          selectable: false,
+          evented: false,
+        });
+        this.annotate(horizontal, element.id, 'hvac-detail');
+        this.annotate(vertical, element.id, 'hvac-detail');
+        this.annotate(centerDot, element.id, 'hvac-detail');
+        objects.push(horizontal, vertical, centerDot);
+        break;
+      }
+      case 'wall-mounted-ac':
+      case 'remote-controller':
+      case 'control-panel': {
+        const topLine = new fabric.Line(
+          [-halfW * 0.78, -halfD * 0.18, halfW * 0.78, -halfD * 0.18],
+          {
+            stroke: palette.detail,
+            strokeWidth: 1.1,
+            selectable: false,
+            evented: false,
+          },
+        );
+        const bottomLine = new fabric.Line(
+          [-halfW * 0.74, halfD * 0.18, halfW * 0.74, halfD * 0.18],
+          {
+            stroke: palette.detail,
+            strokeWidth: 0.9,
+            selectable: false,
+            evented: false,
+          },
+        );
+        this.annotate(topLine, element.id, 'hvac-detail');
+        this.annotate(bottomLine, element.id, 'hvac-detail');
+        objects.push(topLine, bottomLine);
+        break;
+      }
+      case 'ceiling-suspended-ac':
+      case 'ducted-ac': {
+        const centerLine = new fabric.Line(
+          [-halfW * 0.8, 0, halfW * 0.8, 0],
+          {
+            stroke: palette.detail,
+            strokeWidth: 1.1,
+            selectable: false,
+            evented: false,
+          },
+        );
+        this.annotate(centerLine, element.id, 'hvac-detail');
+        objects.push(centerLine);
+        for (let index = -1; index <= 1; index += 1) {
+          const grille = new fabric.Line(
+            [index * halfW * 0.45, -halfD * 0.55, index * halfW * 0.45, halfD * 0.55],
+            {
+              stroke: palette.detail,
+              strokeWidth: 0.8,
+              selectable: false,
+              evented: false,
+            },
+          );
+          this.annotate(grille, element.id, 'hvac-detail');
+          objects.push(grille);
+        }
+        break;
+      }
+      case 'outdoor-unit': {
+        const fanRing = new fabric.Circle({
+          left: 0,
+          top: 0,
+          radius: Math.min(halfW, halfD) * 0.42,
+          originX: 'center',
+          originY: 'center',
+          stroke: palette.detail,
+          strokeWidth: 1.1,
+          fill: 'transparent',
+          selectable: false,
+          evented: false,
+        });
+        const horizontal = new fabric.Line(
+          [-halfW * 0.28, 0, halfW * 0.28, 0],
+          {
+            stroke: palette.detail,
+            strokeWidth: 1,
+            selectable: false,
+            evented: false,
+          },
+        );
+        const vertical = new fabric.Line(
+          [0, -halfD * 0.28, 0, halfD * 0.28],
+          {
+            stroke: palette.detail,
+            strokeWidth: 1,
+            selectable: false,
+            evented: false,
+          },
+        );
+        this.annotate(fanRing, element.id, 'hvac-detail');
+        this.annotate(horizontal, element.id, 'hvac-detail');
+        this.annotate(vertical, element.id, 'hvac-detail');
+        objects.push(fanRing, horizontal, vertical);
+        break;
+      }
+      case 'filter':
+      case 'accessory':
+      default: {
+        for (let index = -1; index <= 1; index += 1) {
+          const grille = new fabric.Line(
+            [-halfW * 0.7, index * halfD * 0.35, halfW * 0.7, index * halfD * 0.35],
+            {
+              stroke: palette.detail,
+              strokeWidth: 0.8,
+              selectable: false,
+              evented: false,
+            },
+          );
+          this.annotate(grille, element.id, 'hvac-detail');
+          objects.push(grille);
+        }
+        break;
+      }
+    }
 
-    // Element label above
-    const nameLabel = new fabric.Text(element.label.toUpperCase(), {
-      left: pos.x + w / 2,
-      top: pos.y - 4,
-      fontSize: Math.max(7, Math.min(9, w * 0.04)),
-      fill: 'rgba(42,127,255,0.9)',
-      fontFamily: 'monospace',
-      fontWeight: '500',
+    const label = new fabric.Text(element.label.toUpperCase(), {
+      left: 0,
+      top: -halfD - 8,
       originX: 'center',
       originY: 'bottom',
+      fontSize: clampFontSize(widthPx),
+      fontFamily: 'monospace',
+      fontWeight: '500',
+      fill: palette.stroke,
       selectable: false,
       evented: false,
     });
-    this.annotate(nameLabel, element.id, 'hvac-label');
-    objects.push(nameLabel);
+    this.annotate(label, element.id, 'hvac-label');
+    objects.push(label);
 
-    // Selection halo
-    const selectionHalo = new fabric.Rect({
-      left: pos.x - 3,
-      top: pos.y - 3,
-      width: w + 6,
-      height: d + 6,
-      fill: 'transparent',
-      stroke: '#1D4ED8',
-      strokeWidth: 2,
-      selectable: false,
-      evented: false,
-      visible: this.selectedIds.has(element.id),
-    });
-    this.annotate(selectionHalo, element.id, 'hvac-selection');
-    objects.push(selectionHalo);
+    if (options.includeInteractionHalos) {
+      const selectionHalo = new fabric.Rect({
+        left: 0,
+        top: 0,
+        width: widthPx + 8,
+        height: depthPx + 8,
+        originX: 'center',
+        originY: 'center',
+        fill: 'transparent',
+        stroke: palette.halo,
+        strokeWidth: 2,
+        selectable: false,
+        evented: false,
+        visible: this.selectedIds.has(element.id),
+      });
+      const hoverHalo = new fabric.Rect({
+        left: 0,
+        top: 0,
+        width: widthPx + 6,
+        height: depthPx + 6,
+        originX: 'center',
+        originY: 'center',
+        fill: 'transparent',
+        stroke: palette.hover,
+        strokeWidth: 1.5,
+        selectable: false,
+        evented: false,
+        visible: this.hoveredId === element.id && !this.selectedIds.has(element.id),
+      });
+      this.annotate(selectionHalo, element.id, 'hvac-selection');
+      this.annotate(hoverHalo, element.id, 'hvac-hover');
+      objects.push(selectionHalo, hoverHalo);
+    }
 
-    const hoverHalo = new fabric.Rect({
-      left: pos.x - 2,
-      top: pos.y - 2,
-      width: w + 4,
-      height: d + 4,
-      fill: 'transparent',
-      stroke: '#059669',
-      strokeWidth: 1.5,
-      selectable: false,
-      evented: false,
-      visible: this.hoveredId === element.id && !this.selectedIds.has(element.id),
+    return objects;
+  }
+
+  private buildGroup(
+    element: Pick<HvacElement, 'id' | 'type' | 'label' | 'position' | 'rotation' | 'width' | 'depth' | 'category'>,
+    options: { valid?: boolean; selectable?: boolean; evented?: boolean; includeInteractionHalos?: boolean },
+  ): HvacGroup {
+    const center = toCanvas(elementCenter(element));
+    const objects = this.createBaseObjects(element, {
+      valid: options.valid ?? true,
+      includeInteractionHalos: options.includeInteractionHalos ?? true,
     });
-    this.annotate(hoverHalo, element.id, 'hvac-hover');
-    objects.push(hoverHalo);
 
     const group = new fabric.Group(objects, {
-      selectable: true,
-      evented: true,
+      left: center.x,
+      top: center.y,
+      angle: element.rotation ?? 0,
+      originX: 'center',
+      originY: 'center',
+      selectable: options.selectable ?? true,
+      evented: options.evented ?? true,
       subTargetCheck: true,
       hasControls: false,
       hasBorders: false,
@@ -294,9 +459,74 @@ export class HvacPlanRenderer {
     group.id = element.id;
     group.hvacElementId = element.id;
     group.name = `hvac-${element.id}`;
+    return group;
+  }
+
+  renderElement(element: HvacElement): void {
+    this.removeElement(element.id);
+    this.hvacData.set(element.id, element);
+
+    const group = this.buildGroup(element, {
+      valid: true,
+      selectable: true,
+      evented: true,
+      includeInteractionHalos: true,
+    });
 
     this.canvas.add(group);
     this.groups.set(element.id, group);
+  }
+
+  renderPlacementPreview(
+    definition: AcEquipmentDefinition,
+    position: Point2D,
+    rotationDeg: number,
+    valid: boolean,
+  ): void {
+    this.clearPlacementPreview();
+
+    const previewElement: HvacElement = {
+      id: '__hvac-placement-preview__',
+      type: definition.type,
+      category: definition.equipmentCategory,
+      subtype: definition.subtype,
+      modelLabel: definition.modelLabel,
+      position,
+      rotation: rotationDeg,
+      width: definition.widthMm,
+      depth: definition.depthMm,
+      height: definition.heightMm,
+      elevation: definition.elevationMm,
+      mountType: definition.mountType,
+      label: definition.name,
+      supplyZoneRatio: definition.supplyZoneRatio ?? 0.5,
+      properties: {},
+    };
+
+    const group = this.buildGroup(previewElement, {
+      valid,
+      selectable: false,
+      evented: false,
+      includeInteractionHalos: false,
+    });
+    group.set({
+      opacity: valid ? 0.86 : 0.92,
+      excludeFromExport: true,
+    });
+
+    this.canvas.add(group);
+    this.canvas.bringObjectToFront(group);
+    this.placementPreview = group;
+    this.canvas.requestRenderAll();
+  }
+
+  clearPlacementPreview(): void {
+    if (!this.placementPreview) {
+      return;
+    }
+    this.canvas.remove(this.placementPreview);
+    this.placementPreview = null;
+    this.canvas.requestRenderAll();
   }
 
   renderAll(elements: HvacElement[]): void {
@@ -331,6 +561,9 @@ export class HvacPlanRenderer {
 
     this.refreshViewportVisibility(true);
     this.syncHvacVisualState();
+    if (this.placementPreview) {
+      this.canvas.bringObjectToFront(this.placementPreview);
+    }
     this.canvas.requestRenderAll();
   }
 
@@ -347,6 +580,7 @@ export class HvacPlanRenderer {
   }
 
   dispose(): void {
+    this.clearPlacementPreview();
     this.groups.forEach((group) => this.canvas.remove(group));
     this.groups.clear();
     this.hvacData.clear();

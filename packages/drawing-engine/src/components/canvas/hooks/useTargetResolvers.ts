@@ -6,7 +6,7 @@
  * so they are stable references.
  */
 
-import * as fabric from 'fabric';
+import type * as fabric from 'fabric';
 import { useCallback } from 'react';
 
 import type { OpeningResizeHandleHit } from '../../DrawingCanvas.types';
@@ -17,6 +17,7 @@ export interface UseTargetResolversResult {
     resolveDimensionIdFromTarget: (target: fabric.Object | undefined | null) => string | null;
     resolveSectionLineIdFromTarget: (target: fabric.Object | undefined | null) => string | null;
     resolveObjectIdFromTarget: (target: fabric.Object | undefined | null) => string | null;
+    resolveHvacIdFromTarget: (target: fabric.Object | undefined | null) => string | null;
     resolveOpeningIdFromTarget: (target: fabric.Object | undefined | null) => string | null;
     resolveOpeningResizeHandleFromTarget: (target: fabric.Object | undefined | null) => OpeningResizeHandleHit | null;
 }
@@ -140,6 +141,29 @@ export function useTargetResolvers(): UseTargetResolversResult {
         []
     );
 
+    const resolveHvacIdFromTarget = useCallback(
+        (target: fabric.Object | undefined | null): string | null => {
+            if (!target) return null;
+
+            const typedTarget = target as fabric.Object & {
+                id?: string;
+                hvacElementId?: string;
+                name?: string;
+                group?: fabric.Group & { id?: string; hvacElementId?: string; name?: string };
+            };
+
+            if (typedTarget.hvacElementId) return typedTarget.hvacElementId;
+            if (typedTarget.id && typedTarget.name?.startsWith('hvac-')) return typedTarget.id;
+
+            const parent = typedTarget.group;
+            if (parent?.hvacElementId) return parent.hvacElementId;
+            if (parent?.id && parent?.name?.startsWith('hvac-')) return parent.id;
+
+            return null;
+        },
+        []
+    );
+
     const resolveOpeningIdFromTarget = useCallback(
         (target: fabric.Object | undefined | null): string | null => {
             if (!target) return null;
@@ -204,6 +228,7 @@ export function useTargetResolvers(): UseTargetResolversResult {
         resolveDimensionIdFromTarget,
         resolveSectionLineIdFromTarget,
         resolveObjectIdFromTarget,
+        resolveHvacIdFromTarget,
         resolveOpeningIdFromTarget,
         resolveOpeningResizeHandleFromTarget,
     };

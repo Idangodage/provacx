@@ -35,6 +35,15 @@ type SolidPalette = {
   opacity?: number;
 };
 
+type Hvac3DPalette = {
+  body: string;
+  trim: string;
+  grille: string;
+  metal: string;
+  accent: string;
+  label: string;
+};
+
 type WallBand = {
   polygon: Point2D[][];
   baseElevation: number;
@@ -707,6 +716,766 @@ function createBoxMesh(
   return mesh;
 }
 
+function createLocalBoxMesh(
+  width: number,
+  depth: number,
+  height: number,
+  color: string,
+  position: THREE.Vector3,
+  options?: { opacity?: number; renderOrder?: number },
+): THREE.Mesh {
+  const opacity = options?.opacity ?? 1;
+  const isTransparent = opacity < 1;
+  const geometry = new THREE.BoxGeometry(width, depth, height);
+  const material = getSharedBoxMaterial(color, opacity, isTransparent);
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.copy(position);
+  mesh.renderOrder = options?.renderOrder ?? (isTransparent ? 24 : 16);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+function createLocalCylinderMesh(
+  radiusTop: number,
+  radiusBottom: number,
+  height: number,
+  color: string,
+  position: THREE.Vector3,
+  options?: {
+    radialSegments?: number;
+    rotation?: THREE.Euler;
+    opacity?: number;
+    renderOrder?: number;
+    openEnded?: boolean;
+  },
+): THREE.Mesh {
+  const opacity = options?.opacity ?? 1;
+  const isTransparent = opacity < 1;
+  const geometry = new THREE.CylinderGeometry(
+    radiusTop,
+    radiusBottom,
+    height,
+    options?.radialSegments ?? 24,
+    1,
+    options?.openEnded ?? false,
+  );
+  const material = getSharedBoxMaterial(color, opacity, isTransparent);
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.copy(position);
+  if (options?.rotation) {
+    mesh.rotation.copy(options.rotation);
+  }
+  mesh.renderOrder = options?.renderOrder ?? (isTransparent ? 24 : 16);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+function hvacPaletteForElement(element: HvacElement): Hvac3DPalette {
+  switch (element.type) {
+    case 'outdoor-unit':
+      return {
+        body: '#7d8b99',
+        trim: '#c8d1d9',
+        grille: '#3f4b57',
+        metal: '#5d6874',
+        accent: '#0f766e',
+        label: '#134e4a',
+      };
+    case 'remote-controller':
+    case 'control-panel':
+      return {
+        body: '#f2f5f7',
+        trim: '#d7dee4',
+        grille: '#475569',
+        metal: '#94a3b8',
+        accent: '#b45309',
+        label: '#92400e',
+      };
+    case 'filter':
+    case 'accessory':
+      return {
+        body: '#eef2f4',
+        trim: '#dbe3e8',
+        grille: '#64748b',
+        metal: '#94a3b8',
+        accent: '#475569',
+        label: '#334155',
+      };
+    default:
+      return {
+        body: '#f6f7f8',
+        trim: '#dbe4ec',
+        grille: '#7a8795',
+        metal: '#aab6c2',
+        accent: '#2f67c8',
+        label: '#1e3a8a',
+      };
+  }
+}
+
+function addVentSlats(
+  group: THREE.Group,
+  options: {
+    count: number;
+    width: number;
+    depth: number;
+    height: number;
+    startX?: number;
+    startY?: number;
+    startZ?: number;
+    stepX?: number;
+    stepY?: number;
+    stepZ?: number;
+    color: string;
+    rotation?: THREE.Euler;
+  },
+): void {
+  const {
+    count,
+    width,
+    depth,
+    height,
+    startX = 0,
+    startY = 0,
+    startZ = 0,
+    stepX = 0,
+    stepY = 0,
+    stepZ = 0,
+    color,
+    rotation,
+  } = options;
+
+  for (let index = 0; index < count; index += 1) {
+    const slat = createLocalBoxMesh(
+      width,
+      depth,
+      height,
+      color,
+      new THREE.Vector3(
+        startX + stepX * index,
+        startY + stepY * index,
+        startZ + stepZ * index,
+      ),
+      { renderOrder: 18 },
+    );
+    if (rotation) {
+      slat.rotation.copy(rotation);
+    }
+    group.add(slat);
+  }
+}
+
+function createHvacEquipmentMesh(element: HvacElement): THREE.Group {
+  const width = Math.max(60, element.width);
+  const depth = Math.max(60, element.depth);
+  const height = Math.max(80, element.height);
+  const palette = hvacPaletteForElement(element);
+  const group = new THREE.Group();
+  group.position.set(
+    element.position.x + width / 2,
+    element.position.y + depth / 2,
+    element.elevation,
+  );
+  group.rotation.z = THREE.MathUtils.degToRad(element.rotation);
+  group.name = `hvac-${element.id}`;
+
+  const bodyHeight = Math.max(height * 0.68, Math.min(height, 120));
+
+  switch (element.type) {
+    case 'wall-mounted-ac':
+    case 'split-ac': {
+      const mainHeight = Math.max(bodyHeight, height * 0.82);
+      group.add(
+        createLocalBoxMesh(
+          width * 0.98,
+          depth * 0.74,
+          mainHeight,
+          palette.body,
+          new THREE.Vector3(0, 0, mainHeight / 2),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          width * 0.92,
+          depth * 0.24,
+          mainHeight * 0.52,
+          palette.trim,
+          new THREE.Vector3(0, depth * 0.22, mainHeight * 0.56),
+        ),
+      );
+      addVentSlats(group, {
+        count: 5,
+        width: width * 0.74,
+        depth: 4,
+        height: 5,
+        startX: 0,
+        startY: depth * 0.27,
+        startZ: mainHeight * 0.14,
+        stepZ: mainHeight * 0.065,
+        color: palette.grille,
+      });
+      group.add(
+        createLocalBoxMesh(
+          width * 0.78,
+          6,
+          10,
+          palette.accent,
+          new THREE.Vector3(0, -depth * 0.1, mainHeight * 0.78),
+          { renderOrder: 18 },
+        ),
+      );
+      break;
+    }
+    case 'ceiling-cassette-ac': {
+      const panelHeight = Math.max(28, Math.min(44, height * 0.16));
+      const cassetteBodyHeight = Math.max(70, height - panelHeight * 0.4);
+      const bodyBaseZ = panelHeight * 0.55;
+      const grillePlateHeight = Math.max(5, panelHeight * 0.16);
+      const slotHeight = Math.max(5, panelHeight * 0.12);
+
+      group.add(
+        createLocalBoxMesh(
+          width * 0.8,
+          depth * 0.8,
+          cassetteBodyHeight,
+          '#cfd6dc',
+          new THREE.Vector3(0, 0, bodyBaseZ + cassetteBodyHeight / 2),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          width * 0.74,
+          depth * 0.74,
+          Math.max(10, cassetteBodyHeight * 0.08),
+          '#e5eaee',
+          new THREE.Vector3(0, 0, bodyBaseZ + cassetteBodyHeight * 0.92),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          width,
+          depth,
+          panelHeight,
+          '#fbfcfd',
+          new THREE.Vector3(0, 0, panelHeight / 2),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          width * 0.92,
+          depth * 0.92,
+          Math.max(10, panelHeight * 0.38),
+          '#eef3f7',
+          new THREE.Vector3(0, 0, panelHeight * 0.48),
+        ),
+      );
+      addVentSlats(group, {
+        count: 7,
+        width: width * 0.46,
+        depth: 2,
+        height: 2,
+        startX: 0,
+        startY: -depth * 0.18,
+        startZ: panelHeight * 0.6,
+        stepY: depth * 0.06,
+        color: '#97a3af',
+      });
+      addVentSlats(group, {
+        count: 7,
+        width: 2,
+        depth: depth * 0.46,
+        height: 2,
+        startX: -width * 0.18,
+        startY: 0,
+        startZ: panelHeight * 0.62,
+        stepX: width * 0.06,
+        color: '#a4afb8',
+      });
+      group.add(
+        createLocalBoxMesh(
+          width * 0.54,
+          depth * 0.54,
+          grillePlateHeight,
+          '#d8e0e6',
+          new THREE.Vector3(0, 0, panelHeight * 0.56),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          width * 0.6,
+          depth * 0.08,
+          slotHeight,
+          '#1f2430',
+          new THREE.Vector3(0, -depth * 0.32, panelHeight * 0.62),
+          { renderOrder: 18 },
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          width * 0.6,
+          depth * 0.08,
+          slotHeight,
+          '#1f2430',
+          new THREE.Vector3(0, depth * 0.32, panelHeight * 0.62),
+          { renderOrder: 18 },
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          width * 0.08,
+          depth * 0.6,
+          slotHeight,
+          '#1f2430',
+          new THREE.Vector3(-width * 0.32, 0, panelHeight * 0.62),
+          { renderOrder: 18 },
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          width * 0.08,
+          depth * 0.6,
+          slotHeight,
+          '#1f2430',
+          new THREE.Vector3(width * 0.32, 0, panelHeight * 0.62),
+          { renderOrder: 18 },
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          width * 0.1,
+          depth * 0.02,
+          Math.max(4, panelHeight * 0.08),
+          palette.accent,
+          new THREE.Vector3(0, depth * 0.41, panelHeight * 0.68),
+          { renderOrder: 18 },
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          width * 0.16,
+          depth * 0.04,
+          Math.max(4, panelHeight * 0.08),
+          '#eef3f7',
+          new THREE.Vector3(0, -depth * 0.43, panelHeight * 0.58),
+          { renderOrder: 18 },
+        ),
+      );
+      break;
+    }
+    case 'ceiling-suspended-ac': {
+      const mainHeight = Math.max(bodyHeight, height * 0.8);
+      group.add(
+        createLocalBoxMesh(
+          width,
+          depth * 0.9,
+          mainHeight,
+          palette.body,
+          new THREE.Vector3(0, 0, mainHeight / 2),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          width * 0.94,
+          depth * 0.18,
+          mainHeight * 0.28,
+          palette.trim,
+          new THREE.Vector3(0, depth * 0.28, mainHeight * 0.28),
+        ),
+      );
+      addVentSlats(group, {
+        count: 6,
+        width: width * 0.12,
+        depth: 5,
+        height: 10,
+        startX: -width * 0.3,
+        startY: depth * 0.31,
+        startZ: mainHeight * 0.27,
+        stepX: width * 0.12,
+        color: palette.grille,
+      });
+      group.add(
+        createLocalBoxMesh(
+          width * 0.16,
+          depth * 0.12,
+          mainHeight * 0.18,
+          palette.metal,
+          new THREE.Vector3(-width * 0.34, -depth * 0.18, mainHeight * 0.88),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          width * 0.16,
+          depth * 0.12,
+          mainHeight * 0.18,
+          palette.metal,
+          new THREE.Vector3(width * 0.34, -depth * 0.18, mainHeight * 0.88),
+        ),
+      );
+      break;
+    }
+    case 'ducted-ac': {
+      const trayHeight = Math.max(16, Math.min(28, height * 0.12));
+      const mainHeight = Math.max(90, height - trayHeight * 0.3);
+      const housingWidth = width * 0.74;
+      const housingDepth = depth * 0.72;
+      const housingCenterX = -width * 0.12;
+      const serviceWidth = width * 0.22;
+      const serviceDepth = depth * 0.62;
+      const serviceHeight = mainHeight * 0.58;
+      const serviceCenterX = width * 0.34;
+      const serviceCenterZ = trayHeight + mainHeight * 0.62;
+      const intakeWidth = housingWidth * 0.62;
+      const intakeHeight = mainHeight * 0.36;
+      const intakeCenterX = -width * 0.17;
+      const intakeFrameY = -housingDepth * 0.45;
+      const intakeCenterZ = trayHeight + mainHeight * 0.54;
+
+      group.add(
+        createLocalBoxMesh(
+          width * 0.96,
+          depth * 0.8,
+          trayHeight,
+          '#2e3338',
+          new THREE.Vector3(0, 0, trayHeight / 2),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          housingWidth,
+          housingDepth,
+          mainHeight,
+          '#d1d7dc',
+          new THREE.Vector3(housingCenterX, 0, trayHeight + mainHeight / 2),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          housingWidth * 0.96,
+          housingDepth * 0.84,
+          Math.max(10, mainHeight * 0.1),
+          '#edf1f4',
+          new THREE.Vector3(housingCenterX, 0, trayHeight + mainHeight * 0.92),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          serviceWidth,
+          serviceDepth,
+          serviceHeight,
+          '#d9e0e5',
+          new THREE.Vector3(serviceCenterX, depth * 0.04, serviceCenterZ),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          serviceWidth * 0.64,
+          serviceDepth * 0.34,
+          serviceHeight * 0.28,
+          '#2d3742',
+          new THREE.Vector3(serviceCenterX - serviceWidth * 0.08, depth * 0.12, serviceCenterZ - serviceHeight * 0.1),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          serviceWidth * 0.18,
+          serviceDepth * 0.56,
+          serviceHeight * 0.78,
+          '#343b43',
+          new THREE.Vector3(serviceCenterX - serviceWidth * 0.48, depth * 0.04, serviceCenterZ),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          intakeWidth,
+          8,
+          12,
+          '#c6ced6',
+          new THREE.Vector3(intakeCenterX, intakeFrameY, intakeCenterZ + intakeHeight / 2),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          intakeWidth,
+          8,
+          12,
+          '#c6ced6',
+          new THREE.Vector3(intakeCenterX, intakeFrameY, intakeCenterZ - intakeHeight / 2),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          12,
+          8,
+          intakeHeight,
+          '#c6ced6',
+          new THREE.Vector3(intakeCenterX - intakeWidth / 2, intakeFrameY, intakeCenterZ),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          12,
+          8,
+          intakeHeight,
+          '#c6ced6',
+          new THREE.Vector3(intakeCenterX + intakeWidth / 2, intakeFrameY, intakeCenterZ),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          intakeWidth * 0.9,
+          depth * 0.12,
+          intakeHeight * 0.8,
+          '#2b3238',
+          new THREE.Vector3(intakeCenterX, intakeFrameY + depth * 0.05, intakeCenterZ),
+        ),
+      );
+      for (let slatIndex = 0; slatIndex < 6; slatIndex += 1) {
+        const slat = createLocalBoxMesh(
+          intakeWidth * 0.86,
+          6,
+          8,
+          '#aab4bc',
+          new THREE.Vector3(
+            intakeCenterX,
+            intakeFrameY + depth * 0.012,
+            intakeCenterZ - intakeHeight * 0.28 + slatIndex * (intakeHeight * 0.11),
+          ),
+          { renderOrder: 18 },
+        );
+        slat.rotation.x = -0.36;
+        group.add(slat);
+      }
+      group.add(
+        createLocalCylinderMesh(
+          Math.max(10, serviceWidth * 0.09),
+          Math.max(10, serviceWidth * 0.09),
+          Math.max(40, serviceWidth * 0.42),
+          '#c68b4e',
+          new THREE.Vector3(
+            serviceCenterX + serviceWidth * 0.36,
+            -serviceDepth * 0.04,
+            serviceCenterZ + serviceHeight * 0.2,
+          ),
+          {
+            rotation: new THREE.Euler(0, 0, Math.PI / 2),
+            radialSegments: 20,
+          },
+        ),
+      );
+      group.add(
+        createLocalCylinderMesh(
+          Math.max(8, serviceWidth * 0.07),
+          Math.max(8, serviceWidth * 0.07),
+          Math.max(34, serviceWidth * 0.36),
+          '#d3a25f',
+          new THREE.Vector3(
+            serviceCenterX + serviceWidth * 0.34,
+            serviceDepth * 0.08,
+            serviceCenterZ + serviceHeight * 0.11,
+          ),
+          {
+            rotation: new THREE.Euler(0, 0, Math.PI / 2),
+            radialSegments: 20,
+          },
+        ),
+      );
+      group.add(
+        createLocalCylinderMesh(
+          Math.max(7, serviceWidth * 0.06),
+          Math.max(7, serviceWidth * 0.06),
+          Math.max(34, serviceWidth * 0.34),
+          '#8ec5ea',
+          new THREE.Vector3(
+            serviceCenterX + serviceWidth * 0.32,
+            serviceDepth * 0.18,
+            serviceCenterZ + serviceHeight * 0.28,
+          ),
+          {
+            rotation: new THREE.Euler(0, 0, Math.PI / 2),
+            radialSegments: 18,
+          },
+        ),
+      );
+      group.add(
+        createLocalCylinderMesh(
+          Math.max(10, serviceWidth * 0.08),
+          Math.max(10, serviceWidth * 0.08),
+          Math.max(20, serviceWidth * 0.18),
+          '#111827',
+          new THREE.Vector3(
+            serviceCenterX + serviceWidth * 0.28,
+            serviceDepth * 0.22,
+            serviceCenterZ - serviceHeight * 0.18,
+          ),
+          {
+            rotation: new THREE.Euler(0, 0, Math.PI / 2),
+            radialSegments: 18,
+          },
+        ),
+      );
+      break;
+    }
+    case 'outdoor-unit': {
+      const footHeight = Math.max(35, height * 0.12);
+      const cabinetHeight = Math.max(120, height - footHeight);
+      group.add(
+        createLocalBoxMesh(
+          width * 0.14,
+          depth * 0.7,
+          footHeight,
+          palette.metal,
+          new THREE.Vector3(-width * 0.26, 0, footHeight / 2),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          width * 0.14,
+          depth * 0.7,
+          footHeight,
+          palette.metal,
+          new THREE.Vector3(width * 0.26, 0, footHeight / 2),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          width,
+          depth,
+          cabinetHeight,
+          palette.body,
+          new THREE.Vector3(0, 0, footHeight + cabinetHeight / 2),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          width * 0.9,
+          depth * 0.08,
+          cabinetHeight * 0.82,
+          palette.trim,
+          new THREE.Vector3(0, depth * 0.47, footHeight + cabinetHeight * 0.52),
+        ),
+      );
+      const fanRadius = Math.min(width, cabinetHeight) * 0.23;
+      group.add(
+        createLocalCylinderMesh(
+          fanRadius,
+          fanRadius,
+          Math.max(10, depth * 0.08),
+          palette.grille,
+          new THREE.Vector3(0, depth * 0.5, footHeight + cabinetHeight * 0.55),
+          {
+            radialSegments: 28,
+          },
+        ),
+      );
+      group.add(
+        createLocalCylinderMesh(
+          fanRadius * 0.78,
+          fanRadius * 0.78,
+          Math.max(14, depth * 0.1),
+          palette.trim,
+          new THREE.Vector3(0, depth * 0.49, footHeight + cabinetHeight * 0.55),
+          {
+            radialSegments: 28,
+            openEnded: false,
+          },
+        ),
+      );
+      for (let bladeIndex = 0; bladeIndex < 3; bladeIndex += 1) {
+        const blade = createLocalBoxMesh(
+          fanRadius * 1.2,
+          Math.max(5, depth * 0.04),
+          Math.max(16, fanRadius * 0.16),
+          palette.grille,
+          new THREE.Vector3(0, depth * 0.5, footHeight + cabinetHeight * 0.55),
+          { renderOrder: 18 },
+        );
+        blade.rotation.y = Math.PI / 2;
+        blade.rotation.z = (Math.PI / 3) * bladeIndex;
+        group.add(blade);
+      }
+      group.add(
+        createLocalCylinderMesh(
+          fanRadius * 0.16,
+          fanRadius * 0.16,
+          Math.max(18, depth * 0.12),
+          palette.accent,
+          new THREE.Vector3(0, depth * 0.51, footHeight + cabinetHeight * 0.55),
+          { radialSegments: 18 },
+        ),
+      );
+      break;
+    }
+    case 'remote-controller':
+    case 'control-panel': {
+      const panelHeight = Math.max(80, height);
+      group.add(
+        createLocalBoxMesh(
+          width,
+          depth * 0.78,
+          panelHeight,
+          palette.body,
+          new THREE.Vector3(0, 0, panelHeight / 2),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          width * 0.74,
+          depth * 0.12,
+          panelHeight * 0.44,
+          '#202733',
+          new THREE.Vector3(0, depth * 0.24, panelHeight * 0.62),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          width * 0.36,
+          depth * 0.08,
+          panelHeight * 0.1,
+          palette.accent,
+          new THREE.Vector3(0, depth * 0.29, panelHeight * 0.22),
+        ),
+      );
+      break;
+    }
+    case 'filter':
+    case 'accessory':
+    default: {
+      group.add(
+        createLocalBoxMesh(
+          width,
+          depth,
+          bodyHeight,
+          palette.body,
+          new THREE.Vector3(0, 0, bodyHeight / 2),
+        ),
+      );
+      addVentSlats(group, {
+        count: 5,
+        width: width * 0.82,
+        depth: 4,
+        height: 6,
+        startX: 0,
+        startY: 0,
+        startZ: bodyHeight * 0.28,
+        stepZ: bodyHeight * 0.11,
+        color: palette.grille,
+      });
+      break;
+    }
+  }
+
+  group.traverse((child) => {
+    if (child instanceof THREE.Mesh) {
+      child.castShadow = true;
+      child.receiveShadow = true;
+    }
+  });
+
+  return group;
+}
+
 function createDetailedFurnitureMesh(
   instance: SymbolInstance2D,
   definition: ArchitecturalObjectDefinition,
@@ -1318,20 +2087,32 @@ export function IsometricViewCanvas({
     });
 
     hvacElements.forEach((element) => {
-      const center = new THREE.Vector3(
-        element.position.x + element.width / 2,
-        element.position.y + element.depth / 2,
-        element.elevation + Math.max(80, element.height) / 2
-      );
-      const mesh = createBoxMesh(
-        center,
-        Math.max(60, element.width),
-        Math.max(60, element.depth),
-        Math.max(80, element.height),
-        solidPalette('hvac'),
-        0
-      );
+      const mesh = createHvacEquipmentMesh(element);
+      mesh.updateMatrixWorld(true);
+      const meshBounds = new THREE.Box3().setFromObject(mesh);
+      const labelColor = hvacPaletteForElement(element).label;
       geometryRoot.add(mesh);
+
+      if (!meshBounds.isEmpty()) {
+        lowestElevation = Math.min(lowestElevation, meshBounds.min.z);
+        planPoints.push(
+          { x: meshBounds.min.x, y: meshBounds.min.y },
+          { x: meshBounds.max.x, y: meshBounds.min.y },
+          { x: meshBounds.max.x, y: meshBounds.max.y },
+          { x: meshBounds.min.x, y: meshBounds.max.y }
+        );
+        labelAnchors.push({
+          key: `hvac-${element.id}`,
+          position: new THREE.Vector3(
+            (meshBounds.min.x + meshBounds.max.x) / 2,
+            (meshBounds.min.y + meshBounds.max.y) / 2,
+            meshBounds.max.z + 30
+          ),
+          text: element.label || element.type,
+          color: labelColor,
+        });
+        return;
+      }
 
       lowestElevation = Math.min(lowestElevation, element.elevation);
       planPoints.push(
@@ -1348,7 +2129,7 @@ export function IsometricViewCanvas({
           element.elevation + Math.max(80, element.height) + 30
         ),
         text: element.label || element.type,
-        color: '#1e3a8a',
+        color: labelColor,
       });
     });
 

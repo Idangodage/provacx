@@ -31,6 +31,7 @@ import {
   ArrowUpFromLine,
   ArrowRightFromLine,
   Box,
+  Fan,
 } from 'lucide-react';
 import React, { Suspense, useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { shallow } from 'zustand/shallow';
@@ -44,10 +45,13 @@ import {
   SymbolPalette,
   ZoomIndicator,
   CoordinatesDisplay,
+  AcEquipmentPanel,
 } from './components';
 import { ElevationViewCanvas } from './components/canvas/elevation';
 import {
+  DEFAULT_AC_EQUIPMENT_LIBRARY,
   DEFAULT_ARCHITECTURAL_OBJECT_LIBRARY,
+  type AcEquipmentDefinition,
   type ArchitecturalObjectDefinition,
 } from './data';
 import type { SymbolDefinition } from './data/symbol-library';
@@ -483,9 +487,11 @@ export function SmartDrawingEditor({
   const [maxLeftWidth, setMaxLeftWidth] = useState(320);
   const [leftPanelWidth, setLeftPanelWidth] = useState(248);
   const [isResizingLeft, setIsResizingLeft] = useState(false);
+  const [leftPanelMode, setLeftPanelMode] = useState<'building' | 'ac-equipment'>('building');
   const [leftPanelTab, setLeftPanelTab] = useState<'symbols' | 'objects'>('symbols');
   const [layoutReady, setLayoutReady] = useState(false);
   const [pendingPlacementObjectId, setPendingPlacementObjectId] = useState<string | null>(null);
+  const [pendingPlacementEquipmentId, setPendingPlacementEquipmentId] = useState<string | null>(null);
   const [customLibraryObjects, setCustomLibraryObjects] = useState<ArchitecturalObjectDefinition[]>([]);
   const [recentObjectUsage, setRecentObjectUsage] = useState<Record<string, number>>({});
   const compactThreshold = Math.max(minLeftWidth + 28, Math.min(168, maxLeftWidth - 32));
@@ -590,7 +596,23 @@ export function SmartDrawingEditor({
   );
 
   // Calculate total element count
-  const elementCount = sketches.length + annotations.length + dimensions.length + symbols.length + walls.length + rooms.length;
+  const elementCount = sketches.length + annotations.length + dimensions.length + symbols.length + walls.length + rooms.length + hvacElements.length;
+  const placedEquipmentCountByType = useMemo(() => {
+    return hvacElements.reduce<Record<string, number>>((acc, element) => {
+      acc[element.type] = (acc[element.type] ?? 0) + 1;
+      return acc;
+    }, {});
+  }, [hvacElements]);
+  const roomEquipmentCounts = useMemo(() => {
+    return rooms
+      .map((room) => ({
+        roomId: room.id,
+        roomName: room.name,
+        count: hvacElements.filter((element) => element.roomId === room.id).length,
+      }))
+      .filter((entry) => entry.count > 0)
+      .sort((left, right) => right.count - left.count || left.roomName.localeCompare(right.roomName));
+  }, [hvacElements, rooms]);
 
   const areaSummary = useMemo(() => {
     return { totalFloorArea: 0, usableArea: 0, circulationArea: 0 };
@@ -616,18 +638,27 @@ export function SmartDrawingEditor({
     }, 300);
 
     return () => window.clearTimeout(timeoutId);
-  }, [sketches, dimensions, symbols, walls, rooms, exportData, onDataChange]);
+  }, [sketches, dimensions, symbols, walls, rooms, hvacElements, exportData, onDataChange]);
 
   useEffect(() => {
     if (!onSave || saveState === 'saving' || saveState === 'idle') return;
     setSaveState('idle');
-  }, [sketches, dimensions, walls, rooms, onSave, saveState]);
+  }, [sketches, dimensions, walls, rooms, hvacElements, onSave, saveState]);
 
   useEffect(() => {
     if (activeTool !== 'select' && pendingPlacementObjectId) {
       setPendingPlacementObjectId(null);
     }
-  }, [activeTool, pendingPlacementObjectId]);
+    if (activeTool !== 'select' && pendingPlacementEquipmentId) {
+      setPendingPlacementEquipmentId(null);
+    }
+  }, [activeTool, pendingPlacementEquipmentId, pendingPlacementObjectId]);
+
+  useEffect(() => {
+    if (leftPanelMode === 'ac-equipment' && leftPanelWidth < 220) {
+      setLeftPanelWidth(Math.min(Math.max(248, minLeftWidth), maxLeftWidth));
+    }
+  }, [leftPanelMode, leftPanelWidth, maxLeftWidth, minLeftWidth]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -682,6 +713,7 @@ export function SmartDrawingEditor({
         showLeftPanel?: boolean;
         showRightPanel?: boolean;
         leftPanelWidth?: number;
+        leftPanelMode?: 'building' | 'ac-equipment';
         leftPanelTab?: 'symbols' | 'objects';
       };
 
@@ -689,6 +721,9 @@ export function SmartDrawingEditor({
       setShowRightPanel(typeof parsed.showRightPanel === 'boolean' ? parsed.showRightPanel : fallbackRightOpen);
       if (typeof parsed.leftPanelWidth === 'number' && Number.isFinite(parsed.leftPanelWidth)) {
         setLeftPanelWidth(parsed.leftPanelWidth);
+      }
+      if (parsed.leftPanelMode === 'building' || parsed.leftPanelMode === 'ac-equipment') {
+        setLeftPanelMode(parsed.leftPanelMode);
       }
       if (parsed.leftPanelTab === 'symbols' || parsed.leftPanelTab === 'objects') {
         setLeftPanelTab(parsed.leftPanelTab);
@@ -709,10 +744,11 @@ export function SmartDrawingEditor({
         showLeftPanel,
         showRightPanel,
         leftPanelWidth,
+        leftPanelMode,
         leftPanelTab,
       })
     );
-  }, [layoutReady, showLeftPanel, showRightPanel, leftPanelWidth, leftPanelTab]);
+  }, [layoutReady, showLeftPanel, showRightPanel, leftPanelWidth, leftPanelMode, leftPanelTab]);
 
   useEffect(() => {
     const handleOpenRoomProperties = () => {
@@ -833,12 +869,36 @@ export function SmartDrawingEditor({
 
   const handleStartObjectPlacement = useCallback((definition: ArchitecturalObjectDefinition) => {
     if (readOnly) return;
+    setLeftPanelMode('building');
+    setPendingPlacementEquipmentId(null);
     setPendingPlacementObjectId(definition.id);
     setTool('select');
   }, [readOnly, setTool]);
 
   const handleCancelObjectPlacement = useCallback(() => {
     setPendingPlacementObjectId(null);
+  }, []);
+
+  const handleShowBuildingPanel = useCallback(() => {
+    setLeftPanelMode('building');
+    setPendingPlacementEquipmentId(null);
+  }, []);
+
+  const handleShowEquipmentPanel = useCallback(() => {
+    setLeftPanelMode('ac-equipment');
+    setPendingPlacementObjectId(null);
+  }, []);
+
+  const handleStartEquipmentPlacement = useCallback((definition: AcEquipmentDefinition) => {
+    if (readOnly) return;
+    setLeftPanelMode('ac-equipment');
+    setPendingPlacementObjectId(null);
+    setPendingPlacementEquipmentId(definition.id);
+    setTool('select');
+  }, [readOnly, setTool]);
+
+  const handleCancelEquipmentPlacement = useCallback(() => {
+    setPendingPlacementEquipmentId(null);
   }, []);
 
   const handleObjectPlaced = useCallback((definitionId: string) => {
@@ -1006,6 +1066,22 @@ export function SmartDrawingEditor({
                   <div className="flex flex-col items-center gap-2 text-slate-600">
                     <button
                       type="button"
+                      onClick={handleShowBuildingPanel}
+                      className={`flex h-10 w-10 items-center justify-center rounded-xl border border-amber-200/80 bg-white/80 ${leftPanelMode === 'building' ? 'text-amber-700' : ''}`}
+                      title="Building tools"
+                    >
+                      <Layers size={18} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleShowEquipmentPanel}
+                      className={`flex h-10 w-10 items-center justify-center rounded-xl border border-amber-200/80 bg-white/80 ${leftPanelMode === 'ac-equipment' ? 'text-amber-700' : ''}`}
+                      title="AC equipment tools"
+                    >
+                      <Fan size={18} />
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => setShowGrid(!showGrid)}
                       className={`flex h-10 w-10 items-center justify-center rounded-xl border border-amber-200/80 bg-white/80 ${showGrid ? 'text-amber-700' : ''}`}
                       title="Toggle grid"
@@ -1024,7 +1100,8 @@ export function SmartDrawingEditor({
                       type="button"
                       onClick={() => setLeftPanelTab((prev) => (prev === 'symbols' ? 'objects' : 'symbols'))}
                       className="flex h-10 w-10 items-center justify-center rounded-xl border border-amber-200/80 bg-white/80"
-                      title="Toggle library tab"
+                      title={leftPanelMode === 'building' ? 'Toggle library tab' : 'Building libraries'}
+                      disabled={leftPanelMode !== 'building'}
                     >
                       <BoxSelect size={18} />
                     </button>
@@ -1053,102 +1130,140 @@ export function SmartDrawingEditor({
                   <div className="flex items-center justify-between">
                     <div>
                       <p className="text-[11px] uppercase tracking-wide text-slate-500">Toolbox</p>
-                      <h2 className="text-xs font-semibold text-slate-800">Drawing Tools</h2>
+                      <h2 className="text-xs font-semibold text-slate-800">
+                        {leftPanelMode === 'ac-equipment' ? 'AC Planning Tools' : 'Drawing Tools'}
+                      </h2>
                     </div>
                     <div className="text-[11px] text-slate-500">{elementCount} elements</div>
+                  </div>
+                  <div className="mt-2 inline-flex rounded-md border border-amber-200/80 bg-white p-0.5">
+                    <button
+                      type="button"
+                      onClick={handleShowBuildingPanel}
+                      className={`rounded px-2 py-1 text-[11px] ${
+                        leftPanelMode === 'building'
+                          ? 'bg-amber-200 text-amber-900'
+                          : 'text-slate-600 hover:bg-amber-50'
+                      }`}
+                    >
+                      Building
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleShowEquipmentPanel}
+                      className={`rounded px-2 py-1 text-[11px] ${
+                        leftPanelMode === 'ac-equipment'
+                          ? 'bg-amber-200 text-amber-900'
+                          : 'text-slate-600 hover:bg-amber-50'
+                      }`}
+                    >
+                      AC Equipment
+                    </button>
                   </div>
                 </div>
 
                 <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain scrollbar-thin scrollbar-thumb-amber-300">
-                  <div className="space-y-2.5 p-2.5">
-                    <div className="rounded-xl border border-amber-200/80 bg-white/80 p-2.5">
-                      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Core Tools</p>
-                      <div className="mt-2">
-                        <Toolbar
-                          orientation="vertical"
-                          layout="grid"
-                          variant="toolbox"
-                          showLabels
-                          showZoomControls={false}
-                          showUndoRedo={false}
-                          showLayerControls={false}
-                        />
-                      </div>
-                    </div>
-
-                    <div className="rounded-xl border border-amber-200/80 bg-white/80 p-2.5">
-                      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Quick Actions</p>
-                      <div className="mt-2 grid grid-cols-2 gap-1.5">
-                        {quickActions.map((action) => (
-                          <QuickActionButton
-                            key={action.id}
-                            icon={action.icon}
-                            label={action.label}
-                            active={activeTool === action.id}
-                            onClick={() => {
-                              setTool(action.id);
-                              if (action.id === 'room' && typeof window !== 'undefined') {
-                                window.dispatchEvent(
-                                  new CustomEvent('smart-drawing:room-tool-activate')
-                                );
-                              }
-                            }}
-                            disabled={readOnly}
+                  {leftPanelMode === 'building' ? (
+                    <div className="space-y-2.5 p-2.5">
+                      <div className="rounded-xl border border-amber-200/80 bg-white/80 p-2.5">
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Core Tools</p>
+                        <div className="mt-2">
+                          <Toolbar
+                            orientation="vertical"
+                            layout="grid"
+                            variant="toolbox"
+                            showLabels
+                            showZoomControls={false}
+                            showUndoRedo={false}
+                            showLayerControls={false}
                           />
-                        ))}
-                      </div>
-                    </div>
-
-                    <div className="rounded-xl border border-amber-200/80 bg-white/80 p-2.5">
-                      <div className="mb-2 flex items-center justify-between">
-                        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Libraries</p>
-                        <div className="inline-flex rounded-md border border-amber-200/80 bg-white p-0.5">
-                          <button
-                            type="button"
-                            onClick={() => setLeftPanelTab('symbols')}
-                            className={`rounded px-2 py-1 text-[11px] ${
-                              leftPanelTab === 'symbols'
-                                ? 'bg-amber-200 text-amber-900'
-                                : 'text-slate-600 hover:bg-amber-50'
-                            }`}
-                          >
-                            Symbols
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setLeftPanelTab('objects')}
-                            className={`rounded px-2 py-1 text-[11px] ${
-                              leftPanelTab === 'objects'
-                                ? 'bg-amber-200 text-amber-900'
-                                : 'text-slate-600 hover:bg-amber-50'
-                            }`}
-                          >
-                            Objects
-                          </button>
                         </div>
                       </div>
-                      <div className="h-[420px] overflow-hidden rounded-lg border border-amber-200/80 bg-white">
-                        {leftPanelTab === 'symbols' ? (
-                          <SymbolPalette
-                            variant="embedded"
-                            onSymbolSelect={handleSymbolSelect}
-                            className="h-full"
-                          />
-                        ) : (
-                          <ObjectLibraryPanel
-                            className="h-full"
-                            objects={architecturalObjects}
-                            recentUsage={recentObjectUsage}
-                            pendingObjectId={pendingPlacementObjectId}
-                            onStartPlacement={handleStartObjectPlacement}
-                            onCancelPlacement={handleCancelObjectPlacement}
-                            onAddCustomObject={handleAddCustomObject}
-                            onImportCustomObjects={handleImportCustomObjects}
-                          />
-                        )}
+
+                      <div className="rounded-xl border border-amber-200/80 bg-white/80 p-2.5">
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Quick Actions</p>
+                        <div className="mt-2 grid grid-cols-2 gap-1.5">
+                          {quickActions.map((action) => (
+                            <QuickActionButton
+                              key={action.id}
+                              icon={action.icon}
+                              label={action.label}
+                              active={activeTool === action.id}
+                              onClick={() => {
+                                setTool(action.id);
+                                if (action.id === 'room' && typeof window !== 'undefined') {
+                                  window.dispatchEvent(
+                                    new CustomEvent('smart-drawing:room-tool-activate')
+                                  );
+                                }
+                              }}
+                              disabled={readOnly}
+                            />
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="rounded-xl border border-amber-200/80 bg-white/80 p-2.5">
+                        <div className="mb-2 flex items-center justify-between">
+                          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Libraries</p>
+                          <div className="inline-flex rounded-md border border-amber-200/80 bg-white p-0.5">
+                            <button
+                              type="button"
+                              onClick={() => setLeftPanelTab('symbols')}
+                              className={`rounded px-2 py-1 text-[11px] ${
+                                leftPanelTab === 'symbols'
+                                  ? 'bg-amber-200 text-amber-900'
+                                  : 'text-slate-600 hover:bg-amber-50'
+                              }`}
+                            >
+                              Symbols
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setLeftPanelTab('objects')}
+                              className={`rounded px-2 py-1 text-[11px] ${
+                                leftPanelTab === 'objects'
+                                  ? 'bg-amber-200 text-amber-900'
+                                  : 'text-slate-600 hover:bg-amber-50'
+                              }`}
+                            >
+                              Objects
+                            </button>
+                          </div>
+                        </div>
+                        <div className="h-[420px] overflow-hidden rounded-lg border border-amber-200/80 bg-white">
+                          {leftPanelTab === 'symbols' ? (
+                            <SymbolPalette
+                              variant="embedded"
+                              onSymbolSelect={handleSymbolSelect}
+                              className="h-full"
+                            />
+                          ) : (
+                            <ObjectLibraryPanel
+                              className="h-full"
+                              objects={architecturalObjects}
+                              recentUsage={recentObjectUsage}
+                              pendingObjectId={pendingPlacementObjectId}
+                              onStartPlacement={handleStartObjectPlacement}
+                              onCancelPlacement={handleCancelObjectPlacement}
+                              onAddCustomObject={handleAddCustomObject}
+                              onImportCustomObjects={handleImportCustomObjects}
+                            />
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  ) : (
+                    <AcEquipmentPanel
+                      className="h-full"
+                      equipment={DEFAULT_AC_EQUIPMENT_LIBRARY}
+                      pendingEquipmentId={pendingPlacementEquipmentId}
+                      placedCountByType={placedEquipmentCountByType}
+                      roomEquipmentCounts={roomEquipmentCounts}
+                      onStartPlacement={handleStartEquipmentPlacement}
+                      onCancelPlacement={handleCancelEquipmentPlacement}
+                    />
+                  )}
                 </div>
 
                 <div className="shrink-0 border-t border-amber-200/70 p-2.5">
@@ -1280,9 +1395,12 @@ export function SmartDrawingEditor({
               majorGridSize={majorGridSize}
               gridSubdivisions={gridSubdivisions}
               objectDefinitions={architecturalObjects}
+              equipmentDefinitions={DEFAULT_AC_EQUIPMENT_LIBRARY}
               pendingPlacementObjectId={pendingPlacementObjectId}
+              pendingPlacementEquipmentId={pendingPlacementEquipmentId}
               onObjectPlaced={handleObjectPlaced}
               onCancelObjectPlacement={handleCancelObjectPlacement}
+              onCancelEquipmentPlacement={handleCancelEquipmentPlacement}
             />
           )}
 
@@ -1306,9 +1424,12 @@ export function SmartDrawingEditor({
                 majorGridSize={majorGridSize}
                 gridSubdivisions={gridSubdivisions}
                 objectDefinitions={architecturalObjects}
+                equipmentDefinitions={DEFAULT_AC_EQUIPMENT_LIBRARY}
                 pendingPlacementObjectId={pendingPlacementObjectId}
+                pendingPlacementEquipmentId={pendingPlacementEquipmentId}
                 onObjectPlaced={handleObjectPlaced}
                 onCancelObjectPlacement={handleCancelObjectPlacement}
+                onCancelEquipmentPlacement={handleCancelEquipmentPlacement}
               />
               <div className="flex flex-1 flex-col overflow-hidden">
                 <ElevationViewCanvas
