@@ -330,7 +330,7 @@ export function useCanvasEventBinding(
                     window.dispatchEvent(new CustomEvent('smart-drawing:open-room-properties'));
                 }
             }
-            if (tool === 'wall') {
+            if (tool === 'wall' || tool === 'partition-wall') {
                 handleWallDoubleClick();
             }
         };
@@ -386,7 +386,7 @@ export function useCanvasEventBinding(
                 }
             }
 
-            if (tool === 'wall') {
+            if (tool === 'wall' || tool === 'partition-wall') {
                 handleWallToolKeyDown(e);
                 return;
             }
@@ -454,7 +454,7 @@ export function useCanvasEventBinding(
         };
         const handleWallKeyUp = (e: KeyboardEvent) => {
             const { tool, handleWallToolKeyUp } = latestOptionsRef.current;
-            if (tool === 'wall') {
+            if (tool === 'wall' || tool === 'partition-wall') {
                 handleWallToolKeyUp(e);
             }
         };

@@ -285,8 +285,8 @@ export function useWallTool({
         // Start preview
         wallPreviewRef.current?.startPreview(
           snapResult.snappedPoint,
-          wallSettings.defaultThickness,
-          wallSettings.defaultMaterial
+          wallDrawingState.previewThickness,
+          wallDrawingState.previewMaterial
         );
       } else {
         // Second click: commit wall
@@ -409,8 +409,8 @@ export function useWallTool({
             );
             wallPreviewRef.current?.startPreview(
               snapResult.snappedPoint,
-              wallSettings.defaultThickness,
-              wallSettings.defaultMaterial,
+              wallDrawingState.previewThickness,
+              wallDrawingState.previewMaterial,
               continuationWall
             );
           } else {

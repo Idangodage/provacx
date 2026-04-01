@@ -405,7 +405,7 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
         const renderer = dimensionRendererRef.current;
         if (!renderer) return;
         if (
-            tool === 'wall' &&
+            (tool === 'wall' || tool === 'partition-wall') &&
             wallDrawingState.isDrawing &&
             wallDrawingState.startPoint &&
             wallDrawingState.currentPoint

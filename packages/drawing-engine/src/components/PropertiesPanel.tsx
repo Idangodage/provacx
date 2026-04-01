@@ -22,6 +22,7 @@ import type {
   DimensionDisplayFormat,
   DimensionPlacementType,
   DisplayUnit,
+  PartitionWallMode,
   RoomType,
   RoomOccupancySchedule,
   Wall,
@@ -1086,7 +1087,11 @@ function AcEquipmentSection({ propertyUnit }: { propertyUnit: PropertyUnit }) {
     ? rooms.find((room) => room.id === selectedEquipment.roomId)?.name ?? selectedEquipment.roomId
     : 'Unassigned';
   const capacityKw = propertyAsNumber(selectedEquipment.properties, 'capacityKw');
+  const heatingCapacityKw = propertyAsNumber(selectedEquipment.properties, 'heatingCapacityKw');
   const airflowLps = propertyAsNumber(selectedEquipment.properties, 'airflowLps');
+  const staticPressurePa = propertyAsNumber(selectedEquipment.properties, 'staticPressurePa');
+  const voltage = propertyAsNumber(selectedEquipment.properties, 'voltage');
+  const refrigerantType = propertyAsString(selectedEquipment.properties, 'refrigerantType', '-');
 
   const updateProperties = (properties: Record<string, unknown>) => {
     updateHvacElement(selectedEquipment.id, { properties });
@@ -1172,6 +1177,56 @@ function AcEquipmentSection({ propertyUnit }: { propertyUnit: PropertyUnit }) {
           className="w-24 rounded border border-amber-200/80 bg-white px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-amber-400"
         />
         <span className="text-xs text-slate-500">L/s</span>
+      </PropertyRow>
+      <PropertyRow label="Heating">
+        <input
+          type="number"
+          step={0.1}
+          value={heatingCapacityKw.toFixed(1)}
+          onChange={(e) => {
+            const parsed = Number.parseFloat(e.target.value);
+            if (!Number.isFinite(parsed)) return;
+            updateProperties({ heatingCapacityKw: parsed });
+          }}
+          className="w-24 rounded border border-amber-200/80 bg-white px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-amber-400"
+        />
+        <span className="text-xs text-slate-500">kW</span>
+      </PropertyRow>
+      <PropertyRow label="External Static Pressure">
+        <input
+          type="number"
+          step={1}
+          value={staticPressurePa.toFixed(0)}
+          onChange={(e) => {
+            const parsed = Number.parseFloat(e.target.value);
+            if (!Number.isFinite(parsed)) return;
+            updateProperties({ staticPressurePa: parsed, espPa: parsed });
+          }}
+          className="w-24 rounded border border-amber-200/80 bg-white px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-amber-400"
+        />
+        <span className="text-xs text-slate-500">Pa</span>
+      </PropertyRow>
+      <PropertyRow label="Voltage">
+        <input
+          type="number"
+          step={1}
+          value={voltage.toFixed(0)}
+          onChange={(e) => {
+            const parsed = Number.parseFloat(e.target.value);
+            if (!Number.isFinite(parsed)) return;
+            updateProperties({ voltage: parsed });
+          }}
+          className="w-24 rounded border border-amber-200/80 bg-white px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-amber-400"
+        />
+        <span className="text-xs text-slate-500">V</span>
+      </PropertyRow>
+      <PropertyRow label="Refrigerant">
+        <input
+          type="text"
+          value={refrigerantType}
+          onChange={(e) => updateProperties({ refrigerantType: e.target.value })}
+          className="w-24 rounded border border-amber-200/80 bg-white px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-amber-400"
+        />
       </PropertyRow>
     </div>
   );
@@ -1744,16 +1799,23 @@ function HvacDesignSection() {
 
 function WallToolSection() {
   const {
+    activeTool,
     wallSettings,
     setWallSettings,
     setWallPreviewMaterial,
     setWallPreviewThickness,
   } = useSmartDrawingStore((state) => ({
+    activeTool: state.activeTool,
     wallSettings: state.wallSettings,
     setWallSettings: state.setWallSettings,
     setWallPreviewMaterial: state.setWallPreviewMaterial,
     setWallPreviewThickness: state.setWallPreviewThickness,
   }), shallow);
+
+  const partitionToolActive = activeTool === 'partition-wall';
+  const activeDefaultThickness = partitionToolActive
+    ? wallSettings.defaultPartitionThickness
+    : wallSettings.defaultThickness;
 
   const gridPreset =
     wallSettings.gridSize === 50
@@ -1801,18 +1863,33 @@ function WallToolSection() {
           />
         )}
       </PropertyRow>
-      <PropertyRow label="Default Thickness">
+      {partitionToolActive && (
+        <PropertyRow label="Partition Mode">
+          <select
+            value={wallSettings.partitionMode}
+            onChange={(e) => setWallSettings({ partitionMode: e.target.value as PartitionWallMode })}
+            className="w-28 px-2 py-1 text-sm border border-amber-200/80 rounded focus:outline-none focus:ring-1 focus:ring-amber-400 bg-white"
+          >
+            <option value="full">Full</option>
+            <option value="half">Half (4 ft)</option>
+            <option value="top">Top (&lt; 1 ft below)</option>
+          </select>
+        </PropertyRow>
+      )}
+      <PropertyRow label={partitionToolActive ? 'Partition Thickness' : 'Default Thickness'}>
         <input
           type="number"
           min={MIN_WALL_THICKNESS}
           max={MAX_WALL_THICKNESS}
           step={10}
-          value={Math.round(wallSettings.defaultThickness)}
+          value={Math.round(activeDefaultThickness)}
           onChange={(e) => {
             const parsed = Number.parseFloat(e.target.value);
             if (!Number.isFinite(parsed)) return;
             const next = clamp(parsed, MIN_WALL_THICKNESS, MAX_WALL_THICKNESS);
-            setWallSettings({ defaultThickness: next });
+            setWallSettings(partitionToolActive
+              ? { defaultPartitionThickness: next }
+              : { defaultThickness: next });
             setWallPreviewThickness(next);
           }}
           className="w-24 px-2 py-1 text-sm border border-amber-200/80 rounded focus:outline-none focus:ring-1 focus:ring-amber-400 bg-white"
@@ -1833,14 +1910,15 @@ function WallToolSection() {
           className="w-24 px-2 py-1 text-sm border border-amber-200/80 rounded focus:outline-none focus:ring-1 focus:ring-amber-400 bg-white"
         />
       </PropertyRow>
-      <PropertyRow label="Default Material">
+      <PropertyRow label={partitionToolActive ? 'Partition Material' : 'Default Material'}>
         <select
-          value={wallSettings.defaultMaterial}
+          value={partitionToolActive ? 'partition' : wallSettings.defaultMaterial}
           onChange={(e) => {
             const material = e.target.value as WallMaterial;
             setWallSettings({ defaultMaterial: material });
             setWallPreviewMaterial(material);
           }}
+          disabled={partitionToolActive}
           className="w-32 px-2 py-1 text-sm border border-amber-200/80 rounded focus:outline-none focus:ring-1 focus:ring-amber-400 bg-white"
         >
           <option value="brick">Brick</option>
@@ -2639,7 +2717,7 @@ export function PropertiesPanel({ className = '', onClose }: PropertiesPanelProp
 
         <UnitSelector propertyUnit={propertyUnit} onPropertyUnitChange={setPropertyUnit} />
 
-        <CollapsibleSection title="Wall Properties" defaultOpen={hasSelectedWall || activeTool === 'wall'}>
+        <CollapsibleSection title="Wall Properties" defaultOpen={hasSelectedWall || activeTool === 'wall' || activeTool === 'partition-wall'}>
           <WallSection propertyUnit={propertyUnit} />
         </CollapsibleSection>
 
@@ -2673,7 +2751,7 @@ export function PropertiesPanel({ className = '', onClose }: PropertiesPanelProp
           </CollapsibleSection>
         )}
 
-        {(activeTool === 'wall' || hasSelectedWall) && (
+        {(activeTool === 'wall' || activeTool === 'partition-wall' || hasSelectedWall) && (
           <CollapsibleSection title="Wall Tool" defaultOpen={false}>
             <WallToolSection />
           </CollapsibleSection>

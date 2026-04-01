@@ -576,6 +576,7 @@ export function SmartDrawingEditor({
 
   const quickActions: { id: DrawingTool; label: string; icon: React.ReactNode }[] = [
     { id: 'wall', label: 'Add Wall', icon: <Minus size={14} /> },
+    { id: 'partition-wall', label: 'Partition Wall', icon: <Minus size={14} /> },
     { id: 'room', label: 'Add Room', icon: <BoxSelect size={14} /> },
     { id: 'dimension', label: 'Dimension', icon: <Ruler size={14} /> },
     { id: 'text', label: 'Text', icon: <Type size={14} /> },

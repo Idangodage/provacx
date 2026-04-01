@@ -79,12 +79,15 @@ export function AttributeQuickToolbar({
     return walls.find((wall) => wall.id === selectedId) ?? null;
   }, [selectedElementIds, walls]);
 
-  const visible = activeTool === 'wall' || Boolean(selectedWall);
+  const visible = activeTool === 'wall' || activeTool === 'partition-wall' || Boolean(selectedWall);
   if (!visible && !keepSpaceWhenHidden) return null;
+
+  const partitionToolActive = activeTool === 'partition-wall';
 
   const currentMaterialId = selectedWall?.properties3D.materialId ?? '';
   const currentHeight = selectedWall?.properties3D.height ?? wallSettings.defaultHeight;
-  const currentThickness = selectedWall?.thickness ?? wallSettings.defaultThickness;
+  const currentThickness = selectedWall?.thickness
+    ?? (partitionToolActive ? wallSettings.defaultPartitionThickness : wallSettings.defaultThickness);
 
   const applyHeightPreset = (heightMm: number) => {
     if (selectedWall) {
@@ -99,7 +102,11 @@ export function AttributeQuickToolbar({
     if (selectedWall) {
       updateWall(selectedWall.id, { thickness: safeThickness });
     }
-    setWallSettings({ defaultThickness: safeThickness });
+    setWallSettings(
+      partitionToolActive
+        ? { defaultPartitionThickness: safeThickness }
+        : { defaultThickness: safeThickness }
+    );
     setWallPreviewThickness(safeThickness);
   };
 

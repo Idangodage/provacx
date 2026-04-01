@@ -1030,7 +1030,7 @@ export function DrawingCanvas({
 
     const handleEscapeShortcut = useCallback(() => {
         if (pendingPlacementDefinition || pendingPlacementEquipmentDefinition) return true;
-        if (tool === 'wall' && isWallDrawing) return true;
+        if ((tool === 'wall' || tool === 'partition-wall') && isWallDrawing) return true;
         if (tool === 'room' && isRoomDrawing) {
             cancelRoomCreation();
             wallRenderer?.clearPreviewWall();

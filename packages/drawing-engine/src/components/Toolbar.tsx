@@ -79,6 +79,7 @@ const DRAWING_TOOLS: {
   { id: 'select', icon: <MousePointer2 size={16} />, label: 'Select', shortLabel: 'Select', shortcut: 'V' },
   { id: 'pan', icon: <Hand size={16} />, label: 'Pan', shortLabel: 'Pan', shortcut: 'H' },
   { id: 'wall', icon: <Minus size={16} />, label: 'Wall', shortLabel: 'Wall', shortcut: 'W' },
+  { id: 'partition-wall', icon: <Minus size={16} />, label: 'Partition', shortLabel: 'Part', shortcut: 'Q' },
   { id: 'section-line', icon: <Minus size={16} />, label: 'Section', shortLabel: 'Section', shortcut: 'K' },
   { id: 'room', icon: <BoxSelect size={16} />, label: 'Room', shortLabel: 'Room', shortcut: 'R' },
   { id: 'pencil', icon: <Pencil size={16} />, label: 'Pencil', shortLabel: 'Pencil', shortcut: 'P' },

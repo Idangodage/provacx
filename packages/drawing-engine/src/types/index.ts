@@ -95,6 +95,7 @@ export type DrawingTool =
   | 'select'
   | 'pan'
   | 'wall'
+  | 'partition-wall'
   | 'section-line'
   | 'room'
   | 'dimension'

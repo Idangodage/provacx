@@ -136,6 +136,11 @@ export function useCanvasKeyboard({
                 setTool('wall');
                 return;
             }
+            if (key === 'q') {
+                event.preventDefault();
+                setTool('partition-wall');
+                return;
+            }
             if (key === 'r') {
                 event.preventDefault();
                 setTool('room');

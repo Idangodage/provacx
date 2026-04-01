@@ -271,6 +271,18 @@ function readNumberProperty(properties: Record<string, unknown>, key: string): n
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+function readFlexibleNumberProperty(properties: Record<string, unknown>, key: string): number | null {
+  const value = properties[key];
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 function disposeMaterial(material: THREE.Material | THREE.Material[]): void {
   // Build a quick lookup set from all shared material caches.
   // This prevents disposing cached materials during scene rebuilds.
@@ -772,6 +784,155 @@ function createLocalCylinderMesh(
   return mesh;
 }
 
+function createRoundedRectShape(width: number, depth: number, radius: number): THREE.Shape {
+  const halfWidth = width / 2;
+  const halfDepth = depth / 2;
+  const safeRadius = Math.max(0, Math.min(radius, halfWidth - 1, halfDepth - 1));
+  const shape = new THREE.Shape();
+
+  if (safeRadius <= 0.5) {
+    shape.moveTo(-halfWidth, -halfDepth);
+    shape.lineTo(halfWidth, -halfDepth);
+    shape.lineTo(halfWidth, halfDepth);
+    shape.lineTo(-halfWidth, halfDepth);
+    shape.closePath();
+    return shape;
+  }
+
+  shape.moveTo(-halfWidth + safeRadius, -halfDepth);
+  shape.lineTo(halfWidth - safeRadius, -halfDepth);
+  shape.absarc(halfWidth - safeRadius, -halfDepth + safeRadius, safeRadius, -Math.PI / 2, 0, false);
+  shape.lineTo(halfWidth, halfDepth - safeRadius);
+  shape.absarc(halfWidth - safeRadius, halfDepth - safeRadius, safeRadius, 0, Math.PI / 2, false);
+  shape.lineTo(-halfWidth + safeRadius, halfDepth);
+  shape.absarc(-halfWidth + safeRadius, halfDepth - safeRadius, safeRadius, Math.PI / 2, Math.PI, false);
+  shape.lineTo(-halfWidth, -halfDepth + safeRadius);
+  shape.absarc(-halfWidth + safeRadius, -halfDepth + safeRadius, safeRadius, Math.PI, Math.PI * 1.5, false);
+  shape.closePath();
+  return shape;
+}
+
+function createRoundedLocalExtrudedMesh(
+  width: number,
+  depth: number,
+  height: number,
+  radius: number,
+  color: string,
+  position: THREE.Vector3,
+  options?: {
+    opacity?: number;
+    renderOrder?: number;
+    rotation?: THREE.Euler;
+    bevelEnabled?: boolean;
+    bevelSize?: number;
+    bevelThickness?: number;
+    bevelSegments?: number;
+    curveSegments?: number;
+  },
+): THREE.Mesh {
+  const opacity = options?.opacity ?? 1;
+  const isTransparent = opacity < 1;
+  const safeRadius = Math.max(0, Math.min(radius, width / 2 - 1, depth / 2 - 1));
+  const bevelEnabled = (options?.bevelEnabled ?? true) && safeRadius > 0.5 && height > 4;
+  const bevelSize = Math.min(options?.bevelSize ?? safeRadius * 0.34, safeRadius * 0.75);
+  const bevelThickness = Math.min(
+    options?.bevelThickness ?? Math.min(height * 0.18, safeRadius * 0.42),
+    Math.max(0.8, height / 2 - 0.4),
+  );
+  const geometry = new THREE.ExtrudeGeometry(
+    createRoundedRectShape(width, depth, safeRadius),
+    {
+      depth: height,
+      bevelEnabled,
+      bevelSize,
+      bevelThickness,
+      bevelSegments: options?.bevelSegments ?? 3,
+      curveSegments: options?.curveSegments ?? 10,
+      steps: 1,
+    },
+  );
+  geometry.translate(0, 0, -height / 2);
+  geometry.computeVertexNormals();
+
+  const material = getSharedBoxMaterial(color, opacity, isTransparent);
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.copy(position);
+  if (options?.rotation) {
+    mesh.rotation.copy(options.rotation);
+  }
+  mesh.renderOrder = options?.renderOrder ?? (isTransparent ? 24 : 16);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+function addHvacPipePort(
+  group: THREE.Group,
+  options: {
+    anchor: THREE.Vector3;
+    radius: number;
+    length: number;
+    color: string;
+    direction?: 1 | -1;
+    collarColor?: string;
+    collarRadius?: number;
+    collarLength?: number;
+    flangeColor?: string;
+    flangeThickness?: number;
+    radialSegments?: number;
+  },
+): void {
+  const direction = options.direction ?? 1;
+  const collarRadius = options.collarRadius ?? options.radius * 1.24;
+  const collarLength = options.collarLength ?? Math.max(10, options.length * 0.28);
+  const flangeThickness = options.flangeThickness ?? Math.max(4, collarLength * 0.24);
+  const radialSegments = options.radialSegments ?? 18;
+  const rotation = new THREE.Euler(0, 0, Math.PI / 2);
+
+  group.add(
+    createLocalCylinderMesh(
+      collarRadius * 1.12,
+      collarRadius * 1.12,
+      flangeThickness,
+      options.flangeColor ?? '#d7dde2',
+      new THREE.Vector3(
+        options.anchor.x + direction * (flangeThickness / 2),
+        options.anchor.y,
+        options.anchor.z,
+      ),
+      { rotation, radialSegments },
+    ),
+  );
+  group.add(
+    createLocalCylinderMesh(
+      collarRadius,
+      collarRadius,
+      collarLength,
+      options.collarColor ?? '#1f2937',
+      new THREE.Vector3(
+        options.anchor.x + direction * (collarLength / 2 + flangeThickness * 0.35),
+        options.anchor.y,
+        options.anchor.z,
+      ),
+      { rotation, radialSegments },
+    ),
+  );
+  group.add(
+    createLocalCylinderMesh(
+      options.radius,
+      options.radius,
+      options.length,
+      options.color,
+      new THREE.Vector3(
+        options.anchor.x + direction * (collarLength + options.length / 2 - flangeThickness * 0.15),
+        options.anchor.y,
+        options.anchor.z,
+      ),
+      { rotation, radialSegments },
+    ),
+  );
+}
+
 function hvacPaletteForElement(element: HvacElement): Hvac3DPalette {
   switch (element.type) {
     case 'outdoor-unit':
@@ -929,50 +1090,80 @@ function createHvacEquipmentMesh(element: HvacElement): THREE.Group {
       break;
     }
     case 'ceiling-cassette-ac': {
+      const gasPipeDiameterMm = readFlexibleNumberProperty(element.properties, 'refrigerantGasPipeDiameterMm')
+        ?? readFlexibleNumberProperty(element.properties, 'Refrigerant Gas Pipe Diameter (mm)')
+        ?? 12.7;
+      const liquidPipeDiameterMm = readFlexibleNumberProperty(element.properties, 'refrigerantLiquidPipeDiameterMm')
+        ?? readFlexibleNumberProperty(element.properties, 'Refrigerant Liquid Pipe Diameter (mm)')
+        ?? 6.35;
+      const drainPipeDiameterMm = readFlexibleNumberProperty(element.properties, 'drainPipeDiameter1Mm')
+        ?? readFlexibleNumberProperty(element.properties, 'Drain Pipe Diameter 1 (mm)')
+        ?? 32;
+      const staticPressurePa = readFlexibleNumberProperty(element.properties, 'staticPressurePa')
+        ?? readFlexibleNumberProperty(element.properties, 'espPa')
+        ?? readFlexibleNumberProperty(element.properties, 'External Static Pressure (Pa)')
+        ?? 200;
+
       const panelHeight = Math.max(28, Math.min(44, height * 0.16));
       const cassetteBodyHeight = Math.max(70, height - panelHeight * 0.4);
       const bodyBaseZ = panelHeight * 0.55;
       const grillePlateHeight = Math.max(5, panelHeight * 0.16);
       const slotHeight = Math.max(5, panelHeight * 0.12);
+      const grilleDensityFactor = THREE.MathUtils.clamp(staticPressurePa / 200, 0.7, 1.35);
+      const slotInsetFactor = THREE.MathUtils.clamp(0.32 - (grilleDensityFactor - 1) * 0.03, 0.26, 0.36);
 
       group.add(
-        createLocalBoxMesh(
+        createRoundedLocalExtrudedMesh(
           width * 0.8,
           depth * 0.8,
           cassetteBodyHeight,
+          Math.min(width, depth) * 0.045,
           '#cfd6dc',
           new THREE.Vector3(0, 0, bodyBaseZ + cassetteBodyHeight / 2),
         ),
       );
       group.add(
-        createLocalBoxMesh(
+        createRoundedLocalExtrudedMesh(
           width * 0.74,
           depth * 0.74,
           Math.max(10, cassetteBodyHeight * 0.08),
+          Math.min(width, depth) * 0.032,
           '#e5eaee',
           new THREE.Vector3(0, 0, bodyBaseZ + cassetteBodyHeight * 0.92),
         ),
       );
       group.add(
-        createLocalBoxMesh(
+        createRoundedLocalExtrudedMesh(
           width,
           depth,
           panelHeight,
+          Math.min(width, depth) * 0.085,
           '#fbfcfd',
           new THREE.Vector3(0, 0, panelHeight / 2),
+          {
+            bevelThickness: Math.min(panelHeight * 0.22, 6),
+            bevelSize: Math.min(width, depth) * 0.025,
+            bevelSegments: 4,
+          },
         ),
       );
       group.add(
-        createLocalBoxMesh(
+        createRoundedLocalExtrudedMesh(
           width * 0.92,
           depth * 0.92,
           Math.max(10, panelHeight * 0.38),
+          Math.min(width, depth) * 0.072,
           '#eef3f7',
           new THREE.Vector3(0, 0, panelHeight * 0.48),
+          {
+            bevelThickness: Math.max(1.2, panelHeight * 0.12),
+            bevelSize: Math.min(width, depth) * 0.018,
+            bevelSegments: 4,
+          },
         ),
       );
       addVentSlats(group, {
-        count: 7,
+        count: Math.max(6, Math.min(10, Math.round(7 * grilleDensityFactor))),
         width: width * 0.46,
         depth: 2,
         height: 2,
@@ -983,7 +1174,7 @@ function createHvacEquipmentMesh(element: HvacElement): THREE.Group {
         color: '#97a3af',
       });
       addVentSlats(group, {
-        count: 7,
+        count: Math.max(6, Math.min(10, Math.round(7 * grilleDensityFactor))),
         width: 2,
         depth: depth * 0.46,
         height: 2,
@@ -994,52 +1185,60 @@ function createHvacEquipmentMesh(element: HvacElement): THREE.Group {
         color: '#a4afb8',
       });
       group.add(
-        createLocalBoxMesh(
+        createRoundedLocalExtrudedMesh(
           width * 0.54,
           depth * 0.54,
           grillePlateHeight,
+          Math.min(width, depth) * 0.036,
           '#d8e0e6',
           new THREE.Vector3(0, 0, panelHeight * 0.56),
+          {
+            bevelEnabled: false,
+          },
         ),
       );
       group.add(
-        createLocalBoxMesh(
+        createRoundedLocalExtrudedMesh(
           width * 0.6,
           depth * 0.08,
           slotHeight,
+          depth * 0.018,
           '#1f2430',
-          new THREE.Vector3(0, -depth * 0.32, panelHeight * 0.62),
-          { renderOrder: 18 },
+          new THREE.Vector3(0, -depth * slotInsetFactor, panelHeight * 0.62),
+          { renderOrder: 18, bevelEnabled: false, curveSegments: 8 },
         ),
       );
       group.add(
-        createLocalBoxMesh(
+        createRoundedLocalExtrudedMesh(
           width * 0.6,
           depth * 0.08,
           slotHeight,
+          depth * 0.018,
           '#1f2430',
-          new THREE.Vector3(0, depth * 0.32, panelHeight * 0.62),
-          { renderOrder: 18 },
+          new THREE.Vector3(0, depth * slotInsetFactor, panelHeight * 0.62),
+          { renderOrder: 18, bevelEnabled: false, curveSegments: 8 },
         ),
       );
       group.add(
-        createLocalBoxMesh(
+        createRoundedLocalExtrudedMesh(
           width * 0.08,
           depth * 0.6,
           slotHeight,
+          width * 0.018,
           '#1f2430',
-          new THREE.Vector3(-width * 0.32, 0, panelHeight * 0.62),
-          { renderOrder: 18 },
+          new THREE.Vector3(-width * slotInsetFactor, 0, panelHeight * 0.62),
+          { renderOrder: 18, bevelEnabled: false, curveSegments: 8 },
         ),
       );
       group.add(
-        createLocalBoxMesh(
+        createRoundedLocalExtrudedMesh(
           width * 0.08,
           depth * 0.6,
           slotHeight,
+          width * 0.018,
           '#1f2430',
-          new THREE.Vector3(width * 0.32, 0, panelHeight * 0.62),
-          { renderOrder: 18 },
+          new THREE.Vector3(width * slotInsetFactor, 0, panelHeight * 0.62),
+          { renderOrder: 18, bevelEnabled: false, curveSegments: 8 },
         ),
       );
       group.add(
@@ -1062,6 +1261,56 @@ function createHvacEquipmentMesh(element: HvacElement): THREE.Group {
           { renderOrder: 18 },
         ),
       );
+      group.add(
+        createRoundedLocalExtrudedMesh(
+          width * 0.1,
+          depth * 0.22,
+          Math.max(14, cassetteBodyHeight * 0.08),
+          depth * 0.02,
+          '#343b43',
+          new THREE.Vector3(
+            width * 0.36,
+            depth * 0.12,
+            bodyBaseZ + cassetteBodyHeight * 0.76,
+          ),
+          {
+            bevelEnabled: false,
+            curveSegments: 8,
+            renderOrder: 18,
+          },
+        ),
+      );
+      addHvacPipePort(group, {
+        anchor: new THREE.Vector3(
+          width * 0.4,
+          depth * 0.07,
+          bodyBaseZ + cassetteBodyHeight * 0.8,
+        ),
+        radius: Math.max(4, gasPipeDiameterMm / 2),
+        length: Math.max(28, width * 0.11),
+        color: '#c5894d',
+      });
+      addHvacPipePort(group, {
+        anchor: new THREE.Vector3(
+          width * 0.4,
+          depth * 0.14,
+          bodyBaseZ + cassetteBodyHeight * 0.72,
+        ),
+        radius: Math.max(3, liquidPipeDiameterMm / 2),
+        length: Math.max(24, width * 0.095),
+        color: '#dca25d',
+      });
+      addHvacPipePort(group, {
+        anchor: new THREE.Vector3(
+          width * 0.4,
+          depth * 0.2,
+          bodyBaseZ + cassetteBodyHeight * 0.62,
+        ),
+        radius: Math.max(4, drainPipeDiameterMm / 2),
+        length: Math.max(32, width * 0.12),
+        color: '#8ec9ee',
+        collarColor: '#4b5563',
+      });
       break;
     }
     case 'ceiling-suspended-ac': {
@@ -1116,65 +1365,180 @@ function createHvacEquipmentMesh(element: HvacElement): THREE.Group {
       break;
     }
     case 'ducted-ac': {
-      const trayHeight = Math.max(16, Math.min(28, height * 0.12));
-      const mainHeight = Math.max(90, height - trayHeight * 0.3);
-      const housingWidth = width * 0.74;
-      const housingDepth = depth * 0.72;
-      const housingCenterX = -width * 0.12;
-      const serviceWidth = width * 0.22;
-      const serviceDepth = depth * 0.62;
-      const serviceHeight = mainHeight * 0.58;
-      const serviceCenterX = width * 0.34;
-      const serviceCenterZ = trayHeight + mainHeight * 0.62;
-      const intakeWidth = housingWidth * 0.62;
-      const intakeHeight = mainHeight * 0.36;
-      const intakeCenterX = -width * 0.17;
-      const intakeFrameY = -housingDepth * 0.45;
-      const intakeCenterZ = trayHeight + mainHeight * 0.54;
+      const trayHeight = Math.max(18, height * 0.14);
+      const mainHeight = Math.max(90, height - trayHeight);
+      const housingWidth = width * 0.86;
+      const housingDepth = depth * 0.94;
+      const serviceWidth = width * 0.11;
+      const serviceDepth = depth * 0.41;
+      const housingCenterX = -(serviceWidth * 0.52);
+      const serviceHeight = mainHeight * 0.54;
+      const serviceCenterX = housingCenterX + housingWidth / 2 + serviceWidth / 2 - width * 0.006;
+      const serviceCenterZ = trayHeight + mainHeight * 0.58;
+      const mouthFrameThickness = Math.max(12, height * 0.055);
+      const mouthFrameDepth = Math.max(10, depth * 0.018);
+      const mouthCavityDepth = Math.max(36, depth * 0.062);
+      const intakeWidth = Math.min(housingWidth * 0.94, width * 0.84);
+      const intakeHeight = Math.min(mainHeight * 0.76, height * 0.61);
+      const intakeCenterX = housingCenterX - serviceWidth * 0.16;
+      const intakeFrameY = -housingDepth / 2;
+      const intakeCenterZ = trayHeight + height * 0.5;
+      const supplyMouthWidth = Math.min(housingWidth * 0.96, width * 0.86);
+      const supplyMouthHeight = intakeHeight;
+      const supplyCenterX = intakeCenterX - width * 0.01;
+      const supplyFrameY = housingDepth / 2;
+      const supplyCenterZ = intakeCenterZ;
+      const cavityWallThickness = Math.max(6, mouthFrameThickness * 0.42);
+      const cavityBackDepth = Math.max(5, mouthFrameDepth * 0.55);
+      const addHollowMouthInterior = (
+        openingWidth: number,
+        openingHeight: number,
+        centerX: number,
+        faceY: number,
+        centerZ: number,
+        direction: 1 | -1,
+        shellColor: string,
+        backColor: string,
+      ): number => {
+        const cavityCenterY = faceY - direction * (mouthCavityDepth / 2 - mouthFrameDepth * 0.18);
+        const shellDepth = Math.max(mouthFrameDepth * 1.2, mouthCavityDepth * 0.9);
+        const shellWidth = openingWidth * 0.88;
+        const shellHeight = openingHeight * 0.76;
+        const backY = faceY - direction * (mouthCavityDepth - cavityBackDepth / 2 - mouthFrameDepth * 0.16);
+
+        group.add(
+          createLocalBoxMesh(
+            shellWidth,
+            shellDepth,
+            cavityWallThickness,
+            shellColor,
+            new THREE.Vector3(
+              centerX,
+              cavityCenterY,
+              centerZ + shellHeight / 2,
+            ),
+          ),
+        );
+        group.add(
+          createLocalBoxMesh(
+            shellWidth,
+            shellDepth,
+            cavityWallThickness,
+            shellColor,
+            new THREE.Vector3(
+              centerX,
+              cavityCenterY,
+              centerZ - shellHeight / 2,
+            ),
+          ),
+        );
+        group.add(
+          createLocalBoxMesh(
+            cavityWallThickness,
+            shellDepth,
+            shellHeight,
+            shellColor,
+            new THREE.Vector3(
+              centerX - shellWidth / 2,
+              cavityCenterY,
+              centerZ,
+            ),
+          ),
+        );
+        group.add(
+          createLocalBoxMesh(
+            cavityWallThickness,
+            shellDepth,
+            shellHeight,
+            shellColor,
+            new THREE.Vector3(
+              centerX + shellWidth / 2,
+              cavityCenterY,
+              centerZ,
+            ),
+          ),
+        );
+        group.add(
+          createLocalBoxMesh(
+            openingWidth * 0.74,
+            cavityBackDepth,
+            openingHeight * 0.56,
+            backColor,
+            new THREE.Vector3(centerX, backY, centerZ),
+          ),
+        );
+
+        return cavityCenterY;
+      };
 
       group.add(
-        createLocalBoxMesh(
+        createRoundedLocalExtrudedMesh(
           width * 0.96,
           depth * 0.8,
           trayHeight,
+          Math.min(width, depth) * 0.018,
           '#2e3338',
           new THREE.Vector3(0, 0, trayHeight / 2),
+          {
+            bevelEnabled: false,
+            curveSegments: 8,
+          },
         ),
       );
       group.add(
-        createLocalBoxMesh(
+        createRoundedLocalExtrudedMesh(
           housingWidth,
           housingDepth,
           mainHeight,
+          Math.min(housingWidth, housingDepth) * 0.022,
           '#d1d7dc',
           new THREE.Vector3(housingCenterX, 0, trayHeight + mainHeight / 2),
+          {
+            bevelThickness: Math.min(mainHeight * 0.08, 8),
+            bevelSize: Math.min(housingWidth, housingDepth) * 0.012,
+          },
         ),
       );
       group.add(
-        createLocalBoxMesh(
+        createRoundedLocalExtrudedMesh(
           housingWidth * 0.96,
           housingDepth * 0.84,
           Math.max(10, mainHeight * 0.1),
+          Math.min(housingWidth, housingDepth) * 0.018,
           '#edf1f4',
           new THREE.Vector3(housingCenterX, 0, trayHeight + mainHeight * 0.92),
+          {
+            bevelEnabled: false,
+            curveSegments: 10,
+          },
         ),
       );
       group.add(
-        createLocalBoxMesh(
+        createRoundedLocalExtrudedMesh(
           serviceWidth,
           serviceDepth,
           serviceHeight,
+          Math.min(serviceWidth, serviceDepth) * 0.04,
           '#d9e0e5',
           new THREE.Vector3(serviceCenterX, depth * 0.04, serviceCenterZ),
+          {
+            bevelThickness: Math.min(serviceHeight * 0.08, 6),
+            bevelSize: Math.min(serviceWidth, serviceDepth) * 0.018,
+          },
         ),
       );
       group.add(
-        createLocalBoxMesh(
+        createRoundedLocalExtrudedMesh(
           serviceWidth * 0.64,
           serviceDepth * 0.34,
           serviceHeight * 0.28,
+          Math.min(serviceWidth, serviceDepth) * 0.02,
           '#2d3742',
           new THREE.Vector3(serviceCenterX - serviceWidth * 0.08, depth * 0.12, serviceCenterZ - serviceHeight * 0.1),
+          {
+            bevelEnabled: false,
+            curveSegments: 8,
+          },
         ),
       );
       group.add(
@@ -1189,57 +1553,74 @@ function createHvacEquipmentMesh(element: HvacElement): THREE.Group {
       group.add(
         createLocalBoxMesh(
           intakeWidth,
-          8,
-          12,
+          mouthFrameDepth,
+          mouthFrameThickness,
           '#c6ced6',
-          new THREE.Vector3(intakeCenterX, intakeFrameY, intakeCenterZ + intakeHeight / 2),
+          new THREE.Vector3(
+            intakeCenterX,
+            intakeFrameY - mouthFrameDepth / 2,
+            intakeCenterZ + intakeHeight / 2 + mouthFrameThickness / 2,
+          ),
         ),
       );
       group.add(
         createLocalBoxMesh(
           intakeWidth,
-          8,
-          12,
+          mouthFrameDepth,
+          mouthFrameThickness,
           '#c6ced6',
-          new THREE.Vector3(intakeCenterX, intakeFrameY, intakeCenterZ - intakeHeight / 2),
+          new THREE.Vector3(
+            intakeCenterX,
+            intakeFrameY - mouthFrameDepth / 2,
+            intakeCenterZ - intakeHeight / 2 - mouthFrameThickness / 2,
+          ),
         ),
       );
       group.add(
         createLocalBoxMesh(
-          12,
-          8,
-          intakeHeight,
+          mouthFrameThickness,
+          mouthFrameDepth,
+          intakeHeight + mouthFrameThickness * 2,
           '#c6ced6',
-          new THREE.Vector3(intakeCenterX - intakeWidth / 2, intakeFrameY, intakeCenterZ),
+          new THREE.Vector3(
+            intakeCenterX - intakeWidth / 2 - mouthFrameThickness / 2,
+            intakeFrameY - mouthFrameDepth / 2,
+            intakeCenterZ,
+          ),
         ),
       );
       group.add(
         createLocalBoxMesh(
-          12,
-          8,
-          intakeHeight,
+          mouthFrameThickness,
+          mouthFrameDepth,
+          intakeHeight + mouthFrameThickness * 2,
           '#c6ced6',
-          new THREE.Vector3(intakeCenterX + intakeWidth / 2, intakeFrameY, intakeCenterZ),
+          new THREE.Vector3(
+            intakeCenterX + intakeWidth / 2 + mouthFrameThickness / 2,
+            intakeFrameY - mouthFrameDepth / 2,
+            intakeCenterZ,
+          ),
         ),
       );
-      group.add(
-        createLocalBoxMesh(
-          intakeWidth * 0.9,
-          depth * 0.12,
-          intakeHeight * 0.8,
-          '#2b3238',
-          new THREE.Vector3(intakeCenterX, intakeFrameY + depth * 0.05, intakeCenterZ),
-        ),
+      const returnCavityCenterY = addHollowMouthInterior(
+        intakeWidth * 0.92,
+        intakeHeight * 0.82,
+        intakeCenterX,
+        intakeFrameY,
+        intakeCenterZ,
+        -1,
+        '#2b3238',
+        '#151b22',
       );
       for (let slatIndex = 0; slatIndex < 6; slatIndex += 1) {
         const slat = createLocalBoxMesh(
           intakeWidth * 0.86,
-          6,
+          Math.max(6, mouthFrameDepth * 0.78),
           8,
           '#aab4bc',
           new THREE.Vector3(
             intakeCenterX,
-            intakeFrameY + depth * 0.012,
+            returnCavityCenterY - mouthCavityDepth * 0.18,
             intakeCenterZ - intakeHeight * 0.28 + slatIndex * (intakeHeight * 0.11),
           ),
           { renderOrder: 18 },
@@ -1248,73 +1629,152 @@ function createHvacEquipmentMesh(element: HvacElement): THREE.Group {
         group.add(slat);
       }
       group.add(
-        createLocalCylinderMesh(
-          Math.max(10, serviceWidth * 0.09),
-          Math.max(10, serviceWidth * 0.09),
-          Math.max(40, serviceWidth * 0.42),
-          '#c68b4e',
+        createRoundedLocalExtrudedMesh(
+          supplyMouthWidth * 0.92,
+          mouthFrameDepth * 1.6,
+          supplyMouthHeight * 0.9,
+          Math.min(supplyMouthWidth, supplyMouthHeight) * 0.03,
+          '#d7dde2',
           new THREE.Vector3(
-            serviceCenterX + serviceWidth * 0.36,
-            -serviceDepth * 0.04,
-            serviceCenterZ + serviceHeight * 0.2,
+            supplyCenterX,
+            supplyFrameY + mouthFrameDepth * 0.8,
+            supplyCenterZ,
           ),
           {
-            rotation: new THREE.Euler(0, 0, Math.PI / 2),
-            radialSegments: 20,
+            bevelEnabled: false,
+            curveSegments: 8,
+            renderOrder: 18,
           },
         ),
       );
       group.add(
-        createLocalCylinderMesh(
-          Math.max(8, serviceWidth * 0.07),
-          Math.max(8, serviceWidth * 0.07),
-          Math.max(34, serviceWidth * 0.36),
-          '#d3a25f',
+        createLocalBoxMesh(
+          supplyMouthWidth,
+          mouthFrameThickness,
+          mouthFrameDepth,
+          '#c6ced6',
           new THREE.Vector3(
-            serviceCenterX + serviceWidth * 0.34,
-            serviceDepth * 0.08,
-            serviceCenterZ + serviceHeight * 0.11,
+            supplyCenterX,
+            supplyFrameY + mouthFrameDepth / 2,
+            supplyCenterZ + supplyMouthHeight / 2 + mouthFrameThickness / 2,
           ),
-          {
-            rotation: new THREE.Euler(0, 0, Math.PI / 2),
-            radialSegments: 20,
-          },
         ),
       );
       group.add(
-        createLocalCylinderMesh(
-          Math.max(7, serviceWidth * 0.06),
-          Math.max(7, serviceWidth * 0.06),
-          Math.max(34, serviceWidth * 0.34),
-          '#8ec5ea',
+        createLocalBoxMesh(
+          supplyMouthWidth,
+          mouthFrameThickness,
+          mouthFrameDepth,
+          '#c6ced6',
           new THREE.Vector3(
-            serviceCenterX + serviceWidth * 0.32,
-            serviceDepth * 0.18,
-            serviceCenterZ + serviceHeight * 0.28,
+            supplyCenterX,
+            supplyFrameY + mouthFrameDepth / 2,
+            supplyCenterZ - supplyMouthHeight / 2 - mouthFrameThickness / 2,
           ),
-          {
-            rotation: new THREE.Euler(0, 0, Math.PI / 2),
-            radialSegments: 18,
-          },
         ),
       );
       group.add(
-        createLocalCylinderMesh(
-          Math.max(10, serviceWidth * 0.08),
-          Math.max(10, serviceWidth * 0.08),
-          Math.max(20, serviceWidth * 0.18),
-          '#111827',
+        createLocalBoxMesh(
+          mouthFrameThickness,
+          mouthFrameDepth,
+          supplyMouthHeight + mouthFrameThickness * 2,
+          '#c6ced6',
           new THREE.Vector3(
-            serviceCenterX + serviceWidth * 0.28,
-            serviceDepth * 0.22,
-            serviceCenterZ - serviceHeight * 0.18,
+            supplyCenterX - supplyMouthWidth / 2 - mouthFrameThickness / 2,
+            supplyFrameY + mouthFrameDepth / 2,
+            supplyCenterZ,
+          ),
+        ),
+      );
+      group.add(
+        createLocalBoxMesh(
+          mouthFrameThickness,
+          mouthFrameDepth,
+          supplyMouthHeight + mouthFrameThickness * 2,
+          '#c6ced6',
+          new THREE.Vector3(
+            supplyCenterX + supplyMouthWidth / 2 + mouthFrameThickness / 2,
+            supplyFrameY + mouthFrameDepth / 2,
+            supplyCenterZ,
+          ),
+        ),
+      );
+      const supplyCavityCenterY = addHollowMouthInterior(
+        supplyMouthWidth * 0.9,
+        supplyMouthHeight * 0.8,
+        supplyCenterX,
+        supplyFrameY,
+        supplyCenterZ,
+        1,
+        '#232a30',
+        '#151b22',
+      );
+      for (let vaneIndex = 0; vaneIndex < 4; vaneIndex += 1) {
+        const vane = createLocalBoxMesh(
+          supplyMouthWidth * 0.82,
+          Math.max(6, mouthFrameDepth * 0.72),
+          Math.max(6, mouthFrameThickness * 0.5),
+          '#9aa5ad',
+          new THREE.Vector3(
+            supplyCenterX,
+            supplyCavityCenterY + mouthCavityDepth * 0.18,
+            supplyCenterZ - supplyMouthHeight * 0.22 + vaneIndex * (supplyMouthHeight * 0.14),
+          ),
+          { renderOrder: 18 },
+        );
+        vane.rotation.x = 0.24;
+        group.add(vane);
+      }
+      group.add(
+        createRoundedLocalExtrudedMesh(
+          serviceWidth * 0.16,
+          serviceDepth * 0.7,
+          serviceHeight * 0.72,
+          Math.min(serviceWidth, serviceDepth) * 0.018,
+          '#2b3138',
+          new THREE.Vector3(
+            serviceCenterX + serviceWidth * 0.42,
+            depth * 0.07,
+            serviceCenterZ + serviceHeight * 0.03,
           ),
           {
-            rotation: new THREE.Euler(0, 0, Math.PI / 2),
-            radialSegments: 18,
+            bevelEnabled: false,
+            curveSegments: 8,
+            renderOrder: 18,
           },
         ),
       );
+      addHvacPipePort(group, {
+        anchor: new THREE.Vector3(
+          serviceCenterX + serviceWidth * 0.5,
+          -serviceDepth * 0.05,
+          serviceCenterZ + serviceHeight * 0.2,
+        ),
+        radius: Math.max(10, serviceWidth * 0.09),
+        length: Math.max(40, serviceWidth * 0.42),
+        color: '#c68b4e',
+      });
+      addHvacPipePort(group, {
+        anchor: new THREE.Vector3(
+          serviceCenterX + serviceWidth * 0.5,
+          serviceDepth * 0.08,
+          serviceCenterZ + serviceHeight * 0.08,
+        ),
+        radius: Math.max(8, serviceWidth * 0.07),
+        length: Math.max(34, serviceWidth * 0.36),
+        color: '#d3a25f',
+      });
+      addHvacPipePort(group, {
+        anchor: new THREE.Vector3(
+          serviceCenterX + serviceWidth * 0.5,
+          serviceDepth * 0.18,
+          serviceCenterZ - serviceHeight * 0.16,
+        ),
+        radius: Math.max(7, serviceWidth * 0.06),
+        length: Math.max(34, serviceWidth * 0.34),
+        color: '#8ec5ea',
+        collarColor: '#4b5563',
+      });
       break;
     }
     case 'outdoor-unit': {

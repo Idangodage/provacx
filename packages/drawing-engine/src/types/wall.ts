@@ -23,6 +23,7 @@ export interface BevelControl {
 
 export type WallMaterial = 'brick' | 'concrete' | 'partition';
 export type WallLayer = 'structural' | 'partition';
+export type PartitionWallMode = 'full' | 'half' | 'top';
 export type JoinType = 'miter' | 'bevel' | 'butt';
 export type RoomType =
   | 'Bathroom/Closet'
@@ -299,6 +300,7 @@ export interface Wall {
   centerlineOffset: number;      // perpendicular offset from reference line (mm), positive = interior direction
   material: WallMaterial;
   layer: WallLayer;
+  partitionMode?: PartitionWallMode;
   interiorLine: Line;            // computed from center + thickness/2 + offset
   exteriorLine: Line;            // computed from center - thickness/2 + offset
   startBevel: BevelControl;      // bevel controls at start endpoint
@@ -342,6 +344,8 @@ export interface CreateWallParams {
   centerlineOffset?: number;
   material?: WallMaterial;
   layer?: WallLayer;
+  partitionMode?: PartitionWallMode;
+  properties3D?: Partial<Wall3D>;
 }
 
 /**
@@ -400,7 +404,9 @@ export interface SectionLineDrawingState {
  */
 export interface WallSettings {
   defaultThickness: number;       // default wall thickness (mm)
+  defaultPartitionThickness: number;
   defaultHeight: number;          // default wall height (mm)
+  partitionMode: PartitionWallMode;
   defaultLayerCount: number;      // default wall layer count
   defaultMaterial: WallMaterial;
   defaultLayer: WallLayer;
@@ -486,6 +492,8 @@ export const MAX_WALL_HEIGHT = 10000;
 export const MIN_U_VALUE = 0.1;
 export const MAX_U_VALUE = 10;
 export const DEFAULT_WALL_HEIGHT = 2700;
+export const PARTITION_HALF_HEIGHT = 1219.2;
+export const PARTITION_TOP_CLEARANCE = 250;
 export const DEFAULT_ROOM_HEIGHT = 2700;
 export const DEFAULT_WALL_LAYER_COUNT = 1;
 export const DEFAULT_ROOM_SLAB_THICKNESS = 150;
@@ -509,7 +517,9 @@ export const WALL_MATERIAL_COLORS: Record<WallMaterial, { fill: string; stroke: 
 
 export const DEFAULT_WALL_SETTINGS: WallSettings = {
   defaultThickness: 150,
+  defaultPartitionThickness: 100,
   defaultHeight: DEFAULT_WALL_HEIGHT,
+  partitionMode: 'full',
   defaultLayerCount: DEFAULT_WALL_LAYER_COUNT,
   defaultMaterial: 'brick',
   defaultLayer: 'partition',
@@ -643,8 +653,8 @@ export const DEFAULT_DUCTED_AC: Omit<HvacElement, 'id'> = {
   modelLabel: 'Ducted A/C',
   position: { x: 0, y: 0 },
   rotation: 0,
-  width: 2200,
-  depth: 1000,
+  width: 786,
+  depth: 695,
   height: 280,
   elevation: 2700 - 280,   // ceiling-mounted, default ceiling at 2700mm
   mountType: 'ceiling',

@@ -181,6 +181,10 @@ export function useOpeningPlacement(options: UseOpeningPlacementOptions): UseOpe
         return next;
     }, [walls]);
 
+    const canHostOpeningOnWall = useCallback((wall: Wall): boolean => {
+        return wall.partitionMode !== 'half';
+    }, []);
+
     // -----------------------------------------------------------------------
     // resolveOpeningWidthMm
     // -----------------------------------------------------------------------
@@ -377,7 +381,8 @@ export function useOpeningPlacement(options: UseOpeningPlacementOptions): UseOpe
                     });
                     const fitsSegment =
                         wallSnap.wallLength >= openingWidth + MIN_OPENING_EDGE_MARGIN_MM * 2;
-                    openingPlacementValid = fitsSegment && !overlapsExistingOpening;
+                    const supportsOpening = canHostOpeningOnWall(wallSnap.wall);
+                    openingPlacementValid = fitsSegment && !overlapsExistingOpening && supportsOpening;
 
                     snappedWall = {
                         ...wallSnap,
@@ -420,6 +425,7 @@ export function useOpeningPlacement(options: UseOpeningPlacementOptions): UseOpe
         [
             placementRotationDeg,
             findWallPlacementSnap,
+            canHostOpeningOnWall,
             rooms,
             symbols,
             objectDefinitionsById,
@@ -605,7 +611,7 @@ export function useOpeningPlacement(options: UseOpeningPlacementOptions): UseOpe
                 pendingPlacementDefinition.category === 'windows';
             setProcessingStatus(
                 isOpening
-                    ? 'Placement blocked: opening does not fit or overlaps an existing opening.'
+                    ? 'Placement blocked: opening does not fit, overlaps another opening, or is on a half partition wall.'
                     : 'Placement blocked: furniture overlap detected.',
                 false
             );

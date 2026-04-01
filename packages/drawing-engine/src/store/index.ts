@@ -57,6 +57,7 @@ import type {
   WallDrawingState,
   WallSettings,
   WallMaterial,
+  PartitionWallMode,
   SectionLine,
   SectionLineDrawingState,
   SectionLineDirection,
@@ -79,6 +80,8 @@ import {
   DEFAULT_WALL_DRAWING_STATE,
   DEFAULT_WALL_HEIGHT,
   DEFAULT_WALL_LAYER_COUNT,
+  PARTITION_HALF_HEIGHT,
+  PARTITION_TOP_CLEARANCE,
   MAX_WALL_HEIGHT,
   MAX_WALL_THICKNESS,
   MIN_WALL_HEIGHT,
@@ -400,6 +403,21 @@ function clampThickness(thickness: number): number {
 
 function clampHeight(height: number): number {
   return clampValue(height, MIN_WALL_HEIGHT, MAX_WALL_HEIGHT);
+}
+
+function isPartitionWallTool(tool: DrawingTool): boolean {
+  return tool === 'partition-wall';
+}
+
+function resolvePartitionHeightMm(mode: PartitionWallMode, baseWallHeightMm: number): number {
+  const baseHeight = clampHeight(baseWallHeightMm);
+  if (mode === 'half') {
+    return clampHeight(PARTITION_HALF_HEIGHT);
+  }
+  if (mode === 'top') {
+    return clampHeight(baseHeight - PARTITION_TOP_CLEARANCE);
+  }
+  return baseHeight;
 }
 
 function inferHvacElementCategory(type: HvacElement['type']): HvacElement['category'] {
@@ -2885,6 +2903,7 @@ export const useDrawingStore = create<DrawingState>()(
         const thickness = clampThickness(params.thickness ?? 150);
         const material = params.material ?? 'brick';
         const layer = params.layer ?? 'partition';
+        const partitionMode = params.partitionMode;
         const existingWalls = get().walls;
         const trimmedEndpoints = autoTrimWallEndpoints(
           params.startPoint,
@@ -2914,6 +2933,7 @@ export const useDrawingStore = create<DrawingState>()(
           centerlineOffset: 0,
           material,
           layer,
+          partitionMode,
           interiorLine: {
             start: {
               x: trimmedEndpoints.startPoint.x + perpX * halfThickness,
@@ -2946,6 +2966,7 @@ export const useDrawingStore = create<DrawingState>()(
           height: get().wallSettings.defaultHeight ?? DEFAULT_WALL_HEIGHT,
           layerCount: get().wallSettings.defaultLayerCount ?? DEFAULT_WALL_LAYER_COUNT,
           thermalResistance: getArchitecturalMaterial(materialId)?.thermalResistance ?? DEFAULT_WALL_3D.thermalResistance,
+          ...(params.properties3D ?? {}),
         });
         let effectiveWallId = id;
 
@@ -3590,15 +3611,22 @@ export const useDrawingStore = create<DrawingState>()(
       },
 
       startWallDrawing: (startPoint) => {
-        const { wallSettings } = get();
+        const { wallSettings, activeTool } = get();
+        const partitionToolActive = isPartitionWallTool(activeTool);
+        const previewThickness = partitionToolActive
+          ? clampThickness(wallSettings.defaultPartitionThickness)
+          : clampThickness(wallSettings.defaultThickness);
+        const previewMaterial: WallMaterial = partitionToolActive
+          ? 'partition'
+          : wallSettings.defaultMaterial;
         set({
           wallDrawingState: {
             isDrawing: true,
             startPoint: { ...startPoint },
             currentPoint: { ...startPoint },
             chainMode: wallSettings.chainModeEnabled,
-            previewThickness: clampThickness(wallSettings.defaultThickness),
-            previewMaterial: wallSettings.defaultMaterial,
+            previewThickness,
+            previewMaterial,
           },
         });
       },
@@ -3613,7 +3641,7 @@ export const useDrawingStore = create<DrawingState>()(
       },
 
       commitWall: () => {
-        const { wallDrawingState, wallSettings } = get();
+        const { wallDrawingState, wallSettings, activeTool } = get();
 
         if (!wallDrawingState.isDrawing || !wallDrawingState.startPoint || !wallDrawingState.currentPoint) {
           return null;
@@ -3624,13 +3652,28 @@ export const useDrawingStore = create<DrawingState>()(
           return null;
         }
 
+        const partitionToolActive = isPartitionWallTool(activeTool);
+        const partitionMode = wallSettings.partitionMode;
+        const resolvedHeight = partitionToolActive
+          ? resolvePartitionHeightMm(partitionMode, wallSettings.defaultHeight)
+          : wallSettings.defaultHeight;
+
         // Create the wall
         const wallId = get().addWall({
           startPoint: wallDrawingState.startPoint,
           endPoint: wallDrawingState.currentPoint,
-          thickness: wallDrawingState.previewThickness,
-          material: wallDrawingState.previewMaterial,
-          layer: wallSettings.defaultLayer,
+          thickness: partitionToolActive
+            ? clampThickness(wallSettings.defaultPartitionThickness)
+            : wallDrawingState.previewThickness,
+          material: partitionToolActive ? 'partition' : wallDrawingState.previewMaterial,
+          layer: partitionToolActive ? 'partition' : wallSettings.defaultLayer,
+          partitionMode: partitionToolActive ? partitionMode : undefined,
+          properties3D: {
+            height: resolvedHeight,
+            materialId: partitionToolActive
+              ? getDefaultMaterialIdForWallMaterial('partition')
+              : undefined,
+          },
         });
 
         // If chain mode, start next wall from current endpoint
@@ -3745,6 +3788,9 @@ export const useDrawingStore = create<DrawingState>()(
         const safeSettings = { ...settings };
         if (safeSettings.defaultThickness !== undefined) {
           safeSettings.defaultThickness = clampThickness(safeSettings.defaultThickness);
+        }
+        if (safeSettings.defaultPartitionThickness !== undefined) {
+          safeSettings.defaultPartitionThickness = clampThickness(safeSettings.defaultPartitionThickness);
         }
         if (safeSettings.defaultHeight !== undefined) {
           safeSettings.defaultHeight = clampValue(
@@ -4238,7 +4284,20 @@ export const useDrawingStore = create<DrawingState>()(
           : { selectedElementIds: ids, selectedIds: ids }
       )),
       deleteSelected: () => get().deleteSelectedElements(),
-      setTool: (tool) => set({ activeTool: tool, tool }),
+      setTool: (tool) => set((state) => {
+        const partitionToolActive = isPartitionWallTool(tool);
+        return {
+          activeTool: tool,
+          tool,
+          wallDrawingState: {
+            ...state.wallDrawingState,
+            previewThickness: partitionToolActive
+              ? clampThickness(state.wallSettings.defaultPartitionThickness)
+              : clampThickness(state.wallSettings.defaultThickness),
+            previewMaterial: partitionToolActive ? 'partition' : state.wallSettings.defaultMaterial,
+          },
+        };
+      }),
       loadData: (data) => {
         try {
           const normalized = typeof data === 'string' ? data : JSON.stringify(data);
@@ -4251,7 +4310,20 @@ export const useDrawingStore = create<DrawingState>()(
       exportData: () => get().exportToJSON(),
 
       // Tool Actions
-      setActiveTool: (tool) => set({ activeTool: tool, tool }),
+      setActiveTool: (tool) => set((state) => {
+        const partitionToolActive = isPartitionWallTool(tool);
+        return {
+          activeTool: tool,
+          tool,
+          wallDrawingState: {
+            ...state.wallDrawingState,
+            previewThickness: partitionToolActive
+              ? clampThickness(state.wallSettings.defaultPartitionThickness)
+              : clampThickness(state.wallSettings.defaultThickness),
+            previewMaterial: partitionToolActive ? 'partition' : state.wallSettings.defaultMaterial,
+          },
+        };
+      }),
 
       // View Actions
       setZoom: (zoom) => set((state) => {
@@ -4532,6 +4604,11 @@ export const useDrawingStore = create<DrawingState>()(
               centerlineOffset: rawWall.centerlineOffset ?? 0,
               material: rawWall.material ?? 'partition',
               layer: rawWall.layer ?? 'partition',
+              partitionMode: rawWall.partitionMode === 'half' || rawWall.partitionMode === 'top'
+                ? rawWall.partitionMode
+                : rawWall.partitionMode === 'full'
+                  ? 'full'
+                  : undefined,
               interiorLine: rawWall.interiorLine ?? { start: { x: 0, y: 0 }, end: { x: 0, y: 0 } },
               exteriorLine: rawWall.exteriorLine ?? { start: { x: 0, y: 0 }, end: { x: 0, y: 0 } },
               startBevel: normalizeBevelControl(rawWall.startBevel),
@@ -4609,7 +4686,13 @@ export const useDrawingStore = create<DrawingState>()(
             ...(typeof data.wallSettings === 'object' && data.wallSettings ? data.wallSettings : {}),
           } as WallSettings;
           nextWallSettings.defaultThickness = clampThickness(nextWallSettings.defaultThickness);
+          nextWallSettings.defaultPartitionThickness = clampThickness(nextWallSettings.defaultPartitionThickness);
           nextWallSettings.defaultHeight = clampHeight(nextWallSettings.defaultHeight);
+          nextWallSettings.partitionMode =
+            nextWallSettings.partitionMode === 'half' ||
+            nextWallSettings.partitionMode === 'top'
+              ? nextWallSettings.partitionMode
+              : 'full';
           nextWallSettings.defaultLayerCount = Math.max(1, Math.round(nextWallSettings.defaultLayerCount));
           nextWallSettings.gridSize = Math.max(1, nextWallSettings.gridSize);
 

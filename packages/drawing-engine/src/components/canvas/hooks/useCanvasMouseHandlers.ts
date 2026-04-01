@@ -407,7 +407,7 @@ export function useCanvasMouseHandlers(
             }
 
             // Handle wall tool - convert from pixels to mm
-            if (tool === 'wall') {
+            if (tool === 'wall' || tool === 'partition-wall') {
                 const wallPoint = {
                     x: rawPoint.x / MM_TO_PX,
                     y: rawPoint.y / MM_TO_PX,
@@ -630,7 +630,7 @@ export function useCanvasMouseHandlers(
 
             // Handle wall tool movement - convert from pixels to mm
             // Show snap indicators on hover even before drawing starts
-            if (tool === 'wall') {
+            if (tool === 'wall' || tool === 'partition-wall') {
                 const wallPoint = {
                     x: rawPoint.x / MM_TO_PX,
                     y: rawPoint.y / MM_TO_PX,
