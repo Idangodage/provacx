@@ -8,6 +8,7 @@ import * as fabric from 'fabric';
 
 import type { AcEquipmentDefinition } from '../../../data';
 import type { HvacElement, Point2D } from '../../../types';
+import { buildCeilingCassetteModel } from './ceilingCassetteModel';
 import { MM_TO_PX } from '../scale';
 import {
   getCanvasViewportBounds,
@@ -200,12 +201,14 @@ export class HvacPlanRenderer {
   }
 
   private createBaseObjects(
-    element: Pick<HvacElement, 'id' | 'type' | 'label' | 'width' | 'depth' | 'category'>,
+    element: Pick<HvacElement, 'id' | 'type' | 'label' | 'width' | 'depth' | 'height' | 'category' | 'properties'>,
     options: { valid: boolean; includeInteractionHalos: boolean },
   ): fabric.FabricObject[] {
     const palette = this.getPalette(element, options.valid);
-    const widthPx = Math.max(20, element.width * MM_TO_PX);
-    const depthPx = Math.max(12, element.depth * MM_TO_PX);
+    const baseWidthPx = Math.max(20, element.width * MM_TO_PX);
+    const baseDepthPx = Math.max(12, element.depth * MM_TO_PX);
+    const widthPx = baseWidthPx;
+    const depthPx = baseDepthPx;
     const halfW = widthPx / 2;
     const halfD = depthPx / 2;
     const objects: fabric.FabricObject[] = [];
@@ -226,7 +229,7 @@ export class HvacPlanRenderer {
       evented: false,
     });
 
-    if (element.type === 'ceiling-cassette-ac' || element.type === 'filter') {
+    if (element.type === 'filter') {
       background.set('strokeDashArray', [6, 4]);
     }
 
@@ -235,38 +238,252 @@ export class HvacPlanRenderer {
 
     switch (element.type) {
       case 'ceiling-cassette-ac': {
-        const horizontal = new fabric.Line(
-          [-halfW * 0.82, 0, halfW * 0.82, 0],
-          {
-            stroke: palette.detail,
-            strokeWidth: 1,
-            selectable: false,
-            evented: false,
-          },
-        );
-        const vertical = new fabric.Line(
-          [0, -halfD * 0.82, 0, halfD * 0.82],
-          {
-            stroke: palette.detail,
-            strokeWidth: 1,
-            selectable: false,
-            evented: false,
-          },
-        );
-        const centerDot = new fabric.Circle({
-          left: 0,
-          top: 0,
-          radius: Math.max(2.5, Math.min(widthPx, depthPx) * 0.045),
+        const cassette = buildCeilingCassetteModel(element);
+        const toPx = (valueMm: number): number => valueMm * MM_TO_PX;
+        const panelSizePx = toPx(cassette.panelSize);
+        const minDimension = panelSizePx;
+        const panelFill = options.valid ? 'rgba(255,255,255,0.97)' : 'rgba(254,242,242,0.92)';
+        const innerPanelFill = options.valid ? 'rgba(248,250,252,0.96)' : 'rgba(255,255,255,0.80)';
+        const panelOutlineStroke = options.valid ? 'rgba(15,23,42,0.96)' : 'rgba(185,28,28,0.72)';
+        const innerPanelStroke = options.valid ? 'rgba(30,41,59,0.78)' : 'rgba(185,28,28,0.5)';
+        const hiddenBodyStroke = options.valid ? 'rgba(138,148,157,0.78)' : 'rgba(127,29,29,0.58)';
+        const slotFill = options.valid ? 'rgba(26,32,48,0.92)' : 'rgba(127,29,29,0.52)';
+        const vaneFill = options.valid ? 'rgba(208,216,224,0.96)' : 'rgba(255,228,230,0.88)';
+        const grilleFrameStroke = options.valid ? 'rgba(205,213,220,0.96)' : 'rgba(185,28,28,0.32)';
+        const horizontalSlatStroke = options.valid ? 'rgba(138,151,164,0.92)' : 'rgba(185,28,28,0.48)';
+        const verticalSlatStroke = options.valid ? 'rgba(150,163,175,0.92)' : 'rgba(185,28,28,0.42)';
+        const accentFill = options.valid ? '#2f67c8' : '#b91c1c';
+        const serviceFill = options.valid ? '#eef3f7' : 'rgba(255,244,244,0.92)';
+        const serviceStroke = options.valid ? 'rgba(190,201,211,0.92)' : 'rgba(185,28,28,0.24)';
+
+        background.set({
+          width: panelSizePx,
+          height: panelSizePx,
+          fill: panelFill,
+          stroke: panelOutlineStroke,
+          strokeWidth: 2.1,
+          rx: Math.max(8, minDimension * 0.085),
+          ry: Math.max(8, minDimension * 0.085),
+        });
+        background.set('strokeDashArray', null);
+
+        const concealedBody = new fabric.Rect({
+          left: toPx(cassette.hiddenBody.x),
+          top: toPx(cassette.hiddenBody.y),
+          width: toPx(cassette.hiddenBody.width),
+          height: toPx(cassette.hiddenBody.depth),
+          rx: Math.max(6, toPx(cassette.hiddenBody.cornerRadius)),
+          ry: Math.max(6, toPx(cassette.hiddenBody.cornerRadius)),
           originX: 'center',
           originY: 'center',
-          fill: palette.detail,
+          fill: 'transparent',
+          stroke: hiddenBodyStroke,
+          strokeWidth: 1.05,
+          strokeDashArray: [7, 5],
           selectable: false,
           evented: false,
         });
-        this.annotate(horizontal, element.id, 'hvac-detail');
-        this.annotate(vertical, element.id, 'hvac-detail');
-        this.annotate(centerDot, element.id, 'hvac-detail');
-        objects.push(horizontal, vertical, centerDot);
+        this.annotate(concealedBody, element.id, 'hvac-detail');
+        objects.push(concealedBody);
+
+        const innerPanel = new fabric.Rect({
+          left: toPx(cassette.innerPanel.x),
+          top: toPx(cassette.innerPanel.y),
+          width: toPx(cassette.innerPanel.width),
+          height: toPx(cassette.innerPanel.depth),
+          rx: Math.max(6, toPx(cassette.innerPanel.cornerRadius)),
+          ry: Math.max(6, toPx(cassette.innerPanel.cornerRadius)),
+          originX: 'center',
+          originY: 'center',
+          fill: innerPanelFill,
+          stroke: innerPanelStroke,
+          strokeWidth: 1.45,
+          selectable: false,
+          evented: false,
+        });
+        this.annotate(innerPanel, element.id, 'hvac-detail');
+        objects.push(innerPanel);
+
+        cassette.slots.forEach((slot) => {
+          const slotOpening = new fabric.Rect({
+            left: toPx(slot.x),
+            top: toPx(slot.y),
+            width: toPx(slot.width),
+            height: toPx(slot.depth),
+            rx: Math.max(2, toPx(slot.cornerRadius)),
+            ry: Math.max(2, toPx(slot.cornerRadius)),
+            originX: 'center',
+            originY: 'center',
+            fill: slotFill,
+            selectable: false,
+            evented: false,
+          });
+          this.annotate(slotOpening, element.id, 'hvac-detail');
+          objects.push(slotOpening);
+        });
+
+        cassette.vanes.forEach((vane) => {
+          const vaneRect = new fabric.Rect({
+            left: toPx(vane.x),
+            top: toPx(vane.y),
+            width: toPx(vane.width),
+            height: toPx(vane.depth),
+            originX: 'center',
+            originY: 'center',
+            fill: vaneFill,
+            selectable: false,
+            evented: false,
+          });
+          this.annotate(vaneRect, element.id, 'hvac-detail');
+          objects.push(vaneRect);
+        });
+
+        const grilleSize = toPx(cassette.grille.size);
+        const grilleFrame = new fabric.Rect({
+          left: toPx(cassette.grille.x),
+          top: toPx(cassette.grille.y),
+          width: grilleSize,
+          height: grilleSize,
+          rx: Math.max(3, toPx(cassette.grille.cornerRadius)),
+          ry: Math.max(3, toPx(cassette.grille.cornerRadius)),
+          originX: 'center',
+          originY: 'center',
+          fill: options.valid ? 'rgba(205,213,220,0.22)' : 'rgba(255,255,255,0.18)',
+          stroke: grilleFrameStroke,
+          strokeWidth: 0.9,
+          selectable: false,
+          evented: false,
+        });
+        this.annotate(grilleFrame, element.id, 'hvac-detail');
+        objects.push(grilleFrame);
+
+        const horizontalSlatHalfWidth = toPx(cassette.grille.slatSpan / 2);
+        const verticalSlatHalfHeight = toPx(cassette.grille.slatSpan / 2);
+        for (let i = 0; i < cassette.grille.slatCount; i += 1) {
+          const y = toPx(-cassette.grille.slatInset + cassette.grille.slatStep * i);
+          const horizontalSlat = new fabric.Line(
+            [-horizontalSlatHalfWidth, y, horizontalSlatHalfWidth, y],
+            {
+              stroke: horizontalSlatStroke,
+              strokeWidth: 0.75,
+              selectable: false,
+              evented: false,
+            },
+          );
+          this.annotate(horizontalSlat, element.id, 'hvac-detail');
+          objects.push(horizontalSlat);
+        }
+        for (let i = 0; i < cassette.grille.slatCount; i += 1) {
+          const x = toPx(-cassette.grille.slatInset + cassette.grille.slatStep * i);
+          const verticalSlat = new fabric.Line(
+            [x, -verticalSlatHalfHeight, x, verticalSlatHalfHeight],
+            {
+              stroke: verticalSlatStroke,
+              strokeWidth: 0.75,
+              selectable: false,
+              evented: false,
+            },
+          );
+          this.annotate(verticalSlat, element.id, 'hvac-detail');
+          objects.push(verticalSlat);
+        }
+
+        const accentBar = new fabric.Rect({
+          left: toPx(cassette.accentBar.x),
+          top: toPx(cassette.accentBar.y),
+          width: toPx(cassette.accentBar.width),
+          height: Math.max(toPx(cassette.accentBar.depth), 2),
+          originX: 'center',
+          originY: 'center',
+          fill: accentFill,
+          selectable: false,
+          evented: false,
+        });
+        this.annotate(accentBar, element.id, 'hvac-detail');
+        objects.push(accentBar);
+
+        const serviceTab = new fabric.Rect({
+          left: toPx(cassette.serviceTab.x),
+          top: toPx(cassette.serviceTab.y),
+          width: toPx(cassette.serviceTab.width),
+          height: Math.max(toPx(cassette.serviceTab.depth), 2.5),
+          originX: 'center',
+          originY: 'center',
+          fill: serviceFill,
+          stroke: serviceStroke,
+          strokeWidth: 0.6,
+          selectable: false,
+          evented: false,
+        });
+        this.annotate(serviceTab, element.id, 'hvac-detail');
+        objects.push(serviceTab);
+
+        cassette.pipePorts.forEach((port) => {
+          const flange = new fabric.Rect({
+            left: toPx(port.x + port.flangeThickness / 2),
+            top: toPx(port.y),
+            width: Math.max(toPx(port.flangeThickness), 2),
+            height: Math.max(toPx(port.collarRadius * 2.24), 2.5),
+            rx: Math.max(toPx(port.collarRadius * 1.12), 1.5),
+            ry: Math.max(toPx(port.collarRadius * 1.12), 1.5),
+            originX: 'center',
+            originY: 'center',
+            fill: port.flangeColor ?? '#d7dde2',
+            selectable: false,
+            evented: false,
+          });
+          this.annotate(flange, element.id, 'hvac-detail');
+          objects.push(flange);
+
+          const collar = new fabric.Rect({
+            left: toPx(port.x + port.collarLength / 2 + port.flangeThickness * 0.35),
+            top: toPx(port.y),
+            width: Math.max(toPx(port.collarLength), 2.5),
+            height: Math.max(toPx(port.collarRadius * 2), 2.5),
+            rx: Math.max(toPx(port.collarRadius), 1.5),
+            ry: Math.max(toPx(port.collarRadius), 1.5),
+            originX: 'center',
+            originY: 'center',
+            fill: port.collarColor ?? '#1f2937',
+            selectable: false,
+            evented: false,
+          });
+          this.annotate(collar, element.id, 'hvac-detail');
+          objects.push(collar);
+
+          const pipeRun = new fabric.Rect({
+            left: toPx(port.x + port.collarLength + port.length / 2 - port.flangeThickness * 0.15),
+            top: toPx(port.y),
+            width: Math.max(toPx(port.length), 3),
+            height: Math.max(toPx(port.radius * 2), 2),
+            rx: Math.max(toPx(port.radius), 1.5),
+            ry: Math.max(toPx(port.radius), 1.5),
+            originX: 'center',
+            originY: 'center',
+            fill: port.color,
+            selectable: false,
+            evented: false,
+          });
+          this.annotate(pipeRun, element.id, 'hvac-detail');
+          objects.push(pipeRun);
+
+          const bandMarker = new fabric.Line(
+            [
+              toPx(port.x + port.bandOffsetX),
+              toPx(port.y - port.bandRadius),
+              toPx(port.x + port.bandOffsetX),
+              toPx(port.y + port.bandRadius),
+            ],
+            {
+              stroke: port.bandColor,
+              strokeWidth: Math.max(toPx(port.bandRadius * 0.18), 1.2),
+              selectable: false,
+              evented: false,
+            },
+          );
+          this.annotate(bandMarker, element.id, 'hvac-detail');
+          objects.push(bandMarker);
+        });
         break;
       }
       case 'wall-mounted-ac':
@@ -433,7 +650,7 @@ export class HvacPlanRenderer {
   }
 
   private buildGroup(
-    element: Pick<HvacElement, 'id' | 'type' | 'label' | 'position' | 'rotation' | 'width' | 'depth' | 'category'>,
+    element: Pick<HvacElement, 'id' | 'type' | 'label' | 'position' | 'rotation' | 'width' | 'depth' | 'height' | 'category' | 'properties'>,
     options: { valid?: boolean; selectable?: boolean; evented?: boolean; includeInteractionHalos?: boolean },
   ): HvacGroup {
     const center = toCanvas(elementCenter(element));
@@ -454,7 +671,7 @@ export class HvacPlanRenderer {
       hasControls: false,
       hasBorders: false,
       lockRotation: true,
-      objectCaching: true,
+      objectCaching: false,
     }) as HvacGroup;
     group.id = element.id;
     group.hvacElementId = element.id;

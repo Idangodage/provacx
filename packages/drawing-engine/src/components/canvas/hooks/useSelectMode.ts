@@ -1954,28 +1954,6 @@ export function useSelectMode({
     return false;
   }, [buildEndpointConstraints, canRotateWall, findRoomById, findWallById, resetDragDynamics, showGhostWalls]);
 
-  const beginRoomMoveDrag = useCallback((roomId: string, point: Point2D): boolean => {
-    const room = findRoomById(roomId);
-    if (!room) return false;
-
-    isWallHandleDraggingRef.current = true;
-    resetDragDynamics(point);
-    const ghostWalls = room.wallIds
-      .map((wallId) => findWallById(wallId))
-      .filter((wall): wall is Wall => Boolean(wall));
-    showGhostWalls(ghostWalls);
-
-    dragStateRef.current = {
-      mode: 'room-move',
-      roomId: room.id,
-      startPointer: { ...point },
-      lastAppliedDelta: { x: 0, y: 0 },
-      ghostWalls,
-    };
-    optionsRef.current.onRoomDragStateChange?.(room.id);
-    return true;
-  }, [findRoomById, findWallById, resetDragDynamics, showGhostWalls]);
-
   const computePerpendicularSnap = useCallback(
     (state: EndpointDragState, candidatePoint: Point2D): { snapped: Point2D; line?: { start: Point2D; end: Point2D } } => {
       const connectedWalls = state.baselineWall.connectedWalls
@@ -2990,17 +2968,6 @@ export function useSelectMode({
         return;
       }
 
-      if (
-        meta.roomId &&
-        !meta.controlType &&
-        !addToSelection &&
-        optionsRef.current.selectedIds.includes(meta.roomId) &&
-        beginRoomMoveDrag(meta.roomId, scenePoint)
-      ) {
-        optionsRef.current.onDragStateChange?.(true);
-        return;
-      }
-
       const clickedId =
         meta.wallId ??
         meta.roomId ??
@@ -3026,7 +2993,7 @@ export function useSelectMode({
       }
       optionsRef.current.setHoveredElement(null);
     },
-    [beginControlDrag, beginRoomMoveDrag, getTargetMeta]
+    [beginControlDrag, getTargetMeta]
   );
 
   const handleMouseUp = useCallback(() => {

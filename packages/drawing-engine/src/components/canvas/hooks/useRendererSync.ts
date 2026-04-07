@@ -996,9 +996,10 @@ export function useRendererSync(options: UseRendererSyncOptions): UseRendererSyn
 
     // Render HVAC elements on plan canvas
     useEffect(() => {
+        roomRendererRef.current?.setHvacContext(hvacElements);
         if (!hvacRendererRef.current) return;
         hvacRendererRef.current.syncElements(hvacElements);
-    }, [hvacElements, fabricCanvas, hvacRendererRef]);
+    }, [hvacElements, fabricCanvas, hvacRendererRef, roomRendererRef]);
 
     useEffect(() => {
         const hvacIds = new Set(hvacElements.map((element) => element.id));

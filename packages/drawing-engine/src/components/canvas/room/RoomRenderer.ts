@@ -9,7 +9,7 @@
 
 import * as fabric from 'fabric';
 
-import type { Point2D, Room, Wall } from '../../../types';
+import type { HvacElement, Point2D, Room, Wall } from '../../../types';
 import { distancePointToSegment } from '../../../utils/geometry';
 import { GeometryEngine } from '../../../utils/geometry-engine';
 import { MM_TO_PX } from '../scale';
@@ -45,6 +45,14 @@ interface AreaTag {
   vertices: Point2D[];
   holes: Point2D[][];
   accentColor: string;
+  obstacles: AreaTagObstacle[];
+}
+
+interface AreaTagObstacle {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
 }
 
 const AREA_TAG_FONT_SIZE = 56;
@@ -55,6 +63,7 @@ const LABEL_FIT_STEPS = 12;
 const AREA_TAG_PADDING_X = 14;
 const AREA_TAG_PADDING_Y = 10;
 const AREA_TAG_CANDIDATE_GRID = 7;
+const AREA_TAG_HVAC_CLEARANCE_PX = 18;
 
 interface SyncRoomsOptions {
   force?: boolean;
@@ -125,6 +134,7 @@ export class RoomRenderer {
   private areaTagData = new Map<string, AreaTag>();
   private roomData = new Map<string, Room>();
   private wallData = new Map<string, Wall>();
+  private hvacData = new Map<string, HvacElement>();
   private selectedRoomIds = new Set<string>();
   private activeDragRoomId: string | null = null;
   private persistentControlRoomId: string | null = null;
@@ -266,6 +276,15 @@ export class RoomRenderer {
     this.canvas.requestRenderAll();
   }
 
+  setHvacContext(hvacElements: HvacElement[]): void {
+    this.hvacData = new Map(hvacElements.map((element) => [element.id, element]));
+    if (this.roomData.size === 0) {
+      return;
+    }
+    this.syncAreaTagsFromRooms(Array.from(this.roomData.values()));
+    this.canvas.requestRenderAll();
+  }
+
   private roomNeedsRerender(previousRoom: Room | undefined, nextRoom: Room): boolean {
     return previousRoom !== nextRoom;
   }
@@ -369,7 +388,8 @@ export class RoomRenderer {
     halfWidth: number,
     halfHeight: number,
     vertices: Point2D[],
-    holes: Point2D[][] = []
+    holes: Point2D[][] = [],
+    obstacles: AreaTagObstacle[] = []
   ): boolean {
     const outer = vertices.map(toCanvasPoint);
     const canvasHoles = holes.map((hole) => hole.map(toCanvasPoint));
@@ -380,7 +400,21 @@ export class RoomRenderer {
       { x: center.x + halfWidth, y: center.y + halfHeight },
       { x: center.x - halfWidth, y: center.y + halfHeight },
     ];
-    return testPoints.every((point) => this.pointInArea(point, outer, canvasHoles));
+    const insideArea = testPoints.every((point) => this.pointInArea(point, outer, canvasHoles));
+    if (!insideArea) {
+      return false;
+    }
+
+    const labelLeft = center.x - halfWidth;
+    const labelTop = center.y - halfHeight;
+    const labelRight = center.x + halfWidth;
+    const labelBottom = center.y + halfHeight;
+    return obstacles.every((obstacle) => (
+      labelRight <= obstacle.left ||
+      labelLeft >= obstacle.right ||
+      labelBottom <= obstacle.top ||
+      labelTop >= obstacle.bottom
+    ));
   }
 
   private getAreaTagCandidatePoints(areaTag: Pick<AreaTag, 'centroid' | 'vertices' | 'holes'>): Point2D[] {
@@ -434,8 +468,52 @@ export class RoomRenderer {
     return Math.min(outerClearance, holeClearance);
   }
 
+  private getHvacBoundsInCanvas(element: Pick<HvacElement, 'position' | 'width' | 'depth' | 'rotation'>): AreaTagObstacle {
+    const center = toCanvasPoint({
+      x: element.position.x + element.width / 2,
+      y: element.position.y + element.depth / 2,
+    });
+    const halfWidth = (element.width * MM_TO_PX) / 2;
+    const halfDepth = (element.depth * MM_TO_PX) / 2;
+    const angleRad = ((element.rotation ?? 0) * Math.PI) / 180;
+    const cos = Math.cos(angleRad);
+    const sin = Math.sin(angleRad);
+    const corners = [
+      { x: -halfWidth, y: -halfDepth },
+      { x: halfWidth, y: -halfDepth },
+      { x: halfWidth, y: halfDepth },
+      { x: -halfWidth, y: halfDepth },
+    ].map((corner) => ({
+      x: center.x + corner.x * cos - corner.y * sin,
+      y: center.y + corner.x * sin + corner.y * cos,
+    }));
+    const padding = AREA_TAG_HVAC_CLEARANCE_PX;
+    return {
+      left: Math.min(...corners.map((corner) => corner.x)) - padding,
+      top: Math.min(...corners.map((corner) => corner.y)) - padding,
+      right: Math.max(...corners.map((corner) => corner.x)) + padding,
+      bottom: Math.max(...corners.map((corner) => corner.y)) + padding,
+    };
+  }
+
+  private getRoomHvacObstacles(room: Room): AreaTagObstacle[] {
+    const obstacles: AreaTagObstacle[] = [];
+    this.hvacData.forEach((element) => {
+      const centerPoint = {
+        x: element.position.x + element.width / 2,
+        y: element.position.y + element.depth / 2,
+      };
+      const belongsToRoom = element.roomId === room.id || GeometryEngine.pointInRoom(centerPoint, room);
+      if (!belongsToRoom) {
+        return;
+      }
+      obstacles.push(this.getHvacBoundsInCanvas(element));
+    });
+    return obstacles;
+  }
+
   private getAreaTagPlacement(
-    areaTag: Pick<AreaTag, 'centroid' | 'vertices' | 'holes'>,
+    areaTag: Pick<AreaTag, 'centroid' | 'vertices' | 'holes' | 'obstacles'>,
     baseWidth: number,
     baseHeight: number
   ): { center: Point2D; scale: number } {
@@ -464,7 +542,14 @@ export class RoomRenderer {
         const scale = preferredScale - (preferredScale - minimumScale) * t;
         const halfWidth = (baseWidth * scale) / 2;
         const halfHeight = (baseHeight * scale) / 2;
-        if (this.doesLabelRectFitArea(labelCenter, halfWidth, halfHeight, areaTag.vertices, areaTag.holes)) {
+        if (this.doesLabelRectFitArea(
+          labelCenter,
+          halfWidth,
+          halfHeight,
+          areaTag.vertices,
+          areaTag.holes,
+          areaTag.obstacles,
+        )) {
           bestScaleForCandidate = scale;
           fits = true;
           break;
@@ -596,6 +681,7 @@ export class RoomRenderer {
         vertices: room.vertices.map((vertex) => ({ ...vertex })),
         holes: (room.holes ?? []).map((hole) => hole.map((vertex) => ({ ...vertex }))),
         accentColor: '#94A3B8',
+        obstacles: this.getRoomHvacObstacles(room),
       }));
   }
 
@@ -627,9 +713,9 @@ export class RoomRenderer {
     const pathData = this.roomPathData(room);
 
     const fill = new fabric.Path(pathData, {
-      fill: room.fillColor,
+      // Keep the room hit area interactive without visibly tinting the room interior.
+      fill: 'rgba(0,0,0,0.001)',
       fillRule: 'evenodd',
-      opacity: 0.12,
       stroke: 'transparent',
       strokeWidth: 0,
       selectable: false,
@@ -638,7 +724,7 @@ export class RoomRenderer {
     this.annotate(fill, room.id, 'roomFill');
 
     const selectionOutline = new fabric.Path(pathData, {
-      fill: 'rgba(37,99,235,0.12)',
+      fill: 'transparent',
       fillRule: 'evenodd',
       stroke: '#1D4ED8',
       strokeWidth: 3,
@@ -650,7 +736,7 @@ export class RoomRenderer {
     this.annotate(selectionOutline, room.id, 'selectionOutline');
 
     const hoverOutline = new fabric.Path(pathData, {
-      fill: 'rgba(16,185,129,0.1)',
+      fill: 'transparent',
       fillRule: 'evenodd',
       stroke: '#059669',
       strokeWidth: 2.5,
@@ -1228,6 +1314,7 @@ export class RoomRenderer {
     this.areaTagGroups.clear();
     this.areaTagData.clear();
     this.roomData.clear();
+    this.hvacData.clear();
     this.selectedRoomIds.clear();
     this.activeDragRoomId = null;
     this.persistentControlRoomId = null;

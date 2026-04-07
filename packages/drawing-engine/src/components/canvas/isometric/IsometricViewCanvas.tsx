@@ -10,6 +10,7 @@ import type { HvacElement, Point2D, Room, SymbolInstance2D, Wall } from '../../.
 import { buildIsometricWallBandsSignature } from './wallBands';
 import { buildIsometricWallBandsInBackground } from './isometricWallBandsWorkerClient';
 import { createWallOpenings3D, type OpeningRenderOptions } from './Opening3DRenderer';
+import { buildCeilingCassetteModel } from '../hvac/ceilingCassetteModel';
 import { hasRenderer } from '../object/FurnitureSymbolRenderer';
 import { createOptimizedFurnitureModel3D } from '../object/three3d/Furniture3DRenderer';
 
@@ -1090,226 +1091,206 @@ function createHvacEquipmentMesh(element: HvacElement): THREE.Group {
       break;
     }
     case 'ceiling-cassette-ac': {
-      const gasPipeDiameterMm = readFlexibleNumberProperty(element.properties, 'refrigerantGasPipeDiameterMm')
-        ?? readFlexibleNumberProperty(element.properties, 'Refrigerant Gas Pipe Diameter (mm)')
-        ?? 12.7;
-      const liquidPipeDiameterMm = readFlexibleNumberProperty(element.properties, 'refrigerantLiquidPipeDiameterMm')
-        ?? readFlexibleNumberProperty(element.properties, 'Refrigerant Liquid Pipe Diameter (mm)')
-        ?? 6.35;
-      const drainPipeDiameterMm = readFlexibleNumberProperty(element.properties, 'drainPipeDiameter1Mm')
-        ?? readFlexibleNumberProperty(element.properties, 'Drain Pipe Diameter 1 (mm)')
-        ?? 32;
-      const staticPressurePa = readFlexibleNumberProperty(element.properties, 'staticPressurePa')
-        ?? readFlexibleNumberProperty(element.properties, 'espPa')
-        ?? readFlexibleNumberProperty(element.properties, 'External Static Pressure (Pa)')
-        ?? 200;
+      const cassette = buildCeilingCassetteModel(element);
 
-      const panelHeight = Math.max(28, Math.min(44, height * 0.16));
-      const cassetteBodyHeight = Math.max(70, height - panelHeight * 0.4);
-      const bodyBaseZ = panelHeight * 0.55;
-      const grillePlateHeight = Math.max(5, panelHeight * 0.16);
-      const slotHeight = Math.max(5, panelHeight * 0.12);
-      const grilleDensityFactor = THREE.MathUtils.clamp(staticPressurePa / 200, 0.7, 1.35);
-      const slotInsetFactor = THREE.MathUtils.clamp(0.32 - (grilleDensityFactor - 1) * 0.03, 0.26, 0.36);
-
+      // --- Main concealed body (inside ceiling void) ---
       group.add(
         createRoundedLocalExtrudedMesh(
-          width * 0.8,
-          depth * 0.8,
-          cassetteBodyHeight,
-          Math.min(width, depth) * 0.045,
-          '#cfd6dc',
-          new THREE.Vector3(0, 0, bodyBaseZ + cassetteBodyHeight / 2),
+          cassette.hiddenBody.width,
+          cassette.hiddenBody.depth,
+          cassette.hiddenBody.height,
+          cassette.hiddenBody.cornerRadius,
+          '#bcc5ce',
+          new THREE.Vector3(cassette.hiddenBody.x, cassette.hiddenBody.y, cassette.hiddenBody.z),
         ),
       );
+      // Top cap (sheet metal cover on top of body)
       group.add(
         createRoundedLocalExtrudedMesh(
-          width * 0.74,
-          depth * 0.74,
-          Math.max(10, cassetteBodyHeight * 0.08),
-          Math.min(width, depth) * 0.032,
-          '#e5eaee',
-          new THREE.Vector3(0, 0, bodyBaseZ + cassetteBodyHeight * 0.92),
+          cassette.topCap.width,
+          cassette.topCap.depth,
+          cassette.topCap.height,
+          cassette.topCap.cornerRadius,
+          '#a8b3bd',
+          new THREE.Vector3(cassette.topCap.x, cassette.topCap.y, cassette.topCap.z),
         ),
       );
+      // Drain pump housing (small box on one side of body)
       group.add(
         createRoundedLocalExtrudedMesh(
-          width,
-          depth,
-          panelHeight,
-          Math.min(width, depth) * 0.085,
+          cassette.drainPumpHousing.width,
+          cassette.drainPumpHousing.depth,
+          cassette.drainPumpHousing.height,
+          cassette.drainPumpHousing.cornerRadius,
+          '#8a949d',
+          new THREE.Vector3(cassette.drainPumpHousing.x, cassette.drainPumpHousing.y, cassette.drainPumpHousing.z),
+          { bevelEnabled: false, curveSegments: 8, renderOrder: 18 },
+        ),
+      );
+
+      // --- Decorative face panel (visible from below, flush with ceiling) ---
+      group.add(
+        createRoundedLocalExtrudedMesh(
+          cassette.facePanel.width,
+          cassette.facePanel.depth,
+          cassette.facePanel.height,
+          cassette.facePanel.cornerRadius,
           '#fbfcfd',
-          new THREE.Vector3(0, 0, panelHeight / 2),
+          new THREE.Vector3(cassette.facePanel.x, cassette.facePanel.y, cassette.facePanel.z),
           {
-            bevelThickness: Math.min(panelHeight * 0.22, 6),
-            bevelSize: Math.min(width, depth) * 0.025,
+            bevelThickness: cassette.facePanel.bevelThickness,
+            bevelSize: cassette.facePanel.bevelSize,
             bevelSegments: 4,
           },
         ),
       );
+      // Recessed inner panel
       group.add(
         createRoundedLocalExtrudedMesh(
-          width * 0.92,
-          depth * 0.92,
-          Math.max(10, panelHeight * 0.38),
-          Math.min(width, depth) * 0.072,
+          cassette.innerPanel.width,
+          cassette.innerPanel.depth,
+          cassette.innerPanel.height,
+          cassette.innerPanel.cornerRadius,
           '#eef3f7',
-          new THREE.Vector3(0, 0, panelHeight * 0.48),
+          new THREE.Vector3(cassette.innerPanel.x, cassette.innerPanel.y, cassette.innerPanel.z),
           {
-            bevelThickness: Math.max(1.2, panelHeight * 0.12),
-            bevelSize: Math.min(width, depth) * 0.018,
+            bevelThickness: cassette.innerPanel.bevelThickness,
+            bevelSize: cassette.innerPanel.bevelSize,
             bevelSegments: 4,
           },
         ),
       );
-      addVentSlats(group, {
-        count: Math.max(6, Math.min(10, Math.round(7 * grilleDensityFactor))),
-        width: width * 0.46,
-        depth: 2,
-        height: 2,
-        startX: 0,
-        startY: -depth * 0.18,
-        startZ: panelHeight * 0.6,
-        stepY: depth * 0.06,
-        color: '#97a3af',
-      });
-      addVentSlats(group, {
-        count: Math.max(6, Math.min(10, Math.round(7 * grilleDensityFactor))),
-        width: 2,
-        depth: depth * 0.46,
-        height: 2,
-        startX: -width * 0.18,
-        startY: 0,
-        startZ: panelHeight * 0.62,
-        stepX: width * 0.06,
-        color: '#a4afb8',
-      });
-      group.add(
-        createRoundedLocalExtrudedMesh(
-          width * 0.54,
-          depth * 0.54,
-          grillePlateHeight,
-          Math.min(width, depth) * 0.036,
-          '#d8e0e6',
-          new THREE.Vector3(0, 0, panelHeight * 0.56),
-          {
-            bevelEnabled: false,
-          },
-        ),
-      );
-      group.add(
-        createRoundedLocalExtrudedMesh(
-          width * 0.6,
-          depth * 0.08,
-          slotHeight,
-          depth * 0.018,
-          '#1f2430',
-          new THREE.Vector3(0, -depth * slotInsetFactor, panelHeight * 0.62),
-          { renderOrder: 18, bevelEnabled: false, curveSegments: 8 },
-        ),
-      );
-      group.add(
-        createRoundedLocalExtrudedMesh(
-          width * 0.6,
-          depth * 0.08,
-          slotHeight,
-          depth * 0.018,
-          '#1f2430',
-          new THREE.Vector3(0, depth * slotInsetFactor, panelHeight * 0.62),
-          { renderOrder: 18, bevelEnabled: false, curveSegments: 8 },
-        ),
-      );
-      group.add(
-        createRoundedLocalExtrudedMesh(
-          width * 0.08,
-          depth * 0.6,
-          slotHeight,
-          width * 0.018,
-          '#1f2430',
-          new THREE.Vector3(-width * slotInsetFactor, 0, panelHeight * 0.62),
-          { renderOrder: 18, bevelEnabled: false, curveSegments: 8 },
-        ),
-      );
-      group.add(
-        createRoundedLocalExtrudedMesh(
-          width * 0.08,
-          depth * 0.6,
-          slotHeight,
-          width * 0.018,
-          '#1f2430',
-          new THREE.Vector3(width * slotInsetFactor, 0, panelHeight * 0.62),
-          { renderOrder: 18, bevelEnabled: false, curveSegments: 8 },
-        ),
-      );
-      group.add(
-        createLocalBoxMesh(
-          width * 0.1,
-          depth * 0.02,
-          Math.max(4, panelHeight * 0.08),
-          palette.accent,
-          new THREE.Vector3(0, depth * 0.41, panelHeight * 0.68),
-          { renderOrder: 18 },
-        ),
-      );
-      group.add(
-        createLocalBoxMesh(
-          width * 0.16,
-          depth * 0.04,
-          Math.max(4, panelHeight * 0.08),
-          '#eef3f7',
-          new THREE.Vector3(0, -depth * 0.43, panelHeight * 0.58),
-          { renderOrder: 18 },
-        ),
-      );
-      group.add(
-        createRoundedLocalExtrudedMesh(
-          width * 0.1,
-          depth * 0.22,
-          Math.max(14, cassetteBodyHeight * 0.08),
-          depth * 0.02,
-          '#343b43',
-          new THREE.Vector3(
-            width * 0.36,
-            depth * 0.12,
-            bodyBaseZ + cassetteBodyHeight * 0.76,
+
+      // --- 4-way air discharge slots (dark openings on all 4 sides) ---
+      cassette.slots.forEach((slot) => {
+        group.add(
+          createRoundedLocalExtrudedMesh(
+            slot.width,
+            slot.depth,
+            slot.height,
+            slot.cornerRadius,
+            '#1a2030',
+            new THREE.Vector3(slot.x, slot.y, slot.z),
+            { renderOrder: 18, bevelEnabled: false, curveSegments: 8 },
           ),
-          {
-            bevelEnabled: false,
-            curveSegments: 8,
-            renderOrder: 18,
-          },
+        );
+      });
+
+      // Discharge vane blades inside each slot (3 per slot for realism)
+      cassette.vanes.forEach((vane) => {
+        group.add(
+          createLocalBoxMesh(
+            vane.width,
+            vane.depth,
+            vane.height,
+            '#d0d8e0',
+            new THREE.Vector3(vane.x, vane.y, vane.z),
+            { renderOrder: 19 },
+          ),
+        );
+      });
+
+      // --- Central return air grille ---
+      // Grille frame
+      group.add(
+        createRoundedLocalExtrudedMesh(
+          cassette.grille.size,
+          cassette.grille.size,
+          cassette.grille.frameHeight,
+          cassette.grille.cornerRadius,
+          '#cdd5dc',
+          new THREE.Vector3(cassette.grille.x, cassette.grille.y, cassette.grille.z),
+          { bevelEnabled: false },
         ),
       );
-      addHvacPipePort(group, {
-        anchor: new THREE.Vector3(
-          width * 0.4,
-          depth * 0.07,
-          bodyBaseZ + cassetteBodyHeight * 0.8,
-        ),
-        radius: Math.max(4, gasPipeDiameterMm / 2),
-        length: Math.max(28, width * 0.11),
-        color: '#c5894d',
+      // Horizontal grille slats (return air intake)
+      addVentSlats(group, {
+        count: cassette.grille.slatCount,
+        width: cassette.grille.slatSpan,
+        depth: 1.5,
+        height: 1.5,
+        startX: 0,
+        startY: -cassette.grille.slatInset,
+        startZ: cassette.grille.horizontalSlatZ,
+        stepY: cassette.grille.slatStep,
+        color: '#8a97a4',
       });
-      addHvacPipePort(group, {
-        anchor: new THREE.Vector3(
-          width * 0.4,
-          depth * 0.14,
-          bodyBaseZ + cassetteBodyHeight * 0.72,
-        ),
-        radius: Math.max(3, liquidPipeDiameterMm / 2),
-        length: Math.max(24, width * 0.095),
-        color: '#dca25d',
+      // Vertical grille slats (cross pattern)
+      addVentSlats(group, {
+        count: cassette.grille.slatCount,
+        width: 1.5,
+        depth: cassette.grille.slatSpan,
+        height: 1.5,
+        startX: -cassette.grille.slatInset,
+        startY: 0,
+        startZ: cassette.grille.verticalSlatZ,
+        stepX: cassette.grille.slatStep,
+        color: '#96a3af',
       });
-      addHvacPipePort(group, {
-        anchor: new THREE.Vector3(
-          width * 0.4,
-          depth * 0.2,
-          bodyBaseZ + cassetteBodyHeight * 0.62,
+
+      // Brand accent bar (small indicator strip)
+      group.add(
+        createLocalBoxMesh(
+          cassette.accentBar.width,
+          cassette.accentBar.depth,
+          cassette.accentBar.height,
+          palette.accent,
+          new THREE.Vector3(cassette.accentBar.x, cassette.accentBar.y, cassette.accentBar.z),
+          { renderOrder: 18 },
         ),
-        radius: Math.max(4, drainPipeDiameterMm / 2),
-        length: Math.max(32, width * 0.12),
-        color: '#8ec9ee',
-        collarColor: '#4b5563',
+      );
+      // Service label tab (bottom edge)
+      group.add(
+        createLocalBoxMesh(
+          cassette.serviceTab.width,
+          cassette.serviceTab.depth,
+          cassette.serviceTab.height,
+          '#eef3f7',
+          new THREE.Vector3(cassette.serviceTab.x, cassette.serviceTab.y, cassette.serviceTab.z),
+          { renderOrder: 18 },
+        ),
+      );
+
+      // --- Pipe connection junction box (where pipes exit the body) ---
+      group.add(
+        createRoundedLocalExtrudedMesh(
+          cassette.connectionPod.width,
+          cassette.connectionPod.depth,
+          cassette.connectionPod.height,
+          cassette.connectionPod.cornerRadius,
+          '#2d353d',
+          new THREE.Vector3(cassette.connectionPod.x, cassette.connectionPod.y, cassette.connectionPod.z),
+          { bevelEnabled: false, curveSegments: 8, renderOrder: 18 },
+        ),
+      );
+
+      // --- Pipe ports (gas, liquid, drain) with realistic sizing ---
+      cassette.pipePorts.forEach((port) => {
+        addHvacPipePort(group, {
+          anchor: new THREE.Vector3(port.x, port.y, port.z),
+          radius: port.radius,
+          length: port.length,
+          color: port.color,
+          collarColor: port.collarColor,
+          collarRadius: port.collarRadius,
+          collarLength: port.collarLength,
+          flangeColor: port.flangeColor,
+          flangeThickness: port.flangeThickness,
+        });
+        group.add(
+          createLocalCylinderMesh(
+            port.bandRadius,
+            port.bandRadius,
+            3,
+            port.bandColor,
+            new THREE.Vector3(
+              port.x + port.bandOffsetX,
+              port.y,
+              port.z,
+            ),
+            { rotation: new THREE.Euler(0, 0, Math.PI / 2), radialSegments: 16 },
+          ),
+        );
       });
       break;
     }
